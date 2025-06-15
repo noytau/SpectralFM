@@ -1,0 +1,14 @@
+name: SpectralFM
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - pandas
+      - matplotlib
+      - soundfile
+      - torch
+      - torchaudio
+      - transformers
