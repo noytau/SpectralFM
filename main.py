@@ -3,7 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # internal imports
-from data_parser import parse_directory_to_dict, inspect_multi_chnl_spectograms
+from data_parser import parse_directory_to_dict, inspect_chnl_spectograms, run_data_parser, summarize_data_overview
+from model_loader import load_and_apply_audio_model
 
 NOVA_SAMPLES_PATH = ('/mnt5/noy/nova_samples/')
 NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
@@ -12,18 +13,5 @@ NOVA_MULTI_CHNL = NOVA_SAMPLES_PATH + 'multi_chnl/'
 
 if __name__ == '__main__':
 
-    # fixme should it be one caller function that calls both?
-    # parse both directories
-    multi_data = parse_directory_to_dict(NOVA_MULTI_CHNL)
-    single_data = parse_directory_to_dict(NOVAL_SINGLE_CHNL)
-
-
-    # merge into one dict if needed
-    combined_data = {
-        "single": single_data,
-        "multi": multi_data
-    }
-
-    for filename, df in combined_data["multi"].items():
-        print(f"File: {filename}, Shape: {df.shape}")
-        inspect_multi_chnl_spectograms(df)
+    summarize_data_overview(run_data_parser())
+    #load_and_apply_audio_model()

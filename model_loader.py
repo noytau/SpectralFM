@@ -1,4 +1,5 @@
-from transformers import AutoFeatureExtractor, Data2VecVisionModel
+from transformers import AutoFeatureExtractor, Data2VecVisionModel, Data2VecAudioForAudioFrameClassification
+from datasets import load_dataset
 import torch
 
 
@@ -84,19 +85,25 @@ def apply_model_to_spectrogram(model, feature_extractor, spectrogram: torch.Tens
 
     return outputs.last_hidden_state  # Return the last hidden state as output
 
-if __name__ == "__main__":
-    # Example usage
-    model_name = "facebook/data2vec-vision-base"
-    # Assuming spectrogram is a torch.Tensor of shape (batch_size, channels, height, width)
-    spectrogram = torch.randn(1, 1, 1, 245)  # Example random spectrogram
+def load_and_apply_audio_model():
+    dataset = load_dataset("hf-internal-testing/librispeech_asr_demo", "clean", split="validation",
+                           trust_remote_code=True)
+    dataset = dataset.sort("id")
+    sampling_rate = dataset.features["audio"].sampling_rate
 
-    model, feature_extractor, masked_spectrogram = load_and_mask_spectrogram(model_name, spectrogram)
-    output = apply_model_to_spectrogram(model, feature_extractor, masked_spectrogram)
+    feature_extractor = AutoFeatureExtractor.from_pretrained("facebook/data2vec-audio-base-960h")
+    model = Data2VecAudioForAudioFrameClassification.from_pretrained("facebook/data2vec-audio-base-960h")
 
-    print("Masked Spectrogram Shape:", masked_spectrogram.shape)
-    print("Model Output Shape:", output.shape)
+    # audio file is decoded on the fly
+    inputs = feature_extractor(dataset[0]["audio"]["array"], return_tensors="pt", sampling_rate=sampling_rate)
+    with torch.no_grad():
+        logits = model(**inputs).logits
 
-    print("Model and feature extractor loaded successfully.")
+    probabilities = torch.sigmoid(logits[0])
+    # labels is a one-hot array of shape (num_frames, num_speakers)
+    labels = (probabilities > 0.5).long()
+    labels[0].tolist()
+
 
 
 
