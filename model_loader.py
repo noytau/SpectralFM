@@ -1,5 +1,9 @@
-from transformers import AutoFeatureExtractor, Data2VecVisionModel, Data2VecAudioForAudioFrameClassification
-from datasets import load_dataset
+from transformers import Data2VecAudioModel, AutoFeatureExtractor
+import torch
+from torch.utils.data import DataLoader
+from transformers import AutoFeatureExtractor, Data2VecAudioModel
+import torch
+from datasets import Dataset
 import numpy as np
 import random
 
@@ -121,4 +125,44 @@ def plot_masked_dataset_statistics(dataset, output_dir="plots"):
     plt.grid(True)
     plt.savefig(os.path.join(output_dir, "scatter_std_vs_mean_comparison.png"))
     plt.close()
+
+
+# Load Data2Vec Audio model and feature extractor
+def load_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
+    model = Data2VecAudioModel.from_pretrained(model_name)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return model.to(device), feature_extractor, device
+
+def normalize_to_audio_range(x):
+    return [2 * v - 1 for v in x]  # maps [0,1] → [-1,1]
+
+# Collate function for DataLoader
+def simple_collate_fn(batch, feature_extractor, device):
+    inputs = [sample["masked_data"] for sample in batch]
+    processed = feature_extractor(inputs, sampling_rate=16000, return_tensors="pt")
+    return {k: v.to(device) for k, v in processed.items()}
+
+# Run model on masked dataset
+def run_model_on_masked_dataset(dataset, model, feature_extractor, device, batch_size=8):
+    dataset = Dataset.from_dict(dataset)
+    dataloader = DataLoader(dataset, batch_size=batch_size, collate_fn=lambda b: simple_collate_fn(b, feature_extractor, device))
+    print(f"type of dataloader: {type(dataloader)}, type of dataset: {type(dataset)}")
+    print(dataset[0])
+    outputs = []
+    model.eval()
+    with torch.no_grad():
+        for batch in dataloader:
+            try:
+                out = model(**batch)
+                outputs.append(out.last_hidden_state.cpu())
+            except Exception as e:
+                print("Error processing batch:", e)
+                print("Batch keys:", batch.keys())
+                print("Batch shapes:", {k: v.shape for k, v in batch.items()})
+    return outputs
+
+# Example usage:
+# model, feature_extractor, device = load_data2vec_audio_model()
+# features = run_model_on_masked_dataset(masked_dataset, model, feature_extractor, device)
 
