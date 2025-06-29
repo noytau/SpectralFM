@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 # internal imports
 from data_parser import run_data_parser, summarize_data_overview, convert_to_huggingface_dataset
-from model_loader import mask_spectrogram, plot_masked_dataset_statistics
+from model_loader import mask_spectrogram, plot_masked_dataset_statistics, load_data2vec_audio_model, run_model_on_masked_dataset
 from datasets import Dataset
 import pandas as pd
 
@@ -21,4 +21,7 @@ if __name__ == '__main__':
     print(f"First 5 rows of single channel dataset:\n{sinle_chnl_hf_dataset[:5]}")
     masked_dataset = mask_spectrogram(sinle_chnl_hf_dataset)
     print(f"First 5 rows of masked single channel dataset:\n{sinle_chnl_hf_dataset[:5]}") # dataset now contains 3 columns: data, masked_data, mask_indices
-    plot_masked_dataset_statistics(masked_dataset, output_dir="plots/single_channel")
+    # plot_masked_dataset_statistics(masked_dataset, output_dir="plots/single_channel")
+    model, feature_extractor, device = load_data2vec_audio_model()
+    del masked_dataset["mask_indices"]  # Remove mask_indices column for model input
+    features = run_model_on_masked_dataset(masked_dataset, model, feature_extractor, device)
