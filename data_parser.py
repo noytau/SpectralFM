@@ -4,10 +4,11 @@ import matplotlib.pyplot as plt
 import logging
 import os
 from datetime import datetime
-
+from datasets import Dataset
 
 NOVA_SAMPLES_PATH = ('/mnt5/noy/nova_samples/')
-NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
+NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
+# NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
 NOVA_MULTI_CHNL = NOVA_SAMPLES_PATH + 'multi_chnl/'
 
 # Data parsing and inspection functions
@@ -154,27 +155,42 @@ def view_data_range(df, channel):
     else:
         print(f"Channel {channel} not found in DataFrame.")
 
+
+
 def run_data_parser():
     # parse both directories
-    multi_data = parse_directory_to_dict(NOVA_MULTI_CHNL)
+    # fixme divide this funcion into single and multi parser functions
+    #multi_data = parse_directory_to_dict(NOVA_MULTI_CHNL)
     single_data = parse_directory_to_dict(NOVAL_SINGLE_CHNL)
 
     # merge into one list if needed
-    combined_data = single_data + multi_data
+    #combined_data = single_data + multi_data
 
     all_dfs = []
 
-    for entry in combined_data:
+    for entry in single_data:
         df = entry['data']
         source = entry['source']
         channel_dfs = inspect_chnl_spectograms(df, source)
         all_dfs.extend(channel_dfs.values())
 
-    # Combine all DataFrames into one
+    # Combine all DataFrames into one large dataset
     final_df = pd.concat(all_dfs, ignore_index=True)
-    print(f"Final combined dataset shape: {final_df.shape}")
+    #final_df = Dataset.from_pandas(final_df) # convert to HuggingFace Dataset format
+    #dataset = final_df.map(lambda x: {"data": [x[f"f{i}"] for i in range(245)]}, remove_columns=final_df.column_names) # fixme remove
+    #dataset = final_df.map(lambda x: {"data": [x[f"{i}"] for i in range(245)]}, remove_columns=final_df.column_names)
+    print(f"Final combined dataset shape: {final_df.shape}") # merge all dfs together to one large df
     return final_df
 
+def convert_to_huggingface_dataset(df):
+    """
+    Convert a pandas DataFrame to a Hugging Face Dataset with 'data' as a list of values.
+
+    :param df: Pandas DataFrame to convert.
+    :return: Hugging Face Dataset with a single column 'data'.
+    """
+    data_dict = {"data": df.values.tolist()}
+    return Dataset.from_dict(data_dict)
 
 # DataFrame normalization/standardization utilities
 

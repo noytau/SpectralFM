@@ -3,8 +3,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # internal imports
-from data_parser import parse_directory_to_dict, inspect_chnl_spectograms, run_data_parser, summarize_data_overview
-from model_loader import load_and_apply_audio_model
+from data_parser import run_data_parser, summarize_data_overview, convert_to_huggingface_dataset
+from model_loader import mask_spectrogram, plot_masked_dataset_statistics
+from datasets import Dataset
+import pandas as pd
 
 NOVA_SAMPLES_PATH = ('/mnt5/noy/nova_samples/')
 NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
@@ -13,5 +15,10 @@ NOVA_MULTI_CHNL = NOVA_SAMPLES_PATH + 'multi_chnl/'
 
 if __name__ == '__main__':
 
-    summarize_data_overview(run_data_parser())
-    #load_and_apply_audio_model()
+    single_chnl_df = (run_data_parser()) # returns
+    # summarize_data_overview(single_chnl_df) enable to create a summary of the dataset
+    sinle_chnl_hf_dataset = convert_to_huggingface_dataset(single_chnl_df)
+    print(f"First 5 rows of single channel dataset:\n{sinle_chnl_hf_dataset[:5]}")
+    masked_dataset = mask_spectrogram(sinle_chnl_hf_dataset)
+    print(f"First 5 rows of masked single channel dataset:\n{sinle_chnl_hf_dataset[:5]}") # dataset now contains 3 columns: data, masked_data, mask_indices
+    plot_masked_dataset_statistics(masked_dataset, output_dir="plots/single_channel")
