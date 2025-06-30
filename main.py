@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 # internal imports
 from data_parser import run_data_parser, summarize_data_overview, convert_to_huggingface_dataset
-from model_loader import mask_spectrogram, plot_masked_dataset_statistics, load_data2vec_audio_model, run_model_on_masked_dataset
+from model_loader import mask_spectrogram, plot_masked_dataset_statistics, load_data2vec_audio_model, run_model_on_masked_dataset, train_self_supervised, evaluate_embeddings
 from datasets import Dataset
 import pandas as pd
 
@@ -24,4 +24,8 @@ if __name__ == '__main__':
     # plot_masked_dataset_statistics(masked_dataset, output_dir="plots/single_channel")
     model, feature_extractor, device = load_data2vec_audio_model()
     del masked_dataset["mask_indices"]  # Remove mask_indices column for model input
-    features = run_model_on_masked_dataset(masked_dataset, model, feature_extractor, device)
+    masked_dataset = Dataset.from_dict(masked_dataset)
+    #features = run_model_on_masked_dataset(masked_dataset, model, model.feature_extractor, device)
+
+    #train_self_supervised(model, model.feature_extractor, device, masked_dataset) #
+    #evaluate_embeddings(model, model.feature_extractor, device, masked_dataset)
