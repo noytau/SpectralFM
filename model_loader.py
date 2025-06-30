@@ -1,12 +1,12 @@
 from transformers import Data2VecAudioModel, AutoFeatureExtractor
 import torch
 from torch.utils.data import DataLoader
-from transformers import AutoFeatureExtractor, Data2VecAudioModel
+from transformers import Wav2Vec2FeatureExtractor, Data2VecAudioModel, AutoConfig, TrainingArguments, Data2VecAudioConfig
 import torch
 from datasets import Dataset
 import numpy as np
 import random
-
+from trainer import SelfSupervisedDataCollator, SelfSupervisedTrainer
 
 def mask_spectrogram(example, mask_ratio=0.15, mask_value=0.0):
     """
@@ -129,10 +129,37 @@ def plot_masked_dataset_statistics(dataset, output_dir="plots"):
 
 # Load Data2Vec Audio model and feature extractor
 def load_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
-    model = Data2VecAudioModel.from_pretrained(model_name)
-    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+    # config = AutoConfig.from_pretrained(model_name) fixme debug
+    config = Data2VecAudioConfig()
+    config.conv_feature_layers = [
+        [512, 5, 2],  # kernel=5, stride=2
+        [512, 3, 2],
+        [512, 3, 2],
+        [512, 2, 2]
+    ]
+
+    model = Data2VecAudioModel(config) # Initialize model with custom config
+    # feature_extractor = Wav2Vec2FeatureExtractor(
+    #     feature_size=1,
+    #     sampling_rate=16000, # fixme can be changed
+    #     padding_value=0.0,
+    #     return_attention_mask=True,
+    #     do_normalize=True
+    # )
+
+    print(model.config.conv_feature_layers)
+    print("Model conv layers:")
+    for i, layer in enumerate(model.feature_extractor.conv_layers):
+        print(f"Layer {i}: {layer}")
+
+    #print("Conv layers:", model.config.conv_feature_layers)
+
+    # fixme debug
+    #print("Feature extractor:", feature_extractor)
+
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return model.to(device), feature_extractor, device
+    return model.to(device), device
 
 def normalize_to_audio_range(x):
     return [2 * v - 1 for v in x]  # maps [0,1] → [-1,1]
@@ -161,6 +188,50 @@ def run_model_on_masked_dataset(dataset, model, feature_extractor, device, batch
                 print("Batch keys:", batch.keys())
                 print("Batch shapes:", {k: v.shape for k, v in batch.items()})
     return outputs
+
+def train_self_supervised(model, feature_extractor, device, dataset, output_dir="./pretrained_data2vec", num_epochs=5, batch_size=8, lr=1e-4):
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=batch_size,
+        num_train_epochs=num_epochs,
+        save_steps=100,
+        logging_steps=10,
+        learning_rate=lr,
+        remove_unused_columns=False
+    )
+
+    collator = SelfSupervisedDataCollator(feature_extractor, device)
+
+    trainer = SelfSupervisedTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        data_collator=collator)
+    #print("Masked device:", dataset["input_values"].device)
+    print("Starting self-supervised training...")
+    trainer.train()
+
+    print("Saving model...")
+    trainer.save_model(output_dir)
+    feature_extractor.save_pretrained(output_dir)
+    print(f"Model and feature extractor saved to {output_dir}")
+
+def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4):
+    collator = SelfSupervisedDataCollator(feature_extractor, device)
+    dataloader = DataLoader(dataset, batch_size=batch_size, collate_fn=collator, pin_memory=False)
+
+    model.eval()
+    print("Evaluating model embeddings on masked input...")
+
+    # fixme debug
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            outputs = model(**batch["masked_inputs"])
+            embeddings = outputs.last_hidden_state  # shape: (B, T, D)
+            print(f"\nBatch {i+1} — embeddings shape: {embeddings.shape}")
+            print(f"Mean: {embeddings.mean().item():.4f}, Std: {embeddings.std().item():.4f}")
+            break  # Show only one batch
 
 # Example usage:
 # model, feature_extractor, device = load_data2vec_audio_model()
