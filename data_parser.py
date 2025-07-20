@@ -8,7 +8,7 @@ from datasets import Dataset
 
 NOVA_SAMPLES_PATH = ('/mnt5/noy/nova_samples/')
 NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
-# NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
+#NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
 NOVA_MULTI_CHNL = NOVA_SAMPLES_PATH + 'multi_chnl/'
 
 # Data parsing and inspection functions
@@ -159,7 +159,7 @@ def view_data_range(df, channel):
 
 def run_data_parser():
     # parse both directories
-    # fixme divide this funcion into single and multi parser functions
+    # fixme divide this function into single and multi parser functions
     #multi_data = parse_directory_to_dict(NOVA_MULTI_CHNL)
     single_data = parse_directory_to_dict(NOVAL_SINGLE_CHNL)
 
