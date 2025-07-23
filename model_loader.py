@@ -10,6 +10,7 @@ import random
 from trainer import SelfSupervisedDataCollator, SelfSupervisedTrainer
 from compute_stats import compute_cosine_similarity_matrix_from_embeddings
 from customize_model import *
+import wandb
 
 def mask_spectrogram(example, mask_ratio=0.15, mask_value=0.0):
     """
@@ -383,10 +384,12 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
     sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
 
 
-def train_feature_extractor_only(model, optimizer, dataloader, device, num_epochs=5, batch_size=8):
+def train_feature_extractor_only(model, optimizer, dataloader, device, num_epochs=1, batch_size=8):
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
     """
+    wandb.init(project="SpectralFM", name="experiment-1")
+
     model.train()
     #dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     loss_fn = nn.MSELoss()
@@ -409,10 +412,12 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, num_epoch
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-
+            wandb.log({"epoch": epoch, "loss": loss, "total_loss": total_loss})
             #with torch.no_grad():
             #    for param_k, param_k in zip(model.named_parameters():
             #        param_k.data = ema_decay * param_k.data + (1 - ema_decay) * param_q.data
 
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        torch.save(model.state_dict(), "feature_extractor_trained.pt")
+        print(f"Model saved to feature_extractor_trained.pt")
