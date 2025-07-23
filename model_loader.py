@@ -9,6 +9,7 @@ import numpy as np
 import random
 from trainer import SelfSupervisedDataCollator, SelfSupervisedTrainer
 from compute_stats import compute_cosine_similarity_matrix_from_embeddings
+from customize_model import *
 
 def mask_spectrogram(example, mask_ratio=0.15, mask_value=0.0):
     """
@@ -188,30 +189,33 @@ def load_data2vec_new_model(model_name="facebook/data2vec-audio-base"):
     return model.to(device), device
 
 def load_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
-    model = Data2VecAudioModel.from_pretrained(model_name) # fixme consider using Data2VecAudioForPreTraining
-    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+    model = Data2VecAudioModel.from_pretrained(model_name)
+    # fixme add all these to a custom function
+    # change to 1 layer feature extractor
+    model.feature_extractor = CustomFeatureExtractor()
+    model.config.do_stft_input = True
+    # freeze all layers apart from feature extractor
+    for param in model.parameters():
+        param.requires_grad = False
+    for param in model.feature_extractor.parameters():
+        param.requires_grad = True
+    # Define optimizer for trainable params
+    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), lr=1e-4)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return model.to(device), feature_extractor, device
+    return model.to(device), model.feature_extractor,optimizer, device
 
 
 def normalize_to_audio_range(x):
     return [2 * v - 1 for v in x]  # maps [0,1] → [-1,1]
 
 # Collate function for DataLoader
-def simple_collate_fn_old(batch, feature_extractor, device): # fixme ?
-    inputs = [sample["masked_data"] for sample in batch]
-    processed = feature_extractor(inputs, sampling_rate=16000, return_tensors="pt")
-    return {k: v.to(device) for k, v in processed.items()}
-
 def simple_collate_fn(batch):
-    import torch
 
     data = [torch.tensor(sample["data"], dtype=torch.float32) for sample in batch]
     masked_data = [torch.tensor(sample["masked_data"], dtype=torch.float32) for sample in batch]
-
     return {
-        "data": torch.stack(data),           # Shape: [batch_size, 16000]
-        "masked_data": torch.stack(masked_data)  # Shape: [batch_size, 16000]
+        "data": torch.stack(data),
+        "masked_data": torch.stack(masked_data)
     }
 
 
@@ -237,7 +241,7 @@ TARGET_LENGTH = 16000  # 1 second at 16kHz
 
 # Preprocessing for pre-trained model
 
-def prepare_resampled_dataloader(df):
+def prepare_resampled_dataloader(df, interpolate_to_16k=True):
     """
     Takes a pandas DataFrame with N samples of length 245,
     stretches each row using resample_to_16k(), and returns a DataLoader.
@@ -251,11 +255,33 @@ def prepare_resampled_dataloader(df):
     resampled_tensors = []
     for i, row in df.iterrows():
         sample_dict = {"data": row.values.tolist()}
-        resampled = resample_to_16k(sample_dict)["data"]
+        if interpolate_to_16k:
+            resampled = resample_to_16k(sample_dict)["data"]
+        else:
+            resampled = sample_dict["data"]
         resampled_tensors.append(torch.tensor(resampled, dtype=torch.float32))
 
     all_data = torch.stack(resampled_tensors)  # shape: [N, 16000]
-    return all_data
+    dataloader = DataLoader(all_data, batch_size=8, collate_fn=simple_collate_fn)
+    return dataloader
+
+def prepare_masked_dataloader(df, interpolate_to_16k=True):
+    masked_dataset = []
+    for i, row in df.iterrows():
+        sample_dict = {"data": row.values.tolist()}
+        if interpolate_to_16k:
+            sample_dict = resample_to_16k(sample_dict)
+        original = torch.tensor(sample_dict["data"], dtype=torch.float32)
+        masked = original.clone()
+        indices = torch.randperm(masked.shape[0])[:int(0.15 * masked.shape[0])]
+        masked[indices] = 0.0
+        masked_dataset.append({
+            "data": original,
+            "masked_data": masked
+        })
+
+    dataloader = DataLoader(masked_dataset, batch_size=8, collate_fn=simple_collate_fn)
+    return dataloader
 
 def resample_to_16k(sample, original_sr=SOURCE_LENGTH, target_sr=TARGET_LENGTH): # stretches sample by interpolating a string from 245 to 16k to fit pre-trained model
     def resample_tensor(array):
@@ -355,7 +381,38 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
 
     # Compute + plot cosine similarity matrix
     sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
-# Example usage:
-# model, feature_extractor, device = load_data2vec_audio_model()
-# features = run_model_on_masked_dataset(masked_dataset, model, feature_extractor, device)
 
+
+def train_feature_extractor_only(model, optimizer, dataloader, device, num_epochs=5, batch_size=8):
+    """
+    Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
+    """
+    model.train()
+    #dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loss_fn = nn.MSELoss()
+
+    for epoch in range(num_epochs):
+        total_loss = 0.0
+        for batch in dataloader:
+            # Assume batch is a dict with 'data' and 'masked_data'
+            masked_inputs = batch["masked_data"].unsqueeze(1).to(device)
+            clean_inputs = batch["data"].unsqueeze(1).to(device)
+
+            optimizer.zero_grad()
+
+            student_out = model(masked_inputs).last_hidden_state
+
+            with torch.no_grad():
+                teacher_out = model(clean_inputs).last_hidden_state
+
+            loss = loss_fn(student_out, teacher_out)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+            #with torch.no_grad():
+            #    for param_k, param_k in zip(model.named_parameters():
+            #        param_k.data = ema_decay * param_k.data + (1 - ema_decay) * param_q.data
+
+        avg_loss = total_loss / len(dataloader)
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
