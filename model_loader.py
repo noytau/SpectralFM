@@ -242,7 +242,7 @@ TARGET_LENGTH = 16000  # 1 second at 16kHz
 
 # Preprocessing for pre-trained model
 
-def prepare_resampled_dataloader(df, interpolate_to_16k=True):
+def prepare_resampled_dataloader(df, interpolate_to_16k=True, batch_size=8):
     """
     Takes a pandas DataFrame with N samples of length 245,
     stretches each row using resample_to_16k(), and returns a DataLoader.
@@ -254,6 +254,7 @@ def prepare_resampled_dataloader(df, interpolate_to_16k=True):
         DataLoader: Torch-compatible DataLoader with resampled data.
     """
     resampled_tensors = []
+    df = normalize_to_audio_range(df["data"])
     for i, row in df.iterrows():
         sample_dict = {"data": row.values.tolist()}
         if interpolate_to_16k:
@@ -263,10 +264,10 @@ def prepare_resampled_dataloader(df, interpolate_to_16k=True):
         resampled_tensors.append(torch.tensor(resampled, dtype=torch.float32))
 
     all_data = torch.stack(resampled_tensors)  # shape: [N, 16000]
-    dataloader = DataLoader(all_data, batch_size=8, collate_fn=simple_collate_fn)
+    dataloader = DataLoader(all_data, batch_size=batch_size, collate_fn=simple_collate_fn)
     return dataloader
 
-def prepare_masked_dataloader(df, interpolate_to_16k=True):
+def prepare_masked_dataloader(df, interpolate_to_16k=True, mask_ratio=0.15, batch_size=8):
     masked_dataset = []
     for i, row in df.iterrows():
         sample_dict = {"data": row.values.tolist()}
@@ -274,14 +275,14 @@ def prepare_masked_dataloader(df, interpolate_to_16k=True):
             sample_dict = resample_to_16k(sample_dict)
         original = torch.tensor(sample_dict["data"], dtype=torch.float32)
         masked = original.clone()
-        indices = torch.randperm(masked.shape[0])[:int(0.15 * masked.shape[0])]
+        indices = torch.randperm(masked.shape[0])[:int(mask_ratio * masked.shape[0])]
         masked[indices] = 0.0
         masked_dataset.append({
             "data": original,
             "masked_data": masked
         })
 
-    dataloader = DataLoader(masked_dataset, batch_size=8, collate_fn=simple_collate_fn)
+    dataloader = DataLoader(masked_dataset, batch_size=batch_size, collate_fn=simple_collate_fn)
     return dataloader
 
 def resample_to_16k(sample, original_sr=SOURCE_LENGTH, target_sr=TARGET_LENGTH): # stretches sample by interpolating a string from 245 to 16k to fit pre-trained model
@@ -384,11 +385,11 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
     sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
 
 
-def train_feature_extractor_only(model, optimizer, dataloader, device, num_epochs=1, batch_size=8):
+def train_feature_extractor_only(model, optimizer, dataloader, device, mask_ratio=0.15, num_epochs=1, batch_size=8):
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
     """
-    wandb.init(project="SpectralFM", name="experiment-1")
+    wandb.init(project="SpectralFM", name=f"experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}")
 
     model.train()
     #dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -412,12 +413,13 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, num_epoch
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-            wandb.log({"epoch": epoch, "loss": loss, "total_loss": total_loss})
+            wandb.log({"epoch": epoch, "loss": loss})
             #with torch.no_grad():
             #    for param_k, param_k in zip(model.named_parameters():
             #        param_k.data = ema_decay * param_k.data + (1 - ema_decay) * param_q.data
 
         avg_loss = total_loss / len(dataloader)
+        wandb.log({"avg_loss": avg_loss})
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), "feature_extractor_trained.pt")
         print(f"Model saved to feature_extractor_trained.pt")

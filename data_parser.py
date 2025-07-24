@@ -5,9 +5,10 @@ import logging
 import os
 from datetime import datetime
 from datasets import Dataset
+import argparse
 
 NOVA_SAMPLES_PATH = ('/mnt5/noy/nova_samples/')
-NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
+#NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
 #NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
 NOVA_MULTI_CHNL = NOVA_SAMPLES_PATH + 'multi_chnl/'
 
@@ -157,11 +158,11 @@ def view_data_range(df, channel):
 
 
 
-def run_data_parser():
+def run_data_parser(samples_path):
     # parse both directories
     # fixme divide this function into single and multi parser functions
     #multi_data = parse_directory_to_dict(NOVA_MULTI_CHNL)
-    single_data = parse_directory_to_dict(NOVAL_SINGLE_CHNL)
+    single_data = parse_directory_to_dict(samples_path)
 
     # merge into one list if needed
     #combined_data = single_data + multi_data
@@ -271,3 +272,20 @@ def summarize_data_overview(df):
     # logger, log_path = setup_logger() # Uncomment to enable logging
     describe_dataset(df)
     plot_1d_spectrogram(df, num_samples=3)
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', action='store_true', help='Use debug_chnl directory')
+    parser.add_argument('--test', action='store_true', help='Use single_chnl directory')
+    args = parser.parse_args()
+
+    if args.debug:
+        NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
+    elif args.test:
+        NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
+    else:
+        raise ValueError("Please specify either --debug or --test")
+
+    run_data_parser()
