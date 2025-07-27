@@ -8,7 +8,6 @@ from datasets import Dataset
 import numpy as np
 import random
 from trainer import SelfSupervisedDataCollator, SelfSupervisedTrainer
-from compute_stats import compute_cosine_similarity_matrix_from_embeddings
 from customize_model import *
 import wandb
 
@@ -44,115 +43,6 @@ def mask_spectrogram(example, mask_ratio=0.15, mask_value=0.0):
 # Visualization of masked dataset statistics
 import matplotlib.pyplot as plt
 import os
-
-def calculate_means_and_stds(dataset):
-    """
-    Calculate means and standard deviations for original, masked, and their difference.
-    Returns:
-        means, stds, masked_means, masked_stds, diff_means, diff_stds
-    """
-    data = np.array(dataset["data"])
-    masked_data = np.array(dataset["masked_data"])
-    means = np.mean(data, axis=0)
-    stds = np.std(data, axis=0)
-    masked_means = np.mean(masked_data, axis=0)
-    masked_stds = np.std(masked_data, axis=0)
-    diff = data - masked_data
-    diff_means = np.mean(diff, axis=0)
-    diff_stds = np.std(diff, axis=0)
-    return means, stds, masked_means, masked_stds, diff_means, diff_stds
-
-def plot_mean_std_comparison(means, stds, masked_means, masked_stds, output_dir):
-    plt.figure()
-    plt.plot(means, label='Mean')
-    plt.fill_between(range(len(means)), means - stds, means + stds, alpha=0.3, label='Std')
-    plt.title("Mean and Std of Original Data")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, "mean_std_data.png"))
-    plt.close()
-
-    plt.figure()
-    plt.plot(masked_means, label='Mean')
-    plt.fill_between(range(len(masked_means)), masked_means - masked_stds, masked_means + masked_stds, alpha=0.3, label='Std')
-    plt.title("Mean and Std of Masked Data")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, "mean_std_masked_data.png"))
-    plt.close()
-
-def plot_diff_statistics(diff_means, diff_stds, output_dir):
-    plt.figure()
-    plt.plot(diff_means, label='Mean Difference')
-    plt.fill_between(range(len(diff_means)), diff_means - diff_stds, diff_means + diff_stds, alpha=0.3, label='Std Difference')
-    plt.title("Mean and Std of Difference (Original - Masked)")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, "mean_std_difference.png"))
-    plt.close()
-
-def plot_individual_spectrograms(dataset, output_dir):
-    data = np.array(dataset["data"])
-    masked_data = np.array(dataset["masked_data"])
-    for i in range(min(5, data.shape[0])):
-        plt.figure()
-        plt.plot(data[i], label='Original')
-        plt.plot(masked_data[i], label='Masked', linestyle='--')
-        plt.title(f"Spectrogram {i}: Original vs Masked")
-        plt.legend()
-        plt.savefig(os.path.join(output_dir, f"spectrogram_{i}_compare.png"))
-        plt.close()
-
-def plot_masking_frequency(dataset, output_dir):
-    data = np.array(dataset["data"])
-    mask_counts = np.zeros(data.shape[1], dtype=int)
-    for _, col in dataset["mask_indices"]:
-        mask_counts[col] += 1
-    plt.figure()
-    plt.bar(range(len(mask_counts)), mask_counts)
-    plt.title("Mask Frequency per Index (0-244)")
-    plt.xlabel("Index")
-    plt.ylabel("Masked Count")
-    plt.savefig(os.path.join(output_dir, "mask_frequency.png"))
-    plt.close()
-
-def plot_masked_dataset_statistics(dataset, output_dir="plots"):
-    """
-    Plots statistics and visualizations from a masked Hugging Face dataset.
-
-    Args:
-        dataset: A Hugging Face dataset with 'data', 'masked_data', and 'mask_indices'.
-        output_dir (str): Directory where the plots will be saved.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    # means, stds, masked_means, masked_stds, diff_means, diff_stds = calculate_means_and_stds(dataset)
-    # plot_mean_std_comparison(means, stds, masked_means, masked_stds, output_dir)
-    # plot_diff_statistics(diff_means, diff_stds, output_dir)
-    # plot_individual_spectrograms(dataset, output_dir)
-    # plot_masking_frequency(dataset, output_dir)
-
-    # 6. Plot scatter plot of std vs mean for original data
-    data = np.array(dataset["data"])
-    masked_data = np.array(dataset["masked_data"])
-    plt.figure()
-    plt.scatter(np.mean(data, axis=1), np.std(data, axis=1), s=10, alpha=0.7, color='blue', label='Original')
-    plt.xlabel("Mean")
-    plt.ylabel("Standard Deviation")
-    plt.title("Std vs Mean (Original vs Masked)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, "scatter_std_vs_mean_data.png"))
-    plt.close()
-
-    # 7. Plot scatter plot of std vs mean for original and masked data and the difference
-    plt.figure()
-    plt.scatter(np.mean(data, axis=1), np.std(data, axis=1), s=10, alpha=0.7, color='blue', label='Original')
-    plt.scatter(np.mean(masked_data, axis=1), np.std(masked_data, axis=1), s=10, alpha=0.7, color='orange', label='Masked')
-    plt.xlabel("Mean")
-    plt.ylabel("Standard Deviation")
-    plt.title("Std vs Mean (Original vs Masked)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(output_dir, "scatter_std_vs_mean_comparison.png"))
-    plt.close()
 
 
 # Load Data2Vec Audio model and feature extractor
@@ -206,8 +96,10 @@ def load_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     return model.to(device), model.feature_extractor,optimizer, device
 
 
-def normalize_to_audio_range(x):
-    return [2 * v - 1 for v in x]  # maps [0,1] → [-1,1]
+def normalize_to_audio_range(df):
+    df = df.copy()
+    df = df.apply(lambda row: [2 * float(v) - 1 for v in row])
+    return df
 
 # Collate function for DataLoader
 def simple_collate_fn(batch):
@@ -269,6 +161,7 @@ def prepare_resampled_dataloader(df, interpolate_to_16k=True, batch_size=8):
 
 def prepare_masked_dataloader(df, interpolate_to_16k=True, mask_ratio=0.15, batch_size=8):
     masked_dataset = []
+    df = normalize_to_audio_range(df)
     for i, row in df.iterrows():
         sample_dict = {"data": row.values.tolist()}
         if interpolate_to_16k:
@@ -283,7 +176,7 @@ def prepare_masked_dataloader(df, interpolate_to_16k=True, mask_ratio=0.15, batc
         })
 
     dataloader = DataLoader(masked_dataset, batch_size=batch_size, collate_fn=simple_collate_fn)
-    return dataloader
+    return dataloader, masked_dataset
 
 def resample_to_16k(sample, original_sr=SOURCE_LENGTH, target_sr=TARGET_LENGTH): # stretches sample by interpolating a string from 245 to 16k to fit pre-trained model
     def resample_tensor(array):
@@ -305,33 +198,6 @@ def compute_mask_indices(batch_size, sequence_length, mask_prob=0.05, mask_lengt
             mask[b, start:start+mask_length] = True
     return mask
 
-# Run model on masked dataset - initial test, used for running on masked data
-def run_model_on_dataset(dataset, model, feature_extractor, device, batch_size=8):
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size)
-    print(f"type of dataloader: {type(dataloader)}, type of dataset: {type(dataset)}")
-    print(dataset[0])
-    outputs = []
-    embeddings =[]
-    model.eval()
-    with torch.no_grad():
-        for batch in dataloader:
-            batch = batch.to(device)
-            try:
-                out = model(input_values=batch)
-                emb = out.last_hidden_state.mean(dim=1)  # [B, D]
-                embeddings.append(emb.cpu())
-                outputs.append(out.last_hidden_state.cpu())
-            except Exception as e:
-                print("Error processing batch:", e)
-                print("Batch keys:", batch.keys())
-                print("Batch shapes:", {k: v.shape for k, v in batch.items()})
-    # Stack into one tensor: [N, D]
-    embeddings = torch.cat(embeddings, dim=0)
-
-    # Compute + plot cosine similarity matrix
-    sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
-
-    return outputs
 
 def train_self_supervised(model, feature_extractor, device, dataset, output_dir="./pretrained_data2vec", num_epochs=5, batch_size=8, lr=1e-4):
 
@@ -392,7 +258,6 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
     wandb.init(project="SpectralFM", name=f"experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}")
 
     model.train()
-    #dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     loss_fn = nn.MSELoss()
 
     for epoch in range(num_epochs):
@@ -421,5 +286,47 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
         avg_loss = total_loss / len(dataloader)
         wandb.log({"avg_loss": avg_loss})
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
-        torch.save(model.state_dict(), "feature_extractor_trained.pt")
-        print(f"Model saved to feature_extractor_trained.pt")
+    torch.save(model.state_dict(), f"experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}_feature_extractor_trained.pt")
+    print(f"Model saved to experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}_feature_extractor_trained.pt")
+
+def evaluate_embedding_from_model(model, dataloader, model_path, device, batch_size=8):
+    """
+    Loads a saved Data2VecAudioModel from model_path, runs it on the provided dataset, and computes embeddings and similarities.
+    model_path : path to raw weights file
+    """
+
+    model.load_state_dict(torch.load(model_path), strict=False)
+
+    outputs = []
+    embeddings = []
+    model.eval()
+    with torch.no_grad():
+        for batch in dataloader:
+            # If batch is a dict, get "data" or "masked_data", else assume tensor
+            if isinstance(batch, dict):
+                # Prefer "masked_data" if present, else "data"
+                if "masked_data" in batch:
+                    input_tensor = batch["masked_data"]
+                else:
+                    input_tensor = batch["data"]
+            else:
+                input_tensor = batch
+            input_tensor = input_tensor.unsqueeze(1).to(device)
+            try:
+                out = model(input_values=input_tensor)
+                emb = out.last_hidden_state.mean(dim=1)  # [B, D]
+                embeddings.append(emb.cpu())
+                outputs.append(out.last_hidden_state.cpu())
+            except Exception as e:
+                print("Error processing batch:", e)
+                if isinstance(batch, dict):
+                    print("Batch keys:", batch.keys())
+                    print("Batch shapes:", {k: v.shape for k, v in batch.items()})
+                else:
+                    print("Batch shape:", batch.shape)
+    embeddings = torch.cat(embeddings, dim=0)
+
+    # Compute + plot cosine similarity matrix
+    sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
+
+    return outputs

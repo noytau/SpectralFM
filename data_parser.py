@@ -208,14 +208,6 @@ def standardize_dataframe(df):
     return (df - df.mean()) / df.std()
 
 
-# Additional utility functions
-def describe_dataset(df):
-    """
-    Print basic statistics for each column in the DataFrame.
-    """
-    print("DataFrame Statistics:")
-    print(df.describe())
-
 def count_missing_values(df):
     """
     Print the number of missing (NaN) values in each column.
@@ -243,35 +235,6 @@ def setup_logger(log_dir="logs", prefix="run"):
     logger.addHandler(fh)
     return logger, log_filename
 
-def plot_1d_spectrogram(df, title="1D Spectrogram", num_samples=5):
-    """
-    Plot sample 1D spectrograms from the DataFrame.
-    Assumes each row is a 1D spectrogram.
-    """
-    import matplotlib.pyplot as plt
-    import os
-
-    plot_dir = os.path.join(os.getcwd(), "plots")
-    os.makedirs(plot_dir, exist_ok=True)
-
-    for i in range(min(num_samples, len(df))):
-        plt.figure()
-        plt.plot(df.iloc[i].values)
-        plt.title(f"{title} - Sample {i}")
-        plt.xlabel("Time")
-        plt.ylabel("Amplitude")
-        plt.grid(True)
-        plot_path = os.path.join(plot_dir, f"sample_{i}.png")
-        plt.savefig(plot_path)
-        plt.close()
-
-def summarize_data_overview(df):
-    """
-    Display summary statistics, missing value counts, and sample plots.
-    """
-    # logger, log_path = setup_logger() # Uncomment to enable logging
-    describe_dataset(df)
-    plot_1d_spectrogram(df, num_samples=3)
 
 if __name__ == "__main__":
     import argparse
