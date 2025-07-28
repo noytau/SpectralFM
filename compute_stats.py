@@ -63,6 +63,11 @@ class Stats:
         self.plot_embeddings_with_similar_highlighted(pre_train_embeddings, post_train_embeddings, original_model_embeddings, selected_refs)
         self.plot_similar_spectrograms(selected_refs)
 
+        # cosing similarities
+        self.compute_cosine_similarity_matrix_from_embeddings(original_model_embeddings, name="cosine_similarity_original_model_embeddings")
+        self.compute_cosine_similarity_matrix_from_embeddings(pre_train_embeddings, name="cosine_similarity_pre_train_embeddings")
+        self.compute_cosine_similarity_matrix_from_embeddings(post_train_embeddings, name="cosine_similarity_post_train_embeddings")
+
     def compute_cosine_similarity_matrix(self, name="cosine_similarity_spectogram"):
 
         dataset = self.dataset

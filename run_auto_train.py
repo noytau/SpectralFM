@@ -3,8 +3,8 @@ from itertools import product
 
 # Define the options
 epochs = [1, 2]
-batch_sizes = [8, 16, 32, 64, 128]
-mask_ratios = [0.15, 0.20, 0.25]
+batch_sizes = [16, 20]
+mask_ratios = [0.20, 0.30]
 
 # Generate all combinations
 combinations = list(product(epochs, batch_sizes, mask_ratios))
