@@ -79,7 +79,7 @@ def load_data2vec_new_model(model_name="facebook/data2vec-audio-base"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(device), device
 
-def load_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
+def load_custom_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
     # fixme add all these to a custom function
     # change to 1 layer feature extractor
@@ -95,6 +95,11 @@ def load_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(device), model.feature_extractor,optimizer, device
 
+def load_original_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
+    model = Data2VecAudioModel.from_pretrained(model_name)
+    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), lr=1e-4)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return model.to(device), model.feature_extractor,optimizer, device
 
 def normalize_to_audio_range(df):
     df = df.copy()
@@ -114,17 +119,7 @@ def simple_collate_fn(batch):
 
 TARGET_LENGTH = 16000  # 16 kHz
 
-# def pad_to_16k(example):
-#     data = np.array(example["masked_data"])
-#     if len(data) < TARGET_LENGTH:
-#         # Pad with zeros at the end
-#         padded = np.pad(data, (0, TARGET_LENGTH - len(data)), mode='constant')
-#     else:
-#         # Truncate if somehow too long
-#         padded = data[:TARGET_LENGTH]
-#     return {"masked_data": padded.tolist()}
 
-from datasets import Dataset
 import numpy as np
 import scipy.signal
 import torch.nn.functional as F
@@ -199,34 +194,6 @@ def compute_mask_indices(batch_size, sequence_length, mask_prob=0.05, mask_lengt
     return mask
 
 
-def train_self_supervised(model, feature_extractor, device, dataset, output_dir="./pretrained_data2vec", num_epochs=5, batch_size=8, lr=1e-4):
-
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        per_device_train_batch_size=batch_size,
-        num_train_epochs=num_epochs,
-        save_steps=100,
-        logging_steps=10,
-        learning_rate=lr,
-        remove_unused_columns=False
-    )
-
-    collator = SelfSupervisedDataCollator(feature_extractor, device)
-
-    trainer = SelfSupervisedTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        data_collator=collator)
-    #print("Masked device:", dataset["input_values"].device)
-    print("Starting self-supervised training...")
-    trainer.train()
-
-    print("Saving model...")
-    trainer.save_model(output_dir)
-    feature_extractor.save_pretrained(output_dir)
-    print(f"Model and feature extractor saved to {output_dir}")
-
 def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4):
     collator = SelfSupervisedDataCollator(feature_extractor, device)
     dataloader = DataLoader(dataset, batch_size=batch_size, collate_fn=collator, pin_memory=False)
@@ -255,7 +222,11 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
     """
-    wandb.init(project="SpectralFM", name=f"experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}")
+    model_string = f"/mnt5/noy/code/logs/experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}"
+
+    wandb.init(project="SpectralFM", name=model_string)
+
+    torch.save(model.state_dict(), f"{model_string}_model_before_training.pt")
 
     model.train()
     loss_fn = nn.MSELoss()
@@ -286,16 +257,18 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
         avg_loss = total_loss / len(dataloader)
         wandb.log({"avg_loss": avg_loss})
         print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
-    torch.save(model.state_dict(), f"experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}_feature_extractor_trained.pt")
-    print(f"Model saved to experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}_feature_extractor_trained.pt")
+    torch.save(model.state_dict(), f"{model_string}_model_after_training.pt")
+    print(f"Model saved to experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}_model_after_training.pt")
+    return model_string
 
-def evaluate_embedding_from_model(model, dataloader, model_path, device, batch_size=8):
+def evaluate_embedding_from_model(model, dataloader, device, batch_size=8, model_path=""):
     """
     Loads a saved Data2VecAudioModel from model_path, runs it on the provided dataset, and computes embeddings and similarities.
     model_path : path to raw weights file
     """
 
-    model.load_state_dict(torch.load(model_path), strict=False)
+    if model_path != "": # If a model path is provided, load the model state
+        model.load_state_dict(torch.load(model_path), strict=False)
 
     outputs = []
     embeddings = []
@@ -326,7 +299,28 @@ def evaluate_embedding_from_model(model, dataloader, model_path, device, batch_s
                     print("Batch shape:", batch.shape)
     embeddings = torch.cat(embeddings, dim=0)
 
-    # Compute + plot cosine similarity matrix
-    sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
+    return outputs, embeddings
 
-    return outputs
+def extract_embeddings(model, dataloader, device):
+    """
+    Extract embeddings from the model for the given dataloader.
+    Used to compare embeddings before and after training.
+    """
+    model.eval()
+    embeddings = []
+    with torch.no_grad():
+        for batch in dataloader:
+            # If batch is a dict, get "data" or "masked_data", else assume tensor
+            if isinstance(batch, dict):
+                # Prefer "masked_data" if present, else "data"
+                if "masked_data" in batch:
+                    input_tensor = batch["masked_data"]
+                else:
+                    input_tensor = batch["data"]
+            else:
+                input_tensor = batch
+            out = model(input_values=input_tensor)
+            emb = out.last_hidden_state.mean(dim=1)  # [B, D]
+            embeddings.append(emb.cpu())
+        embeddings = torch.cat(embeddings, dim=0)
+    return embeddings
