@@ -44,7 +44,7 @@ class Stats:
         self.plot_1d_spectrogram()
         self.plot_masked_spectrograms()
         self.scatterplot_mean_vs_std()
-        self.compute_cosine_similarity_matrix()
+        # self.compute_cosine_similarity_matrix()
 
     # Post model evaluate phase
     def plot_model_stats(self, model, pre_train_embeddings, post_train_embeddings, original_model_embeddings):
@@ -64,9 +64,9 @@ class Stats:
         self.plot_similar_spectrograms(selected_refs)
 
         # cosing similarities
-        self.compute_cosine_similarity_matrix_from_embeddings(original_model_embeddings, name="cosine_similarity_original_model_embeddings")
-        self.compute_cosine_similarity_matrix_from_embeddings(pre_train_embeddings, name="cosine_similarity_pre_train_embeddings")
-        self.compute_cosine_similarity_matrix_from_embeddings(post_train_embeddings, name="cosine_similarity_post_train_embeddings")
+        # self.compute_cosine_similarity_matrix_from_embeddings(original_model_embeddings, name="cosine_similarity_original_model_embeddings")
+        # self.compute_cosine_similarity_matrix_from_embeddings(pre_train_embeddings, name="cosine_similarity_pre_train_embeddings")
+        # self.compute_cosine_similarity_matrix_from_embeddings(post_train_embeddings, name="cosine_similarity_post_train_embeddings")
 
     def compute_cosine_similarity_matrix(self, name="cosine_similarity_spectogram"):
 
