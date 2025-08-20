@@ -3,25 +3,40 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
-import datetime
+import seaborn as sns
+import umap
+import matplotlib.pyplot as plt
 
-PLOTS_DIR = "plots"
+# internal imports
+from data_parser import *
+from model_loader import *
+
+PLOTS_DIR = "/mnt5/noy/code/plots"
 
 class Stats:
     """
     Used to plot graphs, collect statistics on data.
     """
     def __init__(self, df, argparse=None):
+        import datetime
 
         self.df = df
         date_str = datetime.datetime.now().date().isoformat()
-        experiment_string = f"experiment-{date_str}_mask{argparse.mask_ratio}-epoch{argparse.epoch}_batch{argparse.batch_size}" # fixme noy consider including len of dataset
+        if argparse:
+            experiment_string = argparse.model_path.split('/')[-1]
+            experiment_string = "experiment-" + experiment_string # fixme noy consider including len of dataset
+        else:
+            experiment_string = f"experiment-{date_str}"
         output_dir = os.path.join(PLOTS_DIR, experiment_string)
         self.output_dir = output_dir
 
         os.makedirs(output_dir, exist_ok=True) # make dir incase its missing
+        print(f"Output directory for plots: {output_dir}")
 
     def pass_dataset(self, dataset):
         self.dataset = dataset
@@ -44,7 +59,6 @@ class Stats:
         self.plot_1d_spectrogram()
         self.plot_masked_spectrograms()
         self.scatterplot_mean_vs_std()
-        self.compute_cosine_similarity_matrix()
 
     # Post model evaluate phase
     def plot_model_stats(self, model, pre_train_embeddings, post_train_embeddings, original_model_embeddings):
@@ -53,24 +67,39 @@ class Stats:
         self.post_train_embeddings = post_train_embeddings
         self.original_model_embeddings = original_model_embeddings
 
-        similar_spectograms = self.get_top_m_with_k_similar_fast()
-        self.plot_similar_spectrograms(similar_spectograms)
-        #embeddings_for_similar_spectograms = self.extract_embeddings_from_results_fn(embeddings, similar_spectograms)
-        #self.compare_and_visualize_embeddings(embeddings_for_similar_spectograms)
+        # Get top-k neighbors for every sample
+        similar_spectograms = self.get_top_m_with_k_similar_fast(m=len(self.dataset), k=10, method='cosine')
 
         # Get selected refs from export_similarity_l2_stats and filter for plotting
-        selected_refs = self.export_similarity_l2_stats(k=5, method='cosine', filename="similarity_l2_stats.csv")
+        selected_refs = self.export_similarity_l2_stats(similar_spectograms, method='cosine', filename="similarity_l2_stats.csv")
         self.plot_embeddings_with_similar_highlighted(pre_train_embeddings, post_train_embeddings, original_model_embeddings, selected_refs)
         self.plot_similar_spectrograms(selected_refs)
 
+
+        #selected_list = self.extract_grouped_refs(selected_refs)
+
         # cosing similarities
-        self.compute_cosine_similarity_matrix_from_embeddings(original_model_embeddings, name="cosine_similarity_original_model_embeddings")
-        self.compute_cosine_similarity_matrix_from_embeddings(pre_train_embeddings, name="cosine_similarity_pre_train_embeddings")
-        self.compute_cosine_similarity_matrix_from_embeddings(post_train_embeddings, name="cosine_similarity_post_train_embeddings")
+        #for neighbors in selected_list:
+        #    self.compute_cosine_similarity_matrix(neighbors)
+        #    self.compute_cosine_similarity_matrix_from_embeddings(neighbors, original_model_embeddings, name="cosine_similarity_original_model_embeddings")
+        #    self.compute_cosine_similarity_matrix_from_embeddings(neighbors, pre_train_embeddings, name="cosine_similarity_pre_train_embeddings")
+        #    self.compute_cosine_similarity_matrix_from_embeddings(neighbors, post_train_embeddings, name="cosine_similarity_post_train_embeddings")
 
-    def compute_cosine_similarity_matrix(self, name="cosine_similarity_spectogram"):
+    def extract_grouped_refs(self, selected_refs):
+        """
+        From selected_refs {ref_idx: [(neighbor_idx, score), ...]},
+        create a list of lists where each list starts with the ref_idx followed by its neighbors.
+        Example: [[0, 5, 8], [1, 3]]
+        """
+        return [
+            [ref_idx] + [neighbor_idx for neighbor_idx, _ in neighbors]
+            for ref_idx, neighbors in selected_refs.items()
+        ]
 
-        dataset = self.dataset
+    def compute_cosine_similarity_matrix(self, selected_indices=None, name="cosine_similarity_spectogram"):
+        if selected_indices is None:
+            selected_indices = list(range(len(self.dataset)))
+        dataset = [self.dataset[i] for i in selected_indices]
         # Get all data from the specified column
         data_tensor = torch.stack([sample["data"] for sample in dataset])
 
@@ -94,12 +123,18 @@ class Stats:
 
         return sim_matrix
 
-    def compute_cosine_similarity_matrix_from_embeddings(self, embeddings, name="cosine_similarity_embedding"):
+    def compute_cosine_similarity_matrix_from_embeddings(self, embeddings, selected_indices=None, name="cosine_similarity_embedding"):
         """
         embeddings: Tensor of shape [N, D], e.g. from model output (mean pooled or CLS token)
         """
         if not isinstance(embeddings, torch.Tensor):
             embeddings = torch.tensor(embeddings, dtype=torch.float32)
+
+        if selected_indices is None:
+            selected_indices = list(range(embeddings.shape[0]))
+
+        selected_indices = torch.tensor(selected_indices, dtype=torch.long)
+        embeddings = embeddings[selected_indices]
 
         # Normalize embeddings
         normalized = torch.nn.functional.normalize(embeddings, p=2, dim=1)
@@ -297,6 +332,76 @@ class Stats:
         plt.axis("equal")
         plt.show()
 
+    def cluster_embeddings(self, embeddings, n_clusters=5):
+        """
+        Clusters the embeddings using KMeans and visualizes the clusters.
+
+        Parameters:
+        - embeddings: Tensor of shape [N, D], containing embedding vectors
+        - n_clusters: Number of clusters to form
+
+        Returns:
+        - labels: Cluster labels for each embedding
+        """
+        from sklearn.cluster import KMeans
+        from sklearn.manifold import TSNE
+
+        embeddings_np = embeddings.cpu().numpy()
+
+        # Step 1: Cluster in original space
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        labels = kmeans.fit_predict(embeddings_np)
+
+        # Step 2: Optional PCA to speed up t-SNE
+        pca = PCA(n_components=50)
+        pca_embeddings = pca.fit_transform(embeddings_np)
+
+        # Step 3: t-SNE for visualization
+        tsne_embeddings = TSNE(n_components=2, random_state=42).fit_transform(pca_embeddings)
+
+        # Step 3: UMAP for visualization
+        umap_embeddings = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42).fit_transform(pca_embeddings)
+
+        # Step 4: Plot
+        palette = sns.color_palette("hls", n_colors=n_clusters)
+
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(x=tsne_embeddings[:, 0], y=tsne_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
+        plt.title(f"KMeans Clustering (on raw embeddings), Visualized in t-SNE — n={n_clusters}")
+        plt.xlabel("tSNE-1")
+        plt.ylabel("tSNE-2")
+        #plt.legend(title="Cluster")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_tsne_n{n_clusters}.png"))
+        plt.close()
+
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(x=umap_embeddings[:, 0], y=umap_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
+        plt.title(f"KMeans Clustering (on raw embeddings), Visualized in UMAP — n={n_clusters}")
+        plt.xlabel("UMAP-1")
+        plt.ylabel("UMAP-2")
+        #plt.legend(title="Cluster")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_umap_n{n_clusters}.png"))
+        plt.close()
+
+    def find_optimal_k(self, embeddings, k_range=range(2, 15)):
+        embeddings_np = embeddings.cpu().numpy()
+        best_k = None
+        best_score = -1
+        for k in k_range:
+            kmeans = KMeans(n_clusters=k, random_state=42)
+            labels = kmeans.fit_predict(embeddings_np)
+            score = silhouette_score(embeddings_np, labels)
+            print(f"n_clusters={k}, silhouette_score={score:.4f}")
+            if score > best_score:
+                best_k = k
+                best_score = score
+        print(f"✅ Best k: {best_k} (score: {best_score:.4f})")
+        return best_k
+
     def compare_and_visualize_embeddings(self, embedding_results):
         """
         For each reference embedding, compares it to all of its neighbors
@@ -449,7 +554,7 @@ class Stats:
             plt.savefig(os.path.join(self.output_dir, f"embedding{ref_idx}_similar_highlighted_after_training.png"))
             plt.close()
 
-    def export_similarity_l2_stats(self, k=5, method='cosine', filename="similarity_l2_stats.csv"):
+    def export_similarity_l2_stats(self, results, method='cosine', filename="similarity_l2_stats.csv"):
         """
         For each sample in the dataset, finds its k most similar neighbors (by the given method),
         computes average L2 distances (to all, to neighbors) for pre- and post-train embeddings,
@@ -457,8 +562,7 @@ class Stats:
         """
         import pandas as pd
         from numpy.linalg import norm
-        # Get top-k neighbors for every sample
-        results = self.get_top_m_with_k_similar_fast(m=len(self.dataset), k=5, method=method)
+
         original_model_embeddings_np = self.original_model_embeddings.cpu().numpy()
         pre_embeddings_np = self.pre_train_embeddings.cpu().numpy()
         post_embeddings_np = self.post_train_embeddings.cpu().numpy()
@@ -531,3 +635,37 @@ class Stats:
         ))
         selected_refs_dict = {ref_idx: results[ref_idx] for ref_idx in selected_ref_indices}
         return selected_refs_dict
+def get_input_path_from_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default='/mnt5/noy/code/weights/experiment-mask=0.3-epoch=1_batch=16_loss_fn=mse_datalen=1000000_model_before_training.pt', help='Path to saved model')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for training')
+    parser.add_argument('--batch_size', type=int, default=16, help='Size of training batch')
+    parser.add_argument('--mask_ratio', type=float, default=0.15, help='Masking ratio')
+
+    args = parser.parse_args()
+    return args
+
+
+if __name__ == "__main__":
+    parse_args = get_input_path_from_args()
+    samples_path = NOVA_SAMPLES_PATH + 'one_chnl/' # fixme!
+    single_chnl_df = run_data_parser(samples_path)  # returns df
+    # init stats class to plot and compute data
+    stats = Stats(df=single_chnl_df, argparse=parse_args)
+
+    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(parse_args.learning_rate)
+    dataloader, masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=False, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
+
+    stretched_dataloader, stretched_masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=True, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
+    original_model, original_feature_extractor, _, _ = load_custom_data2vec_audio_model()
+
+    stats.pass_dataset(masked_dataset)
+    stats.plot_dataset_stats()
+
+    pre_train_outputs, pre_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, parse_args.batch_size)
+    original_model_outputs, original_model_embeddings = evaluate_embedding_from_model(original_model, stretched_dataloader, device, parse_args.batch_size)
+
+    post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=parse_args.model_path)
+    #stats.plot_model_stats(model, pre_train_embeddings, post_train_embeddings, original_model_embeddings)
+    best_k = stats.find_optimal_k(post_train_embeddings, k_range=range(20, 500))
+    stats.cluster_embeddings(post_train_embeddings, best_k)

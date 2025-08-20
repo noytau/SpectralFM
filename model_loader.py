@@ -10,6 +10,8 @@ import random
 from trainer import SelfSupervisedDataCollator, SelfSupervisedTrainer
 from customize_model import *
 import wandb
+import mlflow
+import mlflow.pytorch
 
 def mask_spectrogram(example, mask_ratio=0.15, mask_value=0.0):
     """
@@ -65,10 +67,10 @@ def load_data2vec_new_model(model_name="facebook/data2vec-audio-base"):
     #     do_normalize=True
     # )
 
-    print(model.config.conv_feature_layers)
-    print("Model conv layers:")
-    for i, layer in enumerate(model.feature_extractor.conv_layers):
-        print(f"Layer {i}: {layer}")
+    #print(model.config.conv_feature_layers)
+    #print("Model conv layers:")
+    #for i, layer in enumerate(model.feature_extractor.conv_layers):
+    #    print(f"Layer {i}: {layer}")
 
     #print("Conv layers:", model.config.conv_feature_layers)
 
@@ -79,7 +81,7 @@ def load_data2vec_new_model(model_name="facebook/data2vec-audio-base"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(device), device
 
-def load_custom_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
+def load_custom_data2vec_audio_model(lr=1e-4, model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
     # fixme add all these to a custom function
     # change to 1 layer feature extractor
@@ -91,7 +93,7 @@ def load_custom_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     for param in model.feature_extractor.parameters():
         param.requires_grad = True
     # Define optimizer for trainable params
-    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), lr)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(device), model.feature_extractor,optimizer, device
 
@@ -218,47 +220,59 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
     sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
 
 
-def train_feature_extractor_only(model, optimizer, dataloader, device, mask_ratio=0.15, num_epochs=1, batch_size=8):
+def train_feature_extractor_only(model, optimizer, dataloader, device, mask_ratio=0.15, num_epochs=1, batch_size=8, loss="MSE", run_id=-11):
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
     """
-    model_string = f"/mnt5/noy/code/logs/experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}"
+    model_string = f"experiment-mask={mask_ratio}-epoch={num_epochs}_batch={batch_size}_loss_fn={loss}_datalen={len(dataloader.dataset)}"
+    model_path = f"/mnt5/noy/code/weights/{model_string}"
 
-    wandb.init(project="SpectralFM", name=model_string)
+    wandb.init(project="SpectralFM", name=model_string) # fixme remove once done migrating to mlflow
 
-    torch.save(model.state_dict(), f"{model_string}_model_before_training.pt")
+    torch.save(model.state_dict(), f"{model_path}_model_before_training.pt")
 
     model.train()
-    loss_fn = nn.MSELoss()
+    if loss == "mse":
+        loss_fn = nn.MSELoss()
+    elif loss == "cosine":
+        loss_fn = lambda x, y: 1 - nn.functional.cosine_similarity(x, y, dim=-1).mean()
 
-    for epoch in range(num_epochs):
-        total_loss = 0.0
-        for batch in dataloader:
-            # Assume batch is a dict with 'data' and 'masked_data'
-            masked_inputs = batch["masked_data"].unsqueeze(1).to(device)
-            clean_inputs = batch["data"].unsqueeze(1).to(device)
+    with mlflow.start_run(run_name="train_feature_extractor_only"):
+        for epoch in range(num_epochs):
+            total_loss = 0.0
+            for batch in dataloader:
+                # Assume batch is a dict with 'data' and 'masked_data'
+                masked_inputs = batch["masked_data"].unsqueeze(1).to(device)
+                clean_inputs = batch["data"].unsqueeze(1).to(device)
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
 
-            student_out = model(masked_inputs).last_hidden_state
+                student_out = model(masked_inputs).last_hidden_state
 
-            with torch.no_grad():
-                teacher_out = model(clean_inputs).last_hidden_state
+                with torch.no_grad():
+                    teacher_out = model(clean_inputs).last_hidden_state
 
-            loss = loss_fn(student_out, teacher_out)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            wandb.log({"epoch": epoch, "loss": loss})
-            #with torch.no_grad():
-            #    for param_k, param_k in zip(model.named_parameters():
-            #        param_k.data = ema_decay * param_k.data + (1 - ema_decay) * param_q.data
+                loss = loss_fn(student_out, teacher_out)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+                wandb.log({"epoch": epoch, "loss": loss})
+                #with torch.no_grad():
+                #    for param_k, param_k in zip(model.named_parameters():
+                #        param_k.data = ema_decay * param_k.data + (1 - ema_decay) * param_q.data
 
-        avg_loss = total_loss / len(dataloader)
-        wandb.log({"avg_loss": avg_loss})
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
-    torch.save(model.state_dict(), f"{model_string}_model_after_training.pt")
-    print(f"Model saved to experiment-mask{mask_ratio}-epoch{num_epochs}_batch{batch_size}_datalen{len(dataloader.dataset)}_model_after_training.pt")
+            avg_loss = total_loss / len(dataloader)
+            print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+            wandb.log({"avg_loss": avg_loss})
+            wandb.log({"run_id": run_id})
+
+
+
+    # Save model
+    torch.save(model.state_dict(), f"{model_path}_model_after_training.pt")
+    mlflow.log_artifact(f"{model_path}_model_after_training.pt")
+
+    print(f"Model saved to {model_path}_model_after_training.pt")
     return model_string
 
 def evaluate_embedding_from_model(model, dataloader, device, batch_size=8, model_path=""):
