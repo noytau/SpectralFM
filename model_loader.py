@@ -220,6 +220,16 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
     sim_matrix = compute_cosine_similarity_matrix_from_embeddings(embeddings)
 
 
+def train_model(df, args):
+
+    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args.learning_rate)
+    dataloader, masked_dataset = prepare_masked_dataloader(df, interpolate_to_16k=False,
+                                                           mask_ratio=args.mask_ratio,
+                                                           batch_size=args.batch_size)
+    model_string = train_feature_extractor_only(model, optimizer, dataloader, device, args.mask_ratio, args.epoch, args.batch_size, args.loss_function, args.run_id)
+    model_path = f"{model_string}_model_after_training.pt"
+    return model_path
+
 def train_feature_extractor_only(model, optimizer, dataloader, device, mask_ratio=0.15, num_epochs=1, batch_size=8, loss="MSE", run_id=-11):
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.

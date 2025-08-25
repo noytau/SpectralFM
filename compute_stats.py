@@ -387,6 +387,63 @@ class Stats:
         plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_umap_n{n_clusters}.png"))
         plt.close()
 
+    def compare_clustering_algorithms(self, embeddings, n_clusters=5):
+        from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering, SpectralClustering
+        from sklearn.mixture import GaussianMixture
+        from sklearn.decomposition import PCA
+        from sklearn.metrics import silhouette_score
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import os
+
+        import umap
+        from sklearn.manifold import TSNE
+
+        embeddings_np = embeddings.cpu().numpy()
+
+        # Optional PCA to 50 dims
+        pca = PCA(n_components=50)
+        embeddings_pca = pca.fit_transform(embeddings)
+
+        # Reduce to 2D for visualization
+        tsne = TSNE(n_components=2, random_state=42)
+        tsne_embeddings = tsne.fit_transform(embeddings_pca)
+
+        umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+        umap_embeddings = umap_model.fit_transform(embeddings_pca)
+
+        algorithms = {
+            "KMeans": KMeans(n_clusters=n_clusters, random_state=42),
+            "Agglomerative": AgglomerativeClustering(n_clusters=n_clusters),
+            "Spectral": SpectralClustering(n_clusters=n_clusters, affinity='nearest_neighbors', random_state=42),
+            "GMM": GaussianMixture(n_components=n_clusters, random_state=42),
+            "DBSCAN": DBSCAN(eps=0.1, min_samples=5)
+        }
+
+        for name, algo in algorithms.items():
+            if name == "GMM":
+                labels = algo.fit_predict(embeddings)
+            else:
+                labels = algo.fit(embeddings).labels_
+
+            # Optional: compute silhouette if labels are valid
+            try:
+                score = silhouette_score(embeddings, labels)
+                print(f"[{name}] Silhouette score: {score:.4f}")
+            except:
+                print(f"[{name}] Silhouette score: could not be computed")
+
+            for method, reduced in zip(["tsne", "umap"], [tsne_embeddings, umap_embeddings]):
+                plt.figure(figsize=(8, 6))
+                sns.scatterplot(x=reduced[:, 0], y=reduced[:, 1], hue=labels, palette="hls", s=50, legend=False)
+                plt.title(f"{name} Clustering visualized with {method.upper()}")
+                plt.xlabel(f"{method.upper()}-1")
+                plt.ylabel(f"{method.upper()}-2")
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(os.path.join(self.output_dir, f"{name.lower()}_{method}_clustering.png"))
+                plt.close()
+
     def find_optimal_k(self, embeddings, k_range=range(2, 15)):
         embeddings_np = embeddings.cpu().numpy()
         best_k = None
@@ -648,7 +705,7 @@ def get_input_path_from_args():
 
 if __name__ == "__main__":
     parse_args = get_input_path_from_args()
-    samples_path = NOVA_SAMPLES_PATH + 'one_chnl/' # fixme!
+    samples_path = NOVA_SAMPLES_PATH + 'debug_chnl/' # fixme!
     single_chnl_df = run_data_parser(samples_path)  # returns df
     # init stats class to plot and compute data
     stats = Stats(df=single_chnl_df, argparse=parse_args)
@@ -667,5 +724,6 @@ if __name__ == "__main__":
 
     post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=parse_args.model_path)
     #stats.plot_model_stats(model, pre_train_embeddings, post_train_embeddings, original_model_embeddings)
-    best_k = stats.find_optimal_k(post_train_embeddings, k_range=range(20, 500))
-    stats.cluster_embeddings(post_train_embeddings, best_k)
+    #best_k = stats.find_optimal_k(post_train_embeddings, k_range=range(10, 100))
+    #stats.cluster_embeddings(post_train_embeddings, best_k)
+    stats.compare_clustering_algorithms(post_train_embeddings, 10)

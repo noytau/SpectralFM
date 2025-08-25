@@ -32,7 +32,8 @@ def get_input_path_from_args():
         samples_path = NOVA_SAMPLES_PATH + 'one_chnl/'
     elif args.test_dir == 'large':
         samples_path = NOVA_SAMPLES_PATH + 'full_chnl/'
-
+    else: # if not stated, use debug
+        samples_path = NOVA_SAMPLES_PATH + 'debug_chnl/'
     return samples_path, args
 
 if __name__ == '__main__':
@@ -43,20 +44,3 @@ if __name__ == '__main__':
     #summarize_data_overview(single_chnl_df)
     model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(parse_args.learning_rate)
     dataloader, masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=False, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
-
-    # fixme separate to train and evaluate/comput functions
-    # stretched_dataloader, stretched_masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=True, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
-    # original_model, original_feature_extractor, _, _ = load_custom_data2vec_audio_model()
-
-    # stats.pass_dataset(masked_dataset)
-    # stats.plot_dataset_stats()
-
-    # pre_train_outputs, pre_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, parse_args.batch_size)
-    # original_model_outputs, original_model_embeddings = evaluate_embedding_from_model(original_model, stretched_dataloader, device, parse_args.batch_size)
-
-
-    # compute_cosine_similarity_matrix(dataset)  # optional
-    model_string = train_feature_extractor_only(model, optimizer, dataloader, device, parse_args.mask_ratio, parse_args.epoch, parse_args.batch_size, parse_args.loss_function, parse_args.run_id)
-    model_path = f"{model_string}_model_after_training.pt"
-    # post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=model_path)
-    # stats.plot_model_stats(model, pre_train_embeddings, post_train_embeddings, original_model_embeddings)
