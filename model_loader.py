@@ -81,11 +81,11 @@ def load_data2vec_new_model(model_name="facebook/data2vec-audio-base"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(device), device
 
-def load_custom_data2vec_audio_model(lr=1e-4, model_name="facebook/data2vec-audio-base"):
+def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
     # fixme add all these to a custom function
     # change to 1 layer feature extractor
-    model.feature_extractor = CustomFeatureExtractor()
+    model.feature_extractor = CustomFeatureExtractor(args.arch)
     model.config.do_stft_input = True
     # freeze all layers apart from feature extractor
     for param in model.parameters():
@@ -93,7 +93,7 @@ def load_custom_data2vec_audio_model(lr=1e-4, model_name="facebook/data2vec-audi
     for param in model.feature_extractor.parameters():
         param.requires_grad = True
     # Define optimizer for trainable params
-    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), lr)
+    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), args.learning_rate)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return model.to(device), model.feature_extractor,optimizer, device
 
@@ -222,7 +222,7 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
 
 def train_model(df, args):
 
-    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args.learning_rate)
+    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args)
     dataloader, masked_dataset = prepare_masked_dataloader(df, interpolate_to_16k=False,
                                                            mask_ratio=args.mask_ratio,
                                                            batch_size=args.batch_size)

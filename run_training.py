@@ -25,13 +25,13 @@ class ExperimentRunner:
             "large": base + "full_chnl/"
         }.get(test_dir, base + "debug_chnl/")
 
-    def run_experiment(self, run_id, debug=False):
+    def run_experiment(self, run_id, cli_args=None):
         row = self.df[self.df["Run ID"] == run_id].iloc[0]
 
         # create an Args-like object for compatibility
         class Args:
             pass
-
+        # Parse args from csv tracking file
         args = Args()
         args.run_id = int(row["Run ID"])
         args.learning_rate = float(row["LR"])
@@ -39,13 +39,21 @@ class ExperimentRunner:
         args.batch_size = int(row["Batch Size"])
         args.epoch = int(row["Epochs"])
         args.loss_function = str(row["Loss Function"])
-        if debug:
-            args.test_dir = "small"
-        elif "Test Dir" in row and pd.notna(row["Test Dir"]):
-            args.test_dir = row["Test Dir"]
-        else:
-            args.test_dir = "medium"
 
+        # Support args from CLI for development process
+        if cli_args != None:
+            # running dir - if running in debug mode, use small dir (100K)
+            if getattr(cli_args, "debug", False):
+                args.test_dir = "small"
+            elif "Test Dir" in row and pd.notna(row["Test Dir"]):
+                args.test_dir = row["Test Dir"]
+            else:
+                args.test_dir = "medium"
+
+            if getattr(cli_args, "arch", False):
+                args.arch = cli_args.arch
+            elif row["FE Architecture"] in row and pd.notna(row["FE Architecture"]):
+                args.arch = row["FE Architecture"]
 
         samples_path = self.get_samples_path(args.test_dir)
         # parse data
@@ -60,10 +68,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_path", type=str, default="/mnt5/noy/code/logs/runs_tracking.csv")
     parser.add_argument("--run_id", type=int, default=1)
+    parser.add_argument("--arch", type=str, help="Feature extractor architecture (overrides CSV if provided)")
     parser.add_argument("--debug", action="store_true", help="Run in debug mode (test_dir = small)")
     args = parser.parse_args()
 
     runner = ExperimentRunner(csv_path=args.csv_path)
 
     # directly run training logic
-    runner.run_experiment(args.run_id, debug=args.debug)
+    runner.run_experiment(args.run_id, args)
