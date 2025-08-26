@@ -52,8 +52,10 @@ class ExperimentRunner:
 
             if getattr(cli_args, "arch", False):
                 args.arch = cli_args.arch
-            elif row["FE Architecture"] in row and pd.notna(row["FE Architecture"]):
+            elif "FE Architecture" in row.index and pd.notna(row["FE Architecture"]):
                 args.arch = row["FE Architecture"]
+            else:
+                args.arch = "conv1d"
 
         samples_path = self.get_samples_path(args.test_dir)
         # parse data
