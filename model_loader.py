@@ -156,7 +156,72 @@ def prepare_resampled_dataloader(df, interpolate_to_16k=True, batch_size=8):
     dataloader = DataLoader(all_data, batch_size=batch_size, collate_fn=simple_collate_fn)
     return dataloader
 
-def prepare_masked_dataloader(df, interpolate_to_16k=True, mask_ratio=0.15, batch_size=8):
+def apply_masking(original, mask_ratio=0.15, masking_type="random"):
+    """
+    Applies masking to a 1D tensor.
+
+    Args:
+        original (Tensor): 1D input tensor.
+        mask_ratio (float): Ratio of elements to mask.
+        masking_type (str): "random", "span", or "low_energy".
+        span_length (int): Only used for span masking.
+
+    Returns:
+        Tensor: Masked version of original.
+    """
+    masked = original.clone()
+
+    if masking_type == "random" or masking_type == None:
+        indices = torch.randperm(masked.shape[0])[:int(mask_ratio * masked.shape[0])]
+        masked[indices] = 0.0
+
+    elif masking_type == "span":
+        total_to_mask = int(mask_ratio * len(masked))
+        max_span_length = len(masked) // 4  # or just set a cap like 40
+        masked_so_far = 0
+        used = set()
+
+        while masked_so_far < total_to_mask:
+            span_length = random.randint(10, max_span_length)
+            if masked_so_far + span_length > total_to_mask:
+                span_length = total_to_mask - masked_so_far
+            start = random.randint(0, len(masked) - span_length)
+
+            # avoid overlapping spans
+            if any(i in used for i in range(start, start + span_length)):
+                continue
+
+            for i in range(start, start + span_length):
+                masked[i] = 0.0
+                used.add(i)
+            masked_so_far += span_length
+
+    elif masking_type == "low_energy":
+        energy = original.abs()
+        threshold = torch.quantile(energy, mask_ratio)
+        masked[energy < threshold] = 0.0
+
+    elif masking_type == "high_energy":
+        energy = original.abs()
+        threshold = torch.quantile(energy, mask_ratio)
+        masked[energy > threshold] = 0.0
+
+    # fixme: add other masking techniques here: multi-channel and labels (seed_id)
+
+    else:
+        raise ValueError(f"Unknown masking type: {masking_type}")
+
+    return masked
+
+def safe_get(args, attr, default):
+    return default if args is None or not hasattr(args, attr) or getattr(args, attr) is None else getattr(args, attr)
+
+
+def prepare_masked_dataloader(df, interpolate_to_16k=True, args=None):
+    mask_ratio = safe_get(args,"mask_ratio", 0.15)
+    batch_size = safe_get(args,"batch_size", 8)
+    masking_type = safe_get(args,"masking_type", "random")
+
     masked_dataset = []
     df = normalize_to_audio_range(df)
     for i, row in df.iterrows():
@@ -164,9 +229,8 @@ def prepare_masked_dataloader(df, interpolate_to_16k=True, mask_ratio=0.15, batc
         if interpolate_to_16k:
             sample_dict = resample_to_16k(sample_dict)
         original = torch.tensor(sample_dict["data"], dtype=torch.float32)
-        masked = original.clone()
-        indices = torch.randperm(masked.shape[0])[:int(mask_ratio * masked.shape[0])]
-        masked[indices] = 0.0
+        masked = apply_masking(original, mask_ratio=mask_ratio, masking_type=masking_type)
+
         masked_dataset.append({
             "data": original,
             "masked_data": masked
@@ -223,9 +287,7 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
 def train_model(df, args):
 
     model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args)
-    dataloader, masked_dataset = prepare_masked_dataloader(df, interpolate_to_16k=False,
-                                                           mask_ratio=args.mask_ratio,
-                                                           batch_size=args.batch_size)
+    dataloader, masked_dataset = prepare_masked_dataloader(df, interpolate_to_16k=False, args=args)
     model_string = train_feature_extractor_only(model, optimizer, dataloader, device, args.mask_ratio, args.epoch, args.batch_size, args.loss_function, args.run_id)
     model_path = f"{model_string}_model_after_training.pt"
     return model_path

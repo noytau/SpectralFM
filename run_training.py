@@ -57,6 +57,13 @@ class ExperimentRunner:
             else:
                 args.arch = "conv1d"
 
+            if getattr(cli_args, "masking_type", None):
+                args.masking_type = cli_args.masking_type
+            elif "Masking Type" in row.index and pd.notna(row["Masking Type"]):
+                args.masking_type = row["Masking Type"]
+            else:
+                args.masking_type = "random"
+
         samples_path = self.get_samples_path(args.test_dir)
         # parse data
         df = run_data_parser(samples_path)
@@ -71,6 +78,8 @@ if __name__ == "__main__":
     parser.add_argument("--csv_path", type=str, default="/mnt5/noy/code/logs/runs_tracking.csv")
     parser.add_argument("--run_id", type=int, default=1)
     parser.add_argument("--arch", type=str, help="Feature extractor architecture (overrides CSV if provided)")
+    parser.add_argument("--masking_type", type=str, help="Masking technique")
+
     parser.add_argument("--debug", action="store_true", help="Run in debug mode (test_dir = small)")
     args = parser.parse_args()
 
