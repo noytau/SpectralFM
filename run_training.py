@@ -39,7 +39,7 @@ class ExperimentRunner:
         args.batch_size = int(row["Batch Size"])
         args.epoch = int(row["Epochs"])
         args.loss_function = str(row["Loss Function"])
-        args.test_dir = "medium"  # or from CSV if you store it
+        args.test_dir = "small"  # or from CSV if you store it
 
         samples_path = self.get_samples_path(args.test_dir)
         # parse data

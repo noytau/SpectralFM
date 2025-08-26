@@ -242,6 +242,8 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
     torch.save(model.state_dict(), f"{model_path}_model_before_training.pt")
 
     model.train()
+
+    # fixme: add here conatrastive and triplet loss once I get pseudo-labels (seeds)
     if loss == "mse":
         loss_fn = nn.MSELoss()
     elif loss == "cosine":
@@ -267,9 +269,7 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
                 optimizer.step()
                 total_loss += loss.item()
                 wandb.log({"epoch": epoch, "loss": loss})
-                #with torch.no_grad():
-                #    for param_k, param_k in zip(model.named_parameters():
-                #        param_k.data = ema_decay * param_k.data + (1 - ema_decay) * param_q.data
+
 
             avg_loss = total_loss / len(dataloader)
             print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
