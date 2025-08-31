@@ -175,6 +175,12 @@ def apply_masking(original, mask_ratio=0.15, masking_type="random"):
         indices = torch.randperm(masked.shape[0])[:int(mask_ratio * masked.shape[0])]
         masked[indices] = 0.0
 
+    elif masking_type == "grid":
+        step = int(1 / mask_ratio)
+        for i in range(0, len(masked), step):
+            if i < len(masked):
+                masked[i] = 0.0
+
     elif masking_type == "span":
         total_to_mask = int(mask_ratio * len(masked))
         max_span_length = len(masked) // 4  # or just set a cap like 40
