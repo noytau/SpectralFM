@@ -302,7 +302,7 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
     """
-    model_string = f"experiment-mask={mask_ratio}-epoch={num_epochs}_batch={batch_size}_loss_fn={loss}_datalen={len(dataloader.dataset)}"
+    model_string = f"experiment_2-mask={mask_ratio}-epoch={num_epochs}_batch={batch_size}_loss_fn={loss}_datalen={len(dataloader.dataset)}"
     model_path = f"/mnt5/noy/code/weights/{model_string}"
 
     wandb.init(project="SpectralFM", name=model_string) # fixme remove once done migrating to mlflow
