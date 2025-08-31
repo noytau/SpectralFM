@@ -320,7 +320,7 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
                 clean_inputs = batch["data"].unsqueeze(1).to(device)
 
                 optimizer.zero_grad()
-
+                # fixme add gradual learning rate increase + look at theirs training loop (consider theirs training loop)
                 student_out = model(masked_inputs).last_hidden_state
 
                 with torch.no_grad():

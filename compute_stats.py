@@ -59,6 +59,7 @@ class Stats:
         self.plot_1d_spectrogram()
         self.plot_masked_spectrograms()
         self.scatterplot_mean_vs_std()
+        self.compute_cosine_similarity_matrix(name="cosine_similarity_spectogram_all_data")
 
     # Post model evaluate phase
     def plot_model_stats(self, model, pre_train_embeddings, post_train_embeddings, original_model_embeddings):
@@ -71,10 +72,12 @@ class Stats:
         similar_spectograms = self.get_top_m_with_k_similar_fast(m=len(self.dataset), k=10, method='cosine')
 
         # Get selected refs from export_similarity_l2_stats and filter for plotting
-        selected_refs = self.export_similarity_l2_stats(similar_spectograms, method='cosine', filename="similarity_l2_stats.csv")
-        self.plot_embeddings_with_similar_highlighted(pre_train_embeddings, post_train_embeddings, original_model_embeddings, selected_refs)
-        self.plot_similar_spectrograms(selected_refs)
+        # selected_refs = self.export_similarity_l2_stats(similar_spectograms, method='cosine', filename="similarity_l2_stats.csv")
+        # self.plot_embeddings_with_similar_highlighted(pre_train_embeddings, post_train_embeddings, original_model_embeddings, selected_refs)
+        # self.plot_similar_spectrograms(selected_refs)
 
+        self.compute_cosine_similarity_matrix_from_embeddings(embeddings=post_train_embeddings,
+                                                              name="cosine_similarity_post_train_embeddings")
 
         #selected_list = self.extract_grouped_refs(selected_refs)
 
@@ -109,17 +112,25 @@ class Stats:
         # Compute cosine similarity matrix
         sim_matrix = torch.matmul(normalized, normalized.T).cpu().numpy()
 
-        # Plot heatmap
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(sim_matrix, cmap="viridis", xticklabels=False, yticklabels=False)
-        plt.title(f"Cosine Similarity Heatmap ({name})")
-        plt.xlabel("Sample Index")
-        plt.ylabel("Sample Index")
-        plt.tight_layout()
-        #plt.show()
-        #plt.grid(True)
-        plt.savefig(os.path.join(self.output_dir, f"{name}.png"))
-        plt.close()
+        # Compute Softmax
+        # softmax_sim_matrix = np.exp(sim_matrix) / np.sum(np.exp(sim_matrix), axis=1, keepdims=True)
+        sim_matrix = torch.tensor(sim_matrix, dtype=torch.float32)  # if it's a NumPy array
+        T = 0.1  # Temperature parameter
+        softmax_sim_matrix = torch.softmax(sim_matrix/T, dim=1)
+
+
+        for matrix in [sim_matrix,softmax_sim_matrix]:
+            # Plot heatmap
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(matrix, cmap="viridis", xticklabels=False, yticklabels=False)
+            plt.title(f"Cosine Similarity Heatmap (Inputs) - with softmax" if matrix is softmax_sim_matrix else f"Cosine Similarity Heatmap (Inputs)")
+            plt.xlabel("Sample Index")
+            plt.ylabel("Sample Index")
+            plt.tight_layout()
+            #plt.show()
+            #plt.grid(True)
+            plt.savefig(os.path.join(self.output_dir, f"{name}_with_softmax.png" if matrix is softmax_sim_matrix else os.path.join(self.output_dir, f"{name}.png")))
+            plt.close()
 
         return sim_matrix
 
@@ -142,18 +153,23 @@ class Stats:
         # Compute cosine similarity
         sim_matrix = torch.matmul(normalized, normalized.T).cpu().numpy()
 
+        # Pass to Softmax
+        softmax_sim_matrix = np.exp(sim_matrix) / np.sum(np.exp(sim_matrix), axis=1, keepdims=True)
+
         # Plot heatmap
-        indices = list(range(embeddings.shape[0]))
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(sim_matrix, cmap="viridis", xticklabels=False, yticklabels=False)
-        plt.title("Cosine Similarity Heatmap (Embeddings)")
-        plt.xlabel("Sample Index")
-        plt.ylabel("Sample Index")
-        plt.tight_layout()
-        #plt.show()
-        #plt.grid(True)
-        plt.savefig(os.path.join(self.output_dir, f"{name}.png"))
-        plt.close()
+        for matrix in [sim_matrix,softmax_sim_matrix]:
+
+            indices = list(range(embeddings.shape[0]))
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(sim_matrix, cmap="viridis", xticklabels=False, yticklabels=False)
+            plt.title(f"Cosine Similarity Heatmap (Embeddings) - Softmax" if matrix is softmax_sim_matrix else f"Cosine Similarity Heatmap (Embeddings)")
+            plt.xlabel("Sample Index")
+            plt.ylabel("Sample Index")
+            plt.tight_layout()
+            #plt.show()
+            #plt.grid(True)
+            plt.savefig(os.path.join(self.output_dir, f"{name} - softmax.png" if matrix is softmax_sim_matrix else os.path.join(self.output_dir, f"{name}.png")))
+            plt.close()
 
         return sim_matrix
 
@@ -698,6 +714,8 @@ def get_input_path_from_args():
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for training')
     parser.add_argument('--batch_size', type=int, default=16, help='Size of training batch')
     parser.add_argument('--mask_ratio', type=float, default=0.15, help='Masking ratio')
+    parser.add_argument("--arch", type=str, default='conv1d', help="Feature extractor architecture (overrides CSV if provided)")
+    parser.add_argument("--masking_type", type=str, help="Masking technique")
 
     args = parser.parse_args()
     return args
@@ -710,20 +728,20 @@ if __name__ == "__main__":
     # init stats class to plot and compute data
     stats = Stats(df=single_chnl_df, argparse=parse_args)
 
-    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(parse_args.learning_rate)
-    dataloader, masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=False, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
+    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(parse_args)
+    dataloader, masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=False, args=parse_args)
 
-    stretched_dataloader, stretched_masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=True, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
-    original_model, original_feature_extractor, _, _ = load_custom_data2vec_audio_model()
+    #stretched_dataloader, stretched_masked_dataset = prepare_masked_dataloader(single_chnl_df, interpolate_to_16k=True, mask_ratio=parse_args.mask_ratio, batch_size=parse_args.batch_size)
+    #original_model, original_feature_extractor, _, _ = load_custom_data2vec_audio_model()
 
     stats.pass_dataset(masked_dataset)
     stats.plot_dataset_stats()
 
-    pre_train_outputs, pre_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, parse_args.batch_size)
-    original_model_outputs, original_model_embeddings = evaluate_embedding_from_model(original_model, stretched_dataloader, device, parse_args.batch_size)
+    # pre_train_outputs, pre_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, parse_args.batch_size)
+    # original_model_outputs, original_model_embeddings = evaluate_embedding_from_model(original_model, stretched_dataloader, device, parse_args.batch_size)
 
     post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=parse_args.model_path)
-    #stats.plot_model_stats(model, pre_train_embeddings, post_train_embeddings, original_model_embeddings)
+    stats.plot_model_stats(model, None, post_train_embeddings, None)
     #best_k = stats.find_optimal_k(post_train_embeddings, k_range=range(10, 100))
     #stats.cluster_embeddings(post_train_embeddings, best_k)
-    stats.compare_clustering_algorithms(post_train_embeddings, 10)
+    # stats.compare_clustering_algorithms(post_train_embeddings, 10)

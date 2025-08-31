@@ -10,12 +10,39 @@ class CustomFeatureExtractor(nn.Module):
         if self.arch == 'conv1d':
             return nn.Conv1d(1, 512, kernel_size=5, stride=5)
 
-        if self.arch == '2_conv1d_relu':
+        elif self.arch == '2_conv1d_relu':
             return nn.Sequential(
-                nn.Conv1d(1, 64, kernel_size=5, stride=2),
+                nn.Conv1d(1, 256, kernel_size=3, stride=3),  # → [B, 256, 81]
                 nn.ReLU(),
-                nn.Conv1d(64, 128, kernel_size=5, stride=2),
-                nn.ReLU()
+                nn.Conv1d(256, 512, kernel_size=3, stride=2),  # → [B, 512, 39]
+                nn.ReLU(),
+                nn.ZeroPad1d((0, 10))  # → [B, 512, 49]
+            )
+
+        elif self.arch == '2_conv1d':
+            return nn.Sequential(
+                nn.Conv1d(1, 256, kernel_size=3, stride=3),  # → [B, 256, 81]
+                nn.Conv1d(256, 512, kernel_size=3, stride=2),  # → [B, 512, 39]
+                nn.ZeroPad1d((0, 10))  # → [B, 512, 49]
+            )
+
+        elif self.arch == '3_conv1d_relu':
+            return nn.Sequential(
+                nn.Conv1d(1, 128, kernel_size=3, stride=2),  # [B, 128, 122]
+                nn.ReLU(),
+                nn.Conv1d(128, 256, kernel_size=3, stride=2),  # [B, 256, 60]
+                nn.ReLU(),
+                nn.Conv1d(256, 512, kernel_size=3, stride=2),  # [B, 512, 29]
+                nn.ReLU(),
+                nn.ZeroPad1d((0, 20))  # [B, 512, 49]
+            )
+
+        elif self.arch == '3_conv1d':
+            return nn.Sequential(
+                nn.Conv1d(1, 128, kernel_size=3, stride=2),  # → [B, 128, 122]
+                nn.Conv1d(128, 256, kernel_size=3, stride=2),  # → [B, 256, 60]
+                nn.Conv1d(256, 512, kernel_size=3, stride=2),  # → [B, 512, 29]
+                nn.ZeroPad1d((0, 20))  # → [B, 512, 49]
             )
 
         elif self.arch == 'cnn': # maybe for multi-channel data
