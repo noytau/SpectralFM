@@ -348,7 +348,7 @@ class Stats:
         plt.axis("equal")
         plt.show()
 
-    def cluster_embeddings(self, embeddings, n_clusters=5):
+    def cluster_vectors(self, vectors, n_clusters=5):
         """
         Clusters the embeddings using KMeans and visualizes the clusters.
 
@@ -362,15 +362,19 @@ class Stats:
         from sklearn.cluster import KMeans
         from sklearn.manifold import TSNE
 
-        embeddings_np = embeddings.cpu().numpy()
+        # convert to numpy if tensor
+        if isinstance(vectors, torch.Tensor):
+            vectors_np = vectors.cpu().numpy()
+        else:
+            vectors_np = np.array(vectors)
 
         # Step 1: Cluster in original space
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-        labels = kmeans.fit_predict(embeddings_np)
+        labels = kmeans.fit_predict(vectors_np)
 
         # Step 2: Optional PCA to speed up t-SNE
         pca = PCA(n_components=50)
-        pca_embeddings = pca.fit_transform(embeddings_np)
+        pca_embeddings = pca.fit_transform(vectors_np)
 
         # Step 3: t-SNE for visualization
         tsne_embeddings = TSNE(n_components=2, random_state=42).fit_transform(pca_embeddings)
@@ -383,7 +387,7 @@ class Stats:
 
         plt.figure(figsize=(8, 6))
         sns.scatterplot(x=tsne_embeddings[:, 0], y=tsne_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
-        plt.title(f"KMeans Clustering (on raw embeddings), Visualized in t-SNE — n={n_clusters}")
+        plt.title(f"KMeans Clustering (on spectograms), Visualized in t-SNE — n={n_clusters}")
         plt.xlabel("tSNE-1")
         plt.ylabel("tSNE-2")
         #plt.legend(title="Cluster")
@@ -394,7 +398,7 @@ class Stats:
 
         plt.figure(figsize=(8, 6))
         sns.scatterplot(x=umap_embeddings[:, 0], y=umap_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
-        plt.title(f"KMeans Clustering (on raw embeddings), Visualized in UMAP — n={n_clusters}")
+        plt.title(f"KMeans Clustering (on spectograms), Visualized in UMAP — n={n_clusters}")
         plt.xlabel("UMAP-1")
         plt.ylabel("UMAP-2")
         #plt.legend(title="Cluster")
@@ -403,7 +407,7 @@ class Stats:
         plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_umap_n{n_clusters}.png"))
         plt.close()
 
-    def compare_clustering_algorithms(self, embeddings, n_clusters=5):
+    def compare_clustering_algorithms(self, vectors, n_clusters=5):
         from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering, SpectralClustering
         from sklearn.mixture import GaussianMixture
         from sklearn.decomposition import PCA
@@ -415,18 +419,21 @@ class Stats:
         import umap
         from sklearn.manifold import TSNE
 
-        embeddings_np = embeddings.cpu().numpy()
+        if isinstance(vectors, torch.Tensor):
+            vectors_np = vectors.cpu().numpy()
+        else:
+            vectors_np = np.array(vectors)
 
         # Optional PCA to 50 dims
         pca = PCA(n_components=50)
-        embeddings_pca = pca.fit_transform(embeddings)
+        vectors_pca = pca.fit_transform(vectors)
 
         # Reduce to 2D for visualization
         tsne = TSNE(n_components=2, random_state=42)
-        tsne_embeddings = tsne.fit_transform(embeddings_pca)
+        tsne_embeddings = tsne.fit_transform(vectors_pca)
 
         umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
-        umap_embeddings = umap_model.fit_transform(embeddings_pca)
+        umap_embeddings = umap_model.fit_transform(vectors_pca)
 
         algorithms = {
             "KMeans": KMeans(n_clusters=n_clusters, random_state=42),
@@ -438,13 +445,13 @@ class Stats:
 
         for name, algo in algorithms.items():
             if name == "GMM":
-                labels = algo.fit_predict(embeddings)
+                labels = algo.fit_predict(vectors)
             else:
-                labels = algo.fit(embeddings).labels_
+                labels = algo.fit(vectors).labels_
 
             # Optional: compute silhouette if labels are valid
             try:
-                score = silhouette_score(embeddings, labels)
+                score = silhouette_score(vectors, labels)
                 print(f"[{name}] Silhouette score: {score:.4f}")
             except:
                 print(f"[{name}] Silhouette score: could not be computed")
@@ -460,19 +467,22 @@ class Stats:
                 plt.savefig(os.path.join(self.output_dir, f"{name.lower()}_{method}_clustering.png"))
                 plt.close()
 
-    def find_optimal_k(self, embeddings, k_range=range(2, 15)):
-        embeddings_np = embeddings.cpu().numpy()
+    def find_optimal_k(self, vectors, k_range=range(2, 15)):
+        if isinstance(vectors, torch.Tensor):
+            vectors_np = vectors.cpu().numpy()
+        else:
+            vectors_np = np.array(vectors)
         best_k = None
         best_score = -1
         for k in k_range:
             kmeans = KMeans(n_clusters=k, random_state=42)
-            labels = kmeans.fit_predict(embeddings_np)
-            score = silhouette_score(embeddings_np, labels)
+            labels = kmeans.fit_predict(vectors_np)
+            score = silhouette_score(vectors_np, labels)
             print(f"n_clusters={k}, silhouette_score={score:.4f}")
             if score > best_score:
                 best_k = k
                 best_score = score
-        print(f"✅ Best k: {best_k} (score: {best_score:.4f})")
+        print(f"Best k: {best_k} (score: {best_score:.4f})")
         return best_k
 
     def compare_and_visualize_embeddings(self, embedding_results):
@@ -710,7 +720,7 @@ class Stats:
         return selected_refs_dict
 def get_input_path_from_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='/mnt5/noy/code/weights/experiment-mask=0.3-epoch=1_batch=16_loss_fn=mse_datalen=1000000_model_before_training.pt', help='Path to saved model')
+    parser.add_argument('--model_path', type=str, default='/mnt5/noy/code/weights/experiment-mask=0.15-epoch=1_batch=32_loss_fn=mse_datalen=1000000_model_before_training.pt', help='Path to saved model')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for training')
     parser.add_argument('--batch_size', type=int, default=16, help='Size of training batch')
     parser.add_argument('--mask_ratio', type=float, default=0.15, help='Masking ratio')
@@ -735,13 +745,13 @@ if __name__ == "__main__":
     #original_model, original_feature_extractor, _, _ = load_custom_data2vec_audio_model()
 
     stats.pass_dataset(masked_dataset)
-    stats.plot_dataset_stats()
+    # stats.plot_dataset_stats()
 
     # pre_train_outputs, pre_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, parse_args.batch_size)
     # original_model_outputs, original_model_embeddings = evaluate_embedding_from_model(original_model, stretched_dataloader, device, parse_args.batch_size)
 
-    post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=parse_args.model_path)
-    stats.plot_model_stats(model, None, post_train_embeddings, None)
-    #best_k = stats.find_optimal_k(post_train_embeddings, k_range=range(10, 100))
-    #stats.cluster_embeddings(post_train_embeddings, best_k)
-    # stats.compare_clustering_algorithms(post_train_embeddings, 10)
+    # post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=parse_args.model_path)
+    # stats.plot_model_stats(model, None, post_train_embeddings, None)
+    best_k = stats.find_optimal_k(single_chnl_df, k_range=range(10, 100))
+    stats.cluster_vectors(single_chnl_df, best_k)
+    stats.compare_clustering_algorithms(single_chnl_df, best_k)

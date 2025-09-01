@@ -346,6 +346,7 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_rati
 
 
 
+
     # Save model
     torch.save(model.state_dict(), f"{model_path}_model_after_training.pt")
     mlflow.log_artifact(f"{model_path}_model_after_training.pt")
