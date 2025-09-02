@@ -294,15 +294,15 @@ def train_model(df, args):
 
     model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args)
     dataloader, masked_dataset = prepare_masked_dataloader(df, interpolate_to_16k=False, args=args)
-    model_string = train_feature_extractor_only(model, optimizer, dataloader, device, args.mask_ratio, args.epoch, args.batch_size, args.loss_function, args.run_id)
+    model_string = train_feature_extractor_only(model, optimizer, dataloader, device, args.masking_type, args.arch, args.mask_ratio, args.epoch, args.batch_size, args.loss_function, args.run_id)
     model_path = f"{model_string}_model_after_training.pt"
     return model_path
 
-def train_feature_extractor_only(model, optimizer, dataloader, device, mask_ratio=0.15, num_epochs=1, batch_size=8, loss="MSE", run_id=-11):
+def train_feature_extractor_only(model, optimizer, dataloader, device, mask_type="random", arch_type="conv1d", mask_ratio=0.15, num_epochs=1, batch_size=8, loss="MSE", run_id=-11):
     """
     Train only the feature extractor layer of the model. Assumes all other layers are already frozen.
     """
-    model_string = f"experiment_2-mask={mask_ratio}-epoch={num_epochs}_batch={batch_size}_loss_fn={loss}_datalen={len(dataloader.dataset)}"
+    model_string = f"experiment_3-mask_type={mask_type}-mask={mask_ratio}-arch={arch_type}-epoch={num_epochs}_batch={batch_size}_loss_fn={loss}_datalen={len(dataloader.dataset)}"
     model_path = f"/mnt5/noy/code/weights/{model_string}"
 
     wandb.init(project="SpectralFM", name=model_string) # fixme remove once done migrating to mlflow

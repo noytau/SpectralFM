@@ -75,7 +75,7 @@ class ExperimentRunner:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv_path", type=str, default="/mnt5/noy/code/logs/runs_tracking.csv")
+    parser.add_argument("--csv_path", type=str, default="/mnt5/noy/code/logs/run_masking.csv")
     parser.add_argument("--run_id", type=int, default=1)
     parser.add_argument("--arch", type=str, help="Feature extractor architecture (overrides CSV if provided)")
     parser.add_argument("--masking_type", type=str, help="Masking technique")
