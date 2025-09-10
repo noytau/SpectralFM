@@ -10,6 +10,10 @@ PARAMS = {
     "learning_rate": {"column": "LR",             "default": 1e-4},
     "batch_size":    {"column": "Batch Size",     "default": 32},
     "epoch":         {"column": "Epochs",         "default": 1},
+    "mode":          {"column": "Mode",           "default": "train"},
+    "eval_method":   {"column": "Eval Method",    "default": "signal_completion"},
+    "test_method":   {"column": "Test Method",    "default": "index_in_distribution_stack_holdout"},
+    "stack_method": {"column": "Stack Method",    "default": "index"},
 }
 
 class ArgsParser:
@@ -27,10 +31,10 @@ class ArgsParser:
         args.run_id = run_id
 
         # Use CLI first, fallback to CSV, then default
-        def get_arg(key, cli_val=None):
+        def get_arg(key):
             col = PARAMS[key]["column"]
             default = PARAMS[key]["default"]
-
+            cli_val = getattr(cli_args, key, None) if cli_args else None
             if cli_val is not None:
                 return cli_val
             elif col in row and pd.notna(row[col]):
@@ -38,12 +42,20 @@ class ArgsParser:
             else:
                 return default
 
-        args.test_dir = "small" if getattr(cli_args, "debug", False) else get_arg("Test Dir", getattr(cli_args, "test_dir", None))
-        args.arch = get_arg("arch", getattr(cli_args, "arch", None))
-        args.masking_type = get_arg("masking_type", getattr(cli_args, "masking_type", None))
-        args.loss_function = get_arg("loss_function", getattr(cli_args, "loss_function", None))
-        args.learning_rate = float(get_arg("learning_rate", getattr(cli_args, "learning_rate", None)))
+        if getattr(cli_args, "debug", False):
+            args.test_dir = "small"
+        else:
+            args.test_dir = get_arg("test_dir")
+
+        args.arch = get_arg("arch")
+        args.masking_type = get_arg("masking_type")
+        args.loss_function = get_arg("loss_function")
+        args.learning_rate = float(get_arg("learning_rate"))
         args.batch_size = int(get_arg("batch_size"))
         args.epoch = int(get_arg("epoch"))
+        args.mode = get_arg("mode")
+        args.eval_method = get_arg("eval_method")
+        args.test_method = get_arg("test_method")
+        args.stack_method = get_arg("stack_method")
 
         return args

@@ -4,15 +4,16 @@ from model_loader import compute_stack_from_input_spectograms
 from compute_stats import Stats
 
 class Testing:
-    def __init__(self, model, stack_dataset):
+    def __init__(self, df, test_method, stack_method, model=None):
         """
         model: your trained model object
         dataset: a dataset object or DataFrame
         stack_column: name of the column that denotes the stack
         input_column: the feature column (or key)
         """
-        self.model = model
-        self.stack_dataset = stack_dataset
+        self.df = df
+        self.test_method = test_method if test_method in ["index_out_of_distribution", "index_in_distribution_stack_holdout", "test_in_distribution_partial_stack"] else "index_in_distribution_stack_holdout"
+        self.stack_method =  stack_method if stack_method in ["kmeans", "index"] else "index"
 
     def run_all_tests(self):
         print("Running all test types...")
@@ -28,7 +29,7 @@ class Testing:
         print("Testing Out-of-Distribution...")
         # run on /mnt5/noy/nova_samples/multi_chnl
 
-    def test_in_distribution_stack_holdout(self, input_stack, heldout_stacks=None): # fixme input_stack
+    def test_in_distribution_stack_holdout(self, input_stack, heldout_stacks=None):
         """
         Leave out entire stacks for testing (model never saw these stacks during training)
         heldout_stacks : list of stacks to hold out from training
@@ -36,7 +37,7 @@ class Testing:
         print("Testing In-Distribution (held-out stacks)...")
         if heldout_stacks is None:
             # Automatically select a few stacks to hold out
-            unique_stacks = self.dataset[self.stack_column].unique()
+            unique_stacks = list(input_stack.keys())
             heldout_stacks = unique_stacks[:2]  # First 2 as example
 
         test_data = {key: input_stack[key] for key in input_stack if key not in heldout_stacks}
@@ -57,46 +58,30 @@ class Testing:
         test_data = pd.concat(test_data)
         return test_data
 
+    def get_test_data(self):
+        # get stacks for data division
+        division_type = self.stack_method
+        input_stack = self.divide_data_into_stacks(self.df)
 
-    def _evaluate(self, predictions, ground_truth_data):
+        if self.test_method == "index_out_of_distribution":
+            return self.test_out_of_distribution(input_stack)
+        elif self.test_method == "index_in_distribution_stack_holdout":
+            return self.test_in_distribution_stack_holdout(input_stack)
+        elif self.test_method == "test_in_distribution_partial_stack":
+            return self.test_in_distribution_partial_stack(input_stack)
+        return self.test_out_of_distribution(input_stack)
+
+    def divide_data_into_stacks(self, df):
         """
-        Evaluate predictions vs ground truth.
+        Divide the DataFrame into stacks based on some criteria.
+        Here we use k-means clustering as an example.
         """
-        # Dummy example
-        print(f"Evaluating {len(predictions)} predictions...")
-        # You can add MSE, accuracy, etc. here
+        if self.stack_method == "index":
+            input_stack = compute_stack_from_input_spectograms(df)
+        else:
+            # compute stack from k-means similarities
+            stats = Stats(df=df, argparse=None)
+            input_stack = stats.cluster_vectors(df, 12, visualize=False) # fixme get best k?
+        return input_stack
 
 
-    def evaluate_signal_completion(self, mask_experiment):
-        """
-        Test model's ability to reconstruct masked signals.
-        mask_ratios: list of mask ratios to test
-        """
-        print("Evaluating Signal Completion...")
-
-
-    def evaluate_noise_robustness(self, noise_levels):
-        """
-        Test model robustness to varying noise levels.
-        noise_levels: list of noise levels to test
-        """
-        print("Evaluating Noise Robustness...")
-        for level in noise_levels:
-            print(f"Testing with noise level: {level}")
-            # Add noise to test data and evaluate
-
-if __name__ == "__main__":
-    get_stacks_by_index = False # fixme get from args or config
-    # get sample data
-    samples_path = '/mnt5/noy/nova_samples/debug_chnl'  # fixme get from args or config
-    df = run_data_parser(samples_path)  # returns df
-    if get_stacks_by_index:
-        input_stack = compute_stack_from_input_spectograms(df)
-    else:
-        # compute stack from k-means similarities
-        stats = Stats(df=df, argparse=None)
-        input_stack = stats.cluster_vectors(df, 12, visualize=False) # fixme get best k
-    test = Testing(model=None, stack_dataset=input_stack)  # fixme replace None
-
-    test.test_in_distribution_stack_holdout(input_stack, [1,5,10,9])  # example stacks
-    # test.test_in_distribution_partial_stack(input_stack, holdout_ratio=0.3)
