@@ -11,6 +11,7 @@ from sklearn.decomposition import PCA
 import seaborn as sns
 import umap
 import matplotlib.pyplot as plt
+from wandb.plot import visualize
 
 # internal imports
 from data_parser import *
@@ -348,7 +349,7 @@ class Stats:
         plt.axis("equal")
         plt.show()
 
-    def cluster_vectors(self, vectors, n_clusters=5):
+    def cluster_vectors(self, vectors, n_clusters=5, visualize=False):
         """
         Clusters the embeddings using KMeans and visualizes the clusters.
 
@@ -368,44 +369,56 @@ class Stats:
         else:
             vectors_np = np.array(vectors)
 
-        # Step 1: Cluster in original space
+        # Cluster in original space
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         labels = kmeans.fit_predict(vectors_np)
 
-        # Step 2: Optional PCA to speed up t-SNE
-        pca = PCA(n_components=50)
-        pca_embeddings = pca.fit_transform(vectors_np)
+        # create a dictionary
+        df_with_labels = vectors.copy()
+        df_with_labels['label'] = labels
 
-        # Step 3: t-SNE for visualization
-        tsne_embeddings = TSNE(n_components=2, random_state=42).fit_transform(pca_embeddings)
+        cluster_dict = {
+            label: group.drop(columns='label')
+            for label, group in df_with_labels.groupby(labels)
+        }
 
-        # Step 3: UMAP for visualization
-        umap_embeddings = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42).fit_transform(pca_embeddings)
+        if visualize:
+            # PCA to speed up t-SNE
+            pca = PCA(n_components=50)
+            pca_embeddings = pca.fit_transform(vectors_np)
 
-        # Step 4: Plot
-        palette = sns.color_palette("hls", n_colors=n_clusters)
+            #  t-SNE for visualization
+            tsne_embeddings = TSNE(n_components=2, random_state=42).fit_transform(pca_embeddings)
 
-        plt.figure(figsize=(8, 6))
-        sns.scatterplot(x=tsne_embeddings[:, 0], y=tsne_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
-        plt.title(f"KMeans Clustering (on spectograms), Visualized in t-SNE — n={n_clusters}")
-        plt.xlabel("tSNE-1")
-        plt.ylabel("tSNE-2")
-        #plt.legend(title="Cluster")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_tsne_n{n_clusters}.png"))
-        plt.close()
+            # UMAP for visualization
+            umap_embeddings = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42).fit_transform(pca_embeddings)
 
-        plt.figure(figsize=(8, 6))
-        sns.scatterplot(x=umap_embeddings[:, 0], y=umap_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
-        plt.title(f"KMeans Clustering (on spectograms), Visualized in UMAP — n={n_clusters}")
-        plt.xlabel("UMAP-1")
-        plt.ylabel("UMAP-2")
-        #plt.legend(title="Cluster")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_umap_n{n_clusters}.png"))
-        plt.close()
+            # Plot
+            palette = sns.color_palette("hls", n_colors=n_clusters)
+
+            plt.figure(figsize=(8, 6))
+            sns.scatterplot(x=tsne_embeddings[:, 0], y=tsne_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
+            plt.title(f"KMeans Clustering (on spectograms), Visualized in t-SNE — n={n_clusters}")
+            plt.xlabel("tSNE-1")
+            plt.ylabel("tSNE-2")
+            #plt.legend(title="Cluster")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_tsne_n{n_clusters}.png"))
+            plt.close()
+
+            plt.figure(figsize=(8, 6))
+            sns.scatterplot(x=umap_embeddings[:, 0], y=umap_embeddings[:, 1], hue=labels, palette=palette, s=50, legend=False)
+            plt.title(f"KMeans Clustering (on spectograms), Visualized in UMAP — n={n_clusters}")
+            plt.xlabel("UMAP-1")
+            plt.ylabel("UMAP-2")
+            #plt.legend(title="Cluster")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_umap_n{n_clusters}.png"))
+            plt.close()
+
+        return cluster_dict
 
     def compare_clustering_algorithms(self, vectors, n_clusters=5):
         from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering, SpectralClustering
@@ -753,5 +766,5 @@ if __name__ == "__main__":
     # post_train_outputs, post_train_embeddings = evaluate_embedding_from_model(model, dataloader, device, batch_size=parse_args.batch_size, model_path=parse_args.model_path)
     # stats.plot_model_stats(model, None, post_train_embeddings, None)
     best_k = stats.find_optimal_k(single_chnl_df, k_range=range(10, 100))
-    stats.cluster_vectors(single_chnl_df, best_k)
+    stats.cluster_vectors(single_chnl_df, best_k, visualize=True)
     stats.compare_clustering_algorithms(single_chnl_df, best_k)

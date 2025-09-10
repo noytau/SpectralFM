@@ -5,6 +5,7 @@ import wandb
 from model_loader import train_model
 
 from data_parser import run_data_parser
+from args_parser import ArgsParser
 
 
 class ExperimentRunner:
@@ -61,8 +62,8 @@ class ExperimentRunner:
                 args.masking_type = cli_args.masking_type
             elif "Masking Type" in row.index and pd.notna(row["Masking Type"]):
                 args.masking_type = row["Masking Type"]
-            else:
-                args.masking_type = "random"
+            else: # default type
+                args.masking_type = "span"
 
         samples_path = self.get_samples_path(args.test_dir)
         # parse data
@@ -74,16 +75,19 @@ class ExperimentRunner:
 
 
 if __name__ == "__main__":
+    # in main:
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_path", type=str, default="/mnt5/noy/code/logs/run_masking.csv")
     parser.add_argument("--run_id", type=int, default=1)
-    parser.add_argument("--arch", type=str, help="Feature extractor architecture (overrides CSV if provided)")
-    parser.add_argument("--masking_type", type=str, help="Masking technique")
-
-    parser.add_argument("--debug", action="store_true", help="Run in debug mode (test_dir = small)")
+    parser.add_argument("--arch", type=str)
+    parser.add_argument("--masking_type", type=str)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     runner = ExperimentRunner(csv_path=args.csv_path)
 
-    # directly run training logic
-    runner.run_experiment(args.run_id, args)
+    # Use the modular parser
+    args_parser = ArgsParser(args.csv_path)
+    full_args = args_parser.parse(args.run_id, args)
+
+    runner.run_experiment(args.run_id, full_args)

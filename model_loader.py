@@ -181,6 +181,14 @@ def apply_masking(original, mask_ratio=0.15, masking_type="random"):
             if i < len(masked):
                 masked[i] = 0.0
 
+    elif masking_type == "span start":
+        span_length = int(mask_ratio * len(masked))
+        masked[0:span_length] = 0.0
+
+    elif masking_type == "span end":
+        span_length = int(mask_ratio * len(masked))
+        masked[len(masked) - span_length + 1:len(masked)] = 0.0
+
     elif masking_type == "span":
         total_to_mask = int(mask_ratio * len(masked))
         max_span_length = len(masked) // 4  # or just set a cap like 40
@@ -264,6 +272,24 @@ def compute_mask_indices(batch_size, sequence_length, mask_prob=0.05, mask_lengt
             start = torch.randint(0, sequence_length - mask_length, (1,)).item()
             mask[b, start:start+mask_length] = True
     return mask
+
+
+def compute_stack_from_input_spectograms(input_df):
+    """
+    Splits the input DataFrame into stacks based on index // 10.
+    Returns a dict: {stack_idx: df_slice}
+    """
+    input_df = input_df.copy()
+    input_df['stack_idx'] = input_df.index // 10  # assign stack index
+
+    stack_dict = {
+        stack_idx: group.drop(columns='stack_idx')
+        for stack_idx, group in input_df.groupby('stack_idx')
+    }
+    return stack_dict
+
+
+#--------------- model evaluation functions ----------------#
 
 
 def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4):
