@@ -5,11 +5,13 @@ PARAMS = {
     "run_id":        {"column": "Run ID",         "default": None},
     "test_dir":      {"column": "Test Dir",       "default": "medium"},
     "arch":          {"column": "FE Architecture","default": "conv1d"},
+    "mask_ratio":    {"column": "Mask Ratio",     "default": 0.15},
     "masking_type":  {"column": "Masking Type",   "default": "span"},
     "loss_function": {"column": "Loss Function",  "default": "mse"},
     "learning_rate": {"column": "LR",             "default": 1e-4},
     "batch_size":    {"column": "Batch Size",     "default": 32},
     "epoch":         {"column": "Epochs",         "default": 1},
+    "model_path":    {"column": "Model Path",     "default": None},
     "mode":          {"column": "Mode",           "default": "train"},
     "eval_method":   {"column": "Eval Method",    "default": "signal_completion"},
     "test_method":   {"column": "Test Method",    "default": "index_in_distribution_stack_holdout"},
@@ -49,10 +51,12 @@ class ArgsParser:
 
         args.arch = get_arg("arch")
         args.masking_type = get_arg("masking_type")
+        args.mask_ratio = get_arg("mask_ratio")
         args.loss_function = get_arg("loss_function")
         args.learning_rate = float(get_arg("learning_rate"))
         args.batch_size = int(get_arg("batch_size"))
         args.epoch = int(get_arg("epoch"))
+        args.model_path = get_arg("model_path")
         args.mode = get_arg("mode")
         args.eval_method = get_arg("eval_method")
         args.test_method = get_arg("test_method")

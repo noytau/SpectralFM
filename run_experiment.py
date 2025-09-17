@@ -8,6 +8,7 @@ from model_loader import train_model
 
 from data_parser import run_data_parser
 from args_parser import ArgsParser
+from model_loader import *
 
 class ExperimentRunner:
     def __init__(self, experiment_args):
@@ -57,6 +58,9 @@ if __name__ == "__main__":
     if parser.parse_args().mode == 'eval':
         parser.add_argument("--eval_method", type=str, choices=["signal_completion", "noise_robustness", "compare_embeddings", "classifier_head"], default="signal_completion")
         parser.add_argument("--test_method", type=str, choices=["index_out_of_distribution", "index_in_distribution_stack_holdout", "test_in_distribution_partial_stack"], default="index_in_distribution_stack_holdout")
+        parser.add_argument('--model_path', type=str,
+                            default='/mnt5/noy/code/weights/experiment-mask=0.25-epoch=1_batch=32_loss_fn=mse_datalen=1000000_model_after_training.pt',
+                            help='Path to saved model')
 
     args = parser.parse_args()
     # Use the modular parser
@@ -68,7 +72,7 @@ if __name__ == "__main__":
         runner.run_experiment()
     elif args.mode == "eval":
         from evaluate import EvalExperiment  # fixme move import to avoid circular import
-
+        full_args.model, feature_extractor, optimizer, device = load_trained_model(full_args)  # Implement this function to load the trained model
         evaluator = EvalExperiment(full_args)
         evaluator.run_evaluation()
 

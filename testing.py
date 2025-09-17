@@ -66,7 +66,8 @@ class Testing:
         if self.test_method == "index_out_of_distribution":
             return self.test_out_of_distribution(input_stack)
         elif self.test_method == "index_in_distribution_stack_holdout":
-            return self.test_in_distribution_stack_holdout(input_stack)
+            # return self.test_in_distribution_stack_holdout(input_stack)
+            return self.test_in_distribution_stack_holdout(input_stack, heldout_stacks=range(0,50)) # fixme
         elif self.test_method == "test_in_distribution_partial_stack":
             return self.test_in_distribution_partial_stack(input_stack)
         return self.test_out_of_distribution(input_stack)

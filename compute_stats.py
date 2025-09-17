@@ -13,6 +13,9 @@ import umap
 import matplotlib.pyplot as plt
 from wandb.plot import visualize
 
+from sklearn.metrics.pairwise import cosine_similarity
+
+
 # internal imports
 from data_parser import *
 from model_loader import *
@@ -173,6 +176,54 @@ class Stats:
             plt.close()
 
         return sim_matrix
+
+
+    def plot_signal_completion_comparison(self, df, index, title=None, fname=None):
+        row = df.iloc[index]
+        inputs = row["inputs"]
+        masked = row["masked"]
+        predicted = row["predicted"]
+
+        plt.figure(figsize=(12, 4))
+        plt.plot(inputs, label='Original', linestyle='--')
+        plt.plot(masked, label='Masked', linestyle=':')
+        plt.plot(predicted, label='Predicted', linewidth=2)
+
+        plt.legend()
+        plt.xlabel("Time / Position")
+        plt.ylabel("Amplitude")
+        plt.title(title or f"Sample {index}")
+        plt.grid(True)
+        plt.tight_layout()
+
+        #plt.show() # fixme
+        save_path = os.path.join(self.output_dir, fname)
+        plt.savefig(save_path)
+        plt.close()
+
+
+    def plot_best_and_worst_predictions(self, df, k=3):
+        """
+        Plot and save top-k best and worst signal completions based on mse_loss.
+
+        Args:
+            df (pd.DataFrame): DataFrame with 'mse_less', 'stack_idx', 'inputs', 'masked', 'predicted'.
+            k (int): Number of best and worst samples to plot.
+
+        """
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        sorted_df = df.sort_values("mse_less")
+        best = sorted_df.head(k)
+        worst = sorted_df.tail(k)
+
+        for subset, label in [(best, "best"), (worst, "worst")]:
+            for i, (idx, row) in enumerate(subset.iterrows()):
+                title = f"{label.upper()} | idx={idx}, stack={row['stack_idx']}, loss={row['mse_less']:.4f}"
+                fname = f"{label}_idx={idx}_stack={row['stack_idx']}_loss={row['mse_less']:.4f}.png"
+                path = os.path.join(self.output_dir, fname)
+
+                self.plot_signal_completion_comparison(df, index=idx, title=title, fname=fname)
 
     def plot_1d_spectrogram(self, title="1D Spectrogram", num_samples=5):
         """
@@ -419,6 +470,52 @@ class Stats:
             plt.close()
 
         return cluster_dict
+
+
+    def retrieve_k_similar_inputs_by_embedding(self, df, query_index=0, k=5):
+        """
+        Retrieve the k most similar samples (by embedding) to a reference sample,
+        and return their input signals.
+
+        Args:
+            df (pd.DataFrame): Must contain 'embedding' and 'inputs' columns.
+            query_index (int): Index of the reference sample.
+            k (int): Number of similar samples to retrieve.
+
+        Returns:
+            dict with:
+                - query_input: the input of the reference sample
+                - query_embedding: the embedding of the reference sample
+                - retrieved_inputs: list of top-k input arrays
+                - similarities: list of similarity scores
+                - indices: list of row indices of retrieved samples
+        """
+        embeddings = np.stack(df["embedding"].values)
+        inputs = df["inputs"].values
+
+        query_emb = embeddings[query_index].reshape(1, -1)
+
+        # Compute cosine similarity
+        similarities = cosine_similarity(query_emb, embeddings)[0]
+
+        # Exclude the query itself
+        similarities[query_index] = -np.inf
+
+        # Get top-k indices
+        topk_indices = np.argsort(similarities)[-k:][::-1]
+
+        # Retrieve original signals
+        retrieved_inputs = [inputs[i] for i in topk_indices]
+        retrieved_similarities = [similarities[i] for i in topk_indices]
+
+        return {
+            "query_input": inputs[query_index],
+            "query_embedding": embeddings[query_index],
+            "retrieved_inputs": retrieved_inputs,
+            "similarities": retrieved_similarities,
+            "indices": topk_indices
+        }
+
 
     def compare_clustering_algorithms(self, vectors, n_clusters=5):
         from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering, SpectralClustering
@@ -731,6 +828,260 @@ class Stats:
         ))
         selected_refs_dict = {ref_idx: results[ref_idx] for ref_idx in selected_ref_indices}
         return selected_refs_dict
+
+    def visualize_embedding_similarity_in_input_space(self, df, query_index=0, k=5, output_dir=None):
+        """
+        Retrieves k most similar embeddings and visualizes their original input signals.
+
+        Args:
+            df (pd.DataFrame): Must contain 'embedding' and 'inputs' columns.
+            query_index (int): Index of the reference sample.
+            k (int): Number of similar samples to retrieve.
+            output_dir (str): If provided, saves plot in this folder.
+        """
+        import os
+
+        embeddings = np.stack(df["embedding"].values)
+        inputs = df["inputs"].values
+
+        query_emb = embeddings[query_index].reshape(1, -1)
+        similarities = cosine_similarity(query_emb, embeddings)[0]
+        similarities[query_index] = -np.inf  # Exclude self
+
+        topk_indices = np.argsort(similarities)[-k:][::-1]
+        retrieved_inputs = [inputs[i] for i in topk_indices]
+        retrieved_sims = [similarities[i] for i in topk_indices]
+
+        query_input = inputs[query_index]
+
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            fname = f"embedding_query={query_index}_k={k}.png"
+            save_path = os.path.join(output_dir, fname)
+        else:
+            save_path = None
+
+        self.plot_input_signals_comparison(
+            query_input=query_input,
+            retrieved_inputs=retrieved_inputs,
+            similarities=retrieved_sims,
+            indices=topk_indices,
+            title_prefix=f"Query idx={query_index} | ",
+            save_path=save_path
+        )
+
+    def plot_input_signals_comparison(self, query_input, retrieved_inputs, similarities=None, indices=None, title_prefix="",
+                                      save_path=None):
+        """
+        Plot the query input and top-k retrieved inputs.
+
+        Args:
+            query_input (np.array): The reference input signal.
+            retrieved_inputs (list of np.array): The top-k most similar inputs.
+            similarities (list of float): Cosine similarity scores.
+            indices (list of int): Indices of the retrieved samples.
+            title_prefix (str): Text to prepend to plot title.
+            save_path (str): If provided, saves the plot to this path.
+        """
+        plt.figure(figsize=(12, 6))
+        plt.plot(query_input, label='Query Signal', linewidth=2)
+
+        for i, inp in enumerate(retrieved_inputs):
+            label = f"Top {i + 1}"
+            if similarities is not None and indices is not None:
+                label += f" | idx={indices[i]}, sim={similarities[i]:.3f}"
+            plt.plot(inp, label=label, alpha=0.7, linestyle='--')
+
+        plt.title(f"{title_prefix}Similar Signals in Input Space")
+        plt.xlabel("Time / Position")
+        plt.ylabel("Amplitude")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path)
+            plt.close()
+        else:
+            plt.show()
+
+    def retrieve_k_similar_inputs_by_input_space(self, df, query_index=0, k=5):
+        """
+        Retrieves k most similar signals (by input-space cosine similarity).
+
+        Args:
+            df (pd.DataFrame): Must contain 'inputs' column (np.array).
+            query_index (int): Index of reference sample.
+            k (int): Top-k similar to return.
+
+        Returns:
+            dict with:
+                - query_input
+                - similarities
+                - indices
+                - retrieved_inputs
+        """
+        inputs = np.stack(df["inputs"].values)
+        query = inputs[query_index].reshape(1, -1)
+
+        similarities = cosine_similarity(query, inputs)[0]
+        similarities[query_index] = -np.inf  # exclude self
+
+        topk_indices = np.argsort(similarities)[-k:][::-1]
+        retrieved = [inputs[i] for i in topk_indices]
+        sims = [similarities[i] for i in topk_indices]
+
+        return {
+            "query_input": inputs[query_index],
+            "retrieved_inputs": retrieved,
+            "similarities": sims,
+            "indices": topk_indices
+        }
+
+    def visualize_input_similarity_in_input_space(self, df, query_index, k=5):
+        """
+        Visualize input-space similarity using cosine on raw input vectors.
+        """
+        result = self.retrieve_k_similar_inputs_by_input_space(df, query_index=query_index, k=k)
+
+        query = result["query_input"]
+        retrieved = result["retrieved_inputs"]
+        similarities = result["similarities"]
+        indices = result["indices"]
+
+        fig, axes = plt.subplots(1, k + 1, figsize=(3 * (k + 1), 3))
+
+        axes[0].plot(query)
+        axes[0].set_title(f'Query\nIdx: {query_index}')
+        axes[0].set_xlabel('Time')
+        axes[0].set_ylabel('Amplitude')
+
+        for i, (signal, sim, idx) in enumerate(zip(retrieved, similarities, indices)):
+            axes[i + 1].plot(signal)
+            axes[i + 1].set_title(f"Similar {i + 1}\nIdx: {idx}\nSim: {sim:.2f}")
+            axes[i + 1].set_xlabel("Time")
+
+        plt.tight_layout()
+        fname = f"input_space_sim_query_{query_index}_k{k}.png"
+        plt.savefig(os.path.join(self.output_dir, fname))
+        print(f"Saved: {fname}")
+        plt.close()
+
+    def visualize_embedding_similarity_in_input_space(self, df, query_index, k=5):
+        """
+        Plots the query signal and its k most similar signals side by side.
+        """
+        result = self.retrieve_k_similar_inputs_by_embedding(df, query_index=query_index, k=k)
+        query_signal = df.iloc[query_index]['inputs']
+
+        fig, axes = plt.subplots(1, k + 1, figsize=(3 * (k + 1), 3))
+
+        # Plot query
+        axes[0].plot(query_signal)
+        axes[0].set_title(f'Query\nIndex: {query_index}')
+        axes[0].set_xlabel('Time')
+        axes[0].set_ylabel('Amplitude')
+
+        # Plot k similar
+        for i, idx in enumerate(result["indices"]):
+            signal = df.iloc[idx]['inputs']
+            sim = result["similarities"][i]
+            axes[i + 1].plot(signal)
+            axes[i + 1].set_title(f"Similar {i + 1}\nIdx: {idx}\nSim: {sim:.2f}")
+            axes[i + 1].set_xlabel('Time')
+
+        plt.tight_layout()
+        fname = f"embedding_sim_query_{query_index}_k{k}.png"
+        plt.savefig(os.path.join(self.output_dir, fname))
+        print(f"Saved: {fname}")
+        plt.close()
+
+    def compare_embedding_vs_input_similarity(self, df, k=5, max_samples=None):
+        """
+        Compare how similar the top-k embedding-based neighbors are to the query in input space.
+
+        Returns:
+            List of (input_score, emb_score) for each sample.
+        """
+        embeddings = np.stack(df["embedding"].values)
+        inputs = np.stack(df["inputs"].values)
+        results = []
+
+        sample_indices = range(len(df)) if max_samples is None else range(min(max_samples, len(df)))
+
+        for i in sample_indices:
+            # Input-space neighbors
+            input_sims = cosine_similarity(inputs[i].reshape(1, -1), inputs)[0]
+            input_sims[i] = -np.inf
+            input_neighbors = np.argsort(input_sims)[-k:]
+            avg_input_sim_input_neighbors = np.mean(
+                [cosine_similarity(inputs[i].reshape(1, -1), inputs[j].reshape(1, -1))[0][0] for j in input_neighbors])
+
+            # Embedding-space neighbors
+            emb_sims = cosine_similarity(embeddings[i].reshape(1, -1), embeddings)[0]
+            emb_sims[i] = -np.inf
+            emb_neighbors = np.argsort(emb_sims)[-k:]
+            avg_input_sim_emb_neighbors = np.mean(
+                [cosine_similarity(inputs[i].reshape(1, -1), inputs[j].reshape(1, -1))[0][0] for j in emb_neighbors])
+
+            results.append((avg_input_sim_input_neighbors, avg_input_sim_emb_neighbors))
+
+        return results
+
+    def plot_similarity_comparison(self, sim_pairs, fname="embedding_vs_input_similarity.png"):
+        input_scores, emb_scores = zip(*sim_pairs)
+
+        plt.figure(figsize=(6, 6))
+        plt.scatter(input_scores, emb_scores, alpha=0.5)
+        plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
+        plt.xlabel("Avg Input-Space Similarity (Top-k Input Neighbors)")
+        plt.ylabel("Avg Input-Space Similarity (Top-k Embedding Neighbors)")
+        plt.title("Embedding vs Input-Space Neighbor Similarity")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, fname))
+        plt.close()
+
+    def plot_noise_robustness_histogram(self, similarities, noise_std, fname="embedding_noise_robustness.png"):
+        plt.figure(figsize=(6, 4))
+        plt.hist(similarities, bins=30, color='purple', alpha=0.7)
+        plt.title(f"Embedding Similarity (Noisy vs Clean) — σ={noise_std}")
+        plt.xlabel("Cosine Similarity")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, fname))
+        plt.close()
+
+    def plot_robustness_scatter(self, df, similarities, noise_std, fname="robustness_scatter.png"):
+        """
+        Scatterplot of MSE loss vs cosine similarity of noisy embedding.
+
+        Args:
+            df: The dataframe containing 'mse_less' column.
+            similarities: List of cosine similarity (clean vs noisy embedding).
+            noise_std: Noise std used for title.
+        """
+        import matplotlib.pyplot as plt
+
+        losses = df["mse_less"].values[:len(similarities)]  # in case of max_samples
+
+        plt.figure(figsize=(6, 5))
+        plt.scatter(losses, similarities, alpha=0.6, c=similarities, cmap="viridis")
+        plt.xlabel("MSE Loss (clean prediction)")
+        plt.ylabel("Cosine Similarity (noisy vs clean embedding)")
+        plt.title(f"Noise Robustness — σ={noise_std}")
+        plt.grid(True)
+        plt.tight_layout()
+
+        fname = os.path.join(self.output_dir, fname)
+        plt.savefig(fname)
+        plt.close()
+        print(f"Saved: {fname}")
+
+
+
+
 def get_input_path_from_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default='/mnt5/noy/code/weights/experiment-mask=0.15-epoch=1_batch=32_loss_fn=mse_datalen=1000000_model_before_training.pt', help='Path to saved model')
@@ -742,6 +1093,8 @@ def get_input_path_from_args():
 
     args = parser.parse_args()
     return args
+
+
 
 
 if __name__ == "__main__":

@@ -86,6 +86,7 @@ def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-b
     # fixme add all these to a custom function
     # change to 1 layer feature extractor
     model.feature_extractor = CustomFeatureExtractor(args.arch)
+    model.completion_head = CompletionHead(hidden_dim=768, output_dim=245)
     model.config.do_stft_input = True
     # freeze all layers apart from feature extractor
     for param in model.parameters():
@@ -93,9 +94,10 @@ def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-b
     for param in model.feature_extractor.parameters():
         param.requires_grad = True
     # Define optimizer for trainable params
-    optimizer = torch.optim.Adam(model.feature_extractor.parameters(), args.learning_rate)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return model.to(device), model.feature_extractor,optimizer, device
+    args.optimizer = torch.optim.Adam(model.feature_extractor.parameters(), args.learning_rate)
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args.model = model.to(args.device) # fixme what am I doing here
+    return model.to(args.device), model.feature_extractor, args.optimizer, args.device
 
 def load_original_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
@@ -189,14 +191,14 @@ def apply_masking(original, mask_ratio=0.15, masking_type="random"):
         span_length = int(mask_ratio * len(masked))
         masked[len(masked) - span_length + 1:len(masked)] = 0.0
 
-    elif masking_type == "span":
+    elif masking_type == "span": # fixme check this function (draw masked spectograms)
         total_to_mask = int(mask_ratio * len(masked))
         max_span_length = len(masked) // 4  # or just set a cap like 40
         masked_so_far = 0
         used = set()
 
         while masked_so_far < total_to_mask:
-            span_length = random.randint(10, max_span_length)
+            span_length = random.randint(10, total_to_mask)
             if masked_so_far + span_length > total_to_mask:
                 span_length = total_to_mask - masked_so_far
             start = random.randint(0, len(masked) - span_length)
@@ -231,7 +233,7 @@ def safe_get(args, attr, default):
     return default if args is None or not hasattr(args, attr) or getattr(args, attr) is None else getattr(args, attr)
 
 
-def prepare_masked_dataloader(df, interpolate_to_16k=True, args=None):
+def prepare_masked_dataloader(df, interpolate_to_16k=False, args=None):
     mask_ratio = safe_get(args,"mask_ratio", 0.15)
     batch_size = safe_get(args,"batch_size", 8)
     masking_type = safe_get(args,"masking_type", "random")
@@ -305,7 +307,7 @@ def evaluate_embeddings(model, feature_extractor, device, dataset, batch_size=4)
         for i, batch in enumerate(dataloader):
             outputs = model(**batch["masked_inputs"])
             emb = outputs.last_hidden_state.last_hidden_state.mean(dim=1)  # shape: (B, T, D)
-            embeddings.append(emb.cpu())
+            embeddings.to(device).append(emb.cpu())
             print(f"\nBatch {i+1} — embeddings shape: {emb.shape}")
             print(f"Mean: {emb.mean().item():.4f}, Std: {emb.std().item():.4f}")
             break  # Show only one batch
@@ -380,14 +382,23 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_type
     print(f"Model saved to {model_path}_model_after_training.pt")
     return model_string
 
-def evaluate_embedding_from_model(model, dataloader, device, batch_size=8, model_path=""):
+# fixme change path to something nicer
+#
+def load_trained_model(args):
+
+    model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args)
+    if args.model_path is not None:
+        print(f"Loading model weights from: {args.model_path}")
+        model.load_state_dict(torch.load(args.model_path), strict=False)
+    return model, feature_extractor, optimizer, device
+
+def evaluate_embedding_from_model(args, dataloader):
     """
     Loads a saved Data2VecAudioModel from model_path, runs it on the provided dataset, and computes embeddings and similarities.
     model_path : path to raw weights file
     """
 
-    if model_path != "": # If a model path is provided, load the model state
-        model.load_state_dict(torch.load(model_path), strict=False)
+    model, feature_extractor, optimizer, device = load_trained_model(args) # load pre-trained weights if provided
 
     outputs = []
     embeddings = []
@@ -403,12 +414,14 @@ def evaluate_embedding_from_model(model, dataloader, device, batch_size=8, model
                     input_tensor = batch["data"]
             else:
                 input_tensor = batch
-            input_tensor = input_tensor.unsqueeze(1).to(device)
+            input_tensor = input_tensor.unsqueeze(1).to(args.device)
             try:
                 out = model(input_values=input_tensor)
                 emb = out.last_hidden_state.mean(dim=1)  # [B, D]
-                embeddings.append(emb.cpu())
-                outputs.append(out.last_hidden_state.cpu())
+                # embeddings = embeddings.to(device)
+                # embeddings.append(emb.cpu())
+                embeddings.append(emb.to(device))
+                outputs.append(out.last_hidden_state.to(device))
             except Exception as e:
                 print("Error processing batch:", e)
                 if isinstance(batch, dict):

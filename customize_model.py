@@ -66,4 +66,10 @@ class CustomFeatureExtractor(nn.Module):
     def forward(self, x):
         return self.extractor(x)
 
+class CompletionHead(nn.Module):
+    def __init__(self, hidden_dim=768, output_dim=245):
+        super().__init__()
+        self.linear = nn.Linear(hidden_dim, output_dim)
 
+    def forward(self, x):
+        return self.linear(x)
