@@ -37,10 +37,10 @@ class Testing:
         print("Testing In-Distribution (held-out stacks)...")
         if heldout_stacks is None:
             # Automatically select a few stacks to hold out
-            unique_stacks = list(input_stack.keys())
+            unique_stacks = list(input_stack.columns.tolist())
             heldout_stacks = unique_stacks[:2]  # First 2 as example
 
-        test_data = {key: input_stack[key] for key in input_stack if key not in heldout_stacks}
+        test_data = input_stack[~input_stack['stack_idx'].isin(heldout_stacks)]
         return test_data
 
     def test_in_distribution_partial_stack(self, input_stack, holdout_ratio=0.3):

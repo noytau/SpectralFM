@@ -469,7 +469,7 @@ class Stats:
             plt.savefig(os.path.join(self.output_dir, f"kmeans_clustered_then_umap_n{n_clusters}.png"))
             plt.close()
 
-        return cluster_dict
+        return df_with_labels
 
 
     def retrieve_k_similar_inputs_by_embedding(self, df, query_index=0, k=5):
@@ -490,8 +490,8 @@ class Stats:
                 - similarities: list of similarity scores
                 - indices: list of row indices of retrieved samples
         """
-        embeddings = np.stack(df["embedding"].values)
-        inputs = df["inputs"].values
+        embeddings = np.stack(df["embeddings"].values)
+        inputs = df["data"].values
 
         query_emb = embeddings[query_index].reshape(1, -1)
 
@@ -841,8 +841,8 @@ class Stats:
         """
         import os
 
-        embeddings = np.stack(df["embedding"].values)
-        inputs = df["inputs"].values
+        embeddings = np.stack(df["embeddings"].values)
+        inputs = df["data"].values
 
         query_emb = embeddings[query_index].reshape(1, -1)
         similarities = cosine_similarity(query_emb, embeddings)[0]
@@ -921,7 +921,7 @@ class Stats:
                 - indices
                 - retrieved_inputs
         """
-        inputs = np.stack(df["inputs"].values)
+        inputs = np.stack(df["data"].values)
         query = inputs[query_index].reshape(1, -1)
 
         similarities = cosine_similarity(query, inputs)[0]
@@ -938,95 +938,71 @@ class Stats:
             "indices": topk_indices
         }
 
-    def visualize_input_similarity_in_input_space(self, df, query_index, k=5):
+    def compare_embedding_vs_input_similarity(self, df, match_df, query_index, k=5):
         """
-        Visualize input-space similarity using cosine on raw input vectors.
+        Visualize similarity comparison for a query, using precomputed match_df.
+        Includes 3 rows: embedding neighbors, input neighbors, same-stack neighbors.
         """
-        result = self.retrieve_k_similar_inputs_by_input_space(df, query_index=query_index, k=k)
 
-        query = result["query_input"]
-        retrieved = result["retrieved_inputs"]
-        similarities = result["similarities"]
-        indices = result["indices"]
+        row = match_df[match_df["index"] == query_index].iloc[0]
+        query_stack = df.iloc[query_index]['stack_idx']
+        query_input = df.iloc[query_index]['data']
 
-        fig, axes = plt.subplots(1, k + 1, figsize=(3 * (k + 1), 3))
+        topk_emb_idx = row["embedding_neighbors"]
+        topk_input_idx = row["input_neighbors"]
+        same_stack_idx = row["same_stack_neighbors"]
+        same_stack_sims = row["same_stack_similarities"]
 
-        axes[0].plot(query)
-        axes[0].set_title(f'Query\nIdx: {query_index}')
-        axes[0].set_xlabel('Time')
-        axes[0].set_ylabel('Amplitude')
+        topk_emb_stack_matches = len(row["embedding_stack_matches"])
+        topk_input_stack_matches = len(row["input_stack_matches"])
 
-        for i, (signal, sim, idx) in enumerate(zip(retrieved, similarities, indices)):
-            axes[i + 1].plot(signal)
-            axes[i + 1].set_title(f"Similar {i + 1}\nIdx: {idx}\nSim: {sim:.2f}")
-            axes[i + 1].set_xlabel("Time")
+        emb_sims = np.stack(row['embedding_similarities'])
+        input_sims = np.stack(row['input_similarities'])
+
+        row_titles = [
+            "Similar spectrograms in embedding space",
+            "Similar spectrograms in input space",
+            "Same stack spectrograms"
+        ]
+
+        # --- Plot ---
+        fig, axes = plt.subplots(3, k + 1, figsize=(3.5 * (k + 1), 9))
+        fig.suptitle(
+            f"Query idx={query_index} | stack={query_stack}\n"
+            f"Same-stack neighbors: embeddings={topk_emb_stack_matches}, input={topk_input_stack_matches}",
+            fontsize=14
+        )
+
+
+        for row_idx in [0, 1, 2]:
+            axes[row_idx, 0].plot(query_input)
+            axes[row_idx, 0].set_title(f"QUERY\nidx={query_index}, stack={query_stack}")
+            axes[row_idx, 0].set_xticks([])
+            axes[row_idx, 0].set_yticks([])
+
+        for j, idx in enumerate(topk_emb_idx[:k]):
+            axes[0, j + 1].plot(df.iloc[idx]['data'])
+            axes[0, j + 1].set_title(f"Emb idx={idx}\nstack={df.iloc[idx]['stack_idx']}, sim={emb_sims[j]:.2f}")
+            axes[0, j + 1].set_xticks([])
+            axes[0, j + 1].set_yticks([])
+
+        for j, idx in enumerate(topk_input_idx[:k]):
+            axes[1, j + 1].plot(df.iloc[idx]['data'])
+            axes[1, j + 1].set_title(f"Inp idx={idx}\nstack={df.iloc[idx]['stack_idx']}, sim={input_sims[j]:.2f}")
+            axes[1, j + 1].set_xticks([])
+            axes[1, j + 1].set_yticks([])
+
+        for j, (idx, sim) in enumerate(zip(same_stack_idx[:k], same_stack_sims[:k])):
+            axes[2, j + 1].plot(df.iloc[idx]['data'])
+            axes[2, j + 1].set_title(f"Same-stack idx={idx}\nsim={sim:.2f}")
+            axes[2, j + 1].set_xticks([])
+            axes[2, j + 1].set_yticks([])
 
         plt.tight_layout()
-        fname = f"input_space_sim_query_{query_index}_k{k}.png"
-        plt.savefig(os.path.join(self.output_dir, fname))
-        print(f"Saved: {fname}")
+        output_path = os.path.join(self.output_dir, f"comparison_query_{query_index}_k{k}_with_same_stack.png")
+        plt.savefig(output_path)
+        print(f"Saved: {output_path}")
         plt.close()
-
-    def visualize_embedding_similarity_in_input_space(self, df, query_index, k=5):
-        """
-        Plots the query signal and its k most similar signals side by side.
-        """
-        result = self.retrieve_k_similar_inputs_by_embedding(df, query_index=query_index, k=k)
-        query_signal = df.iloc[query_index]['inputs']
-
-        fig, axes = plt.subplots(1, k + 1, figsize=(3 * (k + 1), 3))
-
-        # Plot query
-        axes[0].plot(query_signal)
-        axes[0].set_title(f'Query\nIndex: {query_index}')
-        axes[0].set_xlabel('Time')
-        axes[0].set_ylabel('Amplitude')
-
-        # Plot k similar
-        for i, idx in enumerate(result["indices"]):
-            signal = df.iloc[idx]['inputs']
-            sim = result["similarities"][i]
-            axes[i + 1].plot(signal)
-            axes[i + 1].set_title(f"Similar {i + 1}\nIdx: {idx}\nSim: {sim:.2f}")
-            axes[i + 1].set_xlabel('Time')
-
-        plt.tight_layout()
-        fname = f"embedding_sim_query_{query_index}_k{k}.png"
-        plt.savefig(os.path.join(self.output_dir, fname))
-        print(f"Saved: {fname}")
-        plt.close()
-
-    def compare_embedding_vs_input_similarity(self, df, k=5, max_samples=None):
-        """
-        Compare how similar the top-k embedding-based neighbors are to the query in input space.
-
-        Returns:
-            List of (input_score, emb_score) for each sample.
-        """
-        embeddings = np.stack(df["embedding"].values)
-        inputs = np.stack(df["inputs"].values)
-        results = []
-
-        sample_indices = range(len(df)) if max_samples is None else range(min(max_samples, len(df)))
-
-        for i in sample_indices:
-            # Input-space neighbors
-            input_sims = cosine_similarity(inputs[i].reshape(1, -1), inputs)[0]
-            input_sims[i] = -np.inf
-            input_neighbors = np.argsort(input_sims)[-k:]
-            avg_input_sim_input_neighbors = np.mean(
-                [cosine_similarity(inputs[i].reshape(1, -1), inputs[j].reshape(1, -1))[0][0] for j in input_neighbors])
-
-            # Embedding-space neighbors
-            emb_sims = cosine_similarity(embeddings[i].reshape(1, -1), embeddings)[0]
-            emb_sims[i] = -np.inf
-            emb_neighbors = np.argsort(emb_sims)[-k:]
-            avg_input_sim_emb_neighbors = np.mean(
-                [cosine_similarity(inputs[i].reshape(1, -1), inputs[j].reshape(1, -1))[0][0] for j in emb_neighbors])
-
-            results.append((avg_input_sim_input_neighbors, avg_input_sim_emb_neighbors))
-
-        return results
 
     def plot_similarity_comparison(self, sim_pairs, fname="embedding_vs_input_similarity.png"):
         input_scores, emb_scores = zip(*sim_pairs)

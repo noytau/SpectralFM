@@ -52,15 +52,14 @@ class EvalExperiment(ExperimentRunner):
         df = pd.DataFrame(all_rows)
         return df
 
-    def add_noisy_embeddings_to_df(self, df, model, device='cpu', noise_std=0.05):
+    def add_noisy_embeddings_to_df(self, df, model, device='cpu'):
+
         model.eval()
         model.to(device)
 
         noisy_embeddings = []
         for i in range(len(df)):
-            x = torch.tensor(df.iloc[i]['inputs'], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            noise = torch.randn_like(x) * noise_std
-            x_noisy = x + noise
+            x_noisy = torch.tensor(df.iloc[i]['noisy_data'], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
             with torch.no_grad():
                 emb = model(x_noisy).last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
             noisy_embeddings.append(emb)
@@ -85,8 +84,8 @@ class EvalExperiment(ExperimentRunner):
         sample_indices = range(len(df)) if max_samples is None else range(min(max_samples, len(df)))
 
         for i in sample_indices:
-            clean_emb = torch.tensor(df.iloc[i]["embedding"]).float()
-            noisy_emb = torch.tensor(df.iloc[i]["noisy_embedding"]).float()
+            clean_emb = torch.tensor(df.iloc[i]["embeddings"]).float()
+            noisy_emb = torch.tensor(df.iloc[i]["noisy_embeddings"]).float()
             sim = cosine_similarity(clean_emb.unsqueeze(0), noisy_emb.unsqueeze(0)).item()
             similarities.append(sim)
 
@@ -103,44 +102,166 @@ class EvalExperiment(ExperimentRunner):
         print(f"Number of test samples: {len(test_data)}")
         print(f"Results: {results}")
 
-
     def run_evaluation(self):
-        df = self.prepare_data() # parse data to df
+        df = self.prepare_data()  # parse data to df
 
-        # Get evaluation data
-        test = Testing(model=None, df=df, test_method=self.args.test_method, stack_method=self.args.stack_method)  # fixme replace for args
+        # Get data for evaluation based on test method
+        test = Testing(model=None, df=df, test_method=self.args.test_method, stack_method=self.args.stack_method)
         test_data = test.get_test_data()
 
-        # Run evaluation based on method on test_data
-        if self.eval_method == "signal_completion":
-            signal_comp_df = self.evaluate_signal_completion(test_data)
+        all_data = self.create_comp_df(test_data)
+
+        comparison_results = self.compare_similarity_by_stack_membership(all_data, k=5)
+        print(comparison_results.head())
+
+        self.evaluate_stats_and_visualizations(all_data, comparison_results)
 
 
-            stats = Stats(df=signal_comp_df, argparse=self.args)
-            stats.output_dir = "/mnt5/noy/code/logs/eval_outputs/16-09-25/mask=0.25-epoch=1_batch=32_loss_fn=mse" # fixme pass from args
-            #stats.plot_best_and_worst_predictions(signal_comp_df, k=3)
+    def create_comp_df(self, test_data):
+        # Create dataframe from test_data and preserve original indices
+        all_data = pd.DataFrame(
+            columns=['data', 'masked_data', 'embeddings', 'stack_idx', 'noisy_data', 'noisy_embeddings'])
 
-            #result = stats.retrieve_k_similar_inputs_by_embedding(signal_comp_df, query_index=7, k=3)
+        # Keep the original index from the full dataset
+        all_data['index'] = test_data.index.values
+        all_data['data'] = test_data.loc[:, test_data.columns != 'stack_idx'].values.tolist()
+        all_data['stack_idx'] = test_data['stack_idx'].values
 
-            #stats.visualize_embedding_similarity_in_input_space(signal_comp_df, query_index=24, k=5)
-            #stats.visualize_input_similarity_in_input_space(df=signal_comp_df, query_index=24, k=5)
+        # fixme: understand if I need to evaluate embedding like so, or use no_grad (like in noisy)
+        # Run dataloader + model
+        dataloader, all_data = prepare_masked_dataloader(all_data, args=self.args)
+        outputs, embeddings = evaluate_embedding_from_model(self.args, dataloader)
+        all_data['embeddings'] = [emb.detach().cpu() for emb in embeddings]
 
-            #results = stats.compare_embedding_vs_input_similarity(df=signal_comp_df, k=5, max_samples=500)
-            #stats.plot_similarity_comparison(results)
-            # print("Similar sample indices:", result["indices"])
+        all_data = self.add_noisy_data_to_df(all_data, noise_std=0.001)  # fixme - add in args + add different noise methods
+        all_data = self.add_noisy_embeddings_to_df(all_data, self.model, device=self.model.device)
 
-            # fixme move to if noise robustness?
-            self.add_noisy_embeddings_to_df(signal_comp_df, model=self.model, device=self.model.device, noise_std=0.1)
-            sims = self.evaluate_embedding_robustness_to_noise_from_df(signal_comp_df)
-            stats.plot_noise_robustness_histogram(sims, noise_std=0.3)
-            stats.plot_robustness_scatter(signal_comp_df, sims, noise_std=0.3)
+        return all_data
 
+    def add_noisy_data_to_df(self, df, noise_std=0.05):
+        df["noisy_data"] = df["data"].apply(
+            lambda x: (np.array(x) + np.random.normal(0, noise_std, size=len(x))).tolist()
+        )
+        return df
 
+    def evaluate_stats_and_visualizations(self, signal_comp_df, match_df, k=5):
 
+        stats = Stats(df=signal_comp_df, argparse=self.args)
+        stats.output_dir = "/mnt5/noy/code/logs/eval_outputs/27-09-25/mask=0.25-epoch=1_batch=32_loss_fn=mse" # fixme pass from args
+        # Compute diff in match length between embedding and input space
+        match_df["match_diff"] = match_df.apply(
+            lambda row: len(set(row["embedding_stack_matches"])) - len(set(row["input_stack_matches"])),
+            axis=1
+        )
 
-        elif self.eval_method == "noise_robustness":
-            pass
-            # self.evaluate_embedding_robustness_to_noise(test_data, noise_levels=[0.1, 0.2, 0.3])
-        else:
-            print(f"Unknown evaluation method: {self.eval_method}")
+        # Normalize match_diff to a 0–100 score
+        match_df["match_score"] = ((match_df["match_diff"] + 5) / 10) * 100
+        avg_score = match_df["match_score"].mean()
+        score_row = pd.DataFrame([{
+            "index": "average_score",
+            "match_score": avg_score
+        }])
 
+        # Save match_df to CSV for inspection
+        match_df_with_score = pd.concat([match_df, score_row], ignore_index=True)
+        match_df_with_score.to_csv(os.path.join(stats.output_dir, "match_df.csv"), index=False)
+
+        # Get k best (most agreement) and k worst (most disagreement)
+        best_matches = match_df.nsmallest(k, "match_diff")
+        worst_matches = match_df.nlargest(k, "match_diff")
+
+        print(f"\nTop-{k} best matches (agreement):", best_matches["index"].tolist())
+        print(f"Top-{k} worst matches (disagreement):", worst_matches["index"].tolist())
+
+        for idx in best_matches["index"]:
+            stats.compare_embedding_vs_input_similarity(
+                df=signal_comp_df,
+                match_df=match_df,
+                query_index=idx,
+                k=5
+            )
+
+        for idx in worst_matches["index"]:
+            stats.compare_embedding_vs_input_similarity(
+                df=signal_comp_df,
+                match_df=match_df,
+                query_index=idx,
+                k=5
+            )
+
+        # fixme move to if noise robustness?
+        sims = self.evaluate_embedding_robustness_to_noise_from_df(signal_comp_df)
+        #stats.plot_noise_robustness_histogram(sims, noise_std=0.3)
+        #stats.plot_robustness_scatter(signal_comp_df, sims, noise_std=0.3)
+
+    def compare_similarity_by_stack_membership(
+            self,
+            df,
+            k=5,
+            include_seen_in_stack_row=True,
+            fill_with_seen_if_not_enough=True
+    ):
+        """
+        Compute similarities for each row.
+        - include_seen_in_stack_row=False: exclude query and top-k already seen from same-stack list
+        - fill_with_seen_if_not_enough=True: if not enough unseen same-stack, fill with seen ones
+        """
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        input_matrix = np.stack(df['data'].to_numpy())
+        embedding_matrix = np.stack(df['embeddings'].to_numpy())
+
+        results = []
+
+        for idx in range(len(df)):
+            query_stack = df.iloc[idx]['stack_idx']
+            query_input = input_matrix[idx].reshape(1, -1)
+            query_embedding = embedding_matrix[idx].reshape(1, -1)
+
+            input_sims = cosine_similarity(query_input, input_matrix)[0]
+            embedding_sims = cosine_similarity(query_embedding, embedding_matrix)[0]
+
+            topk_input_idx = input_sims.argsort()[::-1][1:k + 1]
+            topk_embedding_idx = embedding_sims.argsort()[::-1][1:k + 1]
+
+            input_stack_matches = [int(i) for i in topk_input_idx if df.iloc[i]['stack_idx'] == query_stack]
+            emb_stack_matches = [int(i) for i in topk_embedding_idx if df.iloc[i]['stack_idx'] == query_stack]
+
+            # Same-stack samples
+            same_stack_df = df[df["stack_idx"] == query_stack].copy()
+
+            # Always drop the query index
+            same_stack_df = same_stack_df.drop(index=idx, errors='ignore')
+
+            if not include_seen_in_stack_row:
+                seen = set(topk_input_idx) | set(topk_embedding_idx)
+                same_stack_df = same_stack_df[~same_stack_df.index.isin(seen)]
+
+                if len(same_stack_df) < k and fill_with_seen_if_not_enough:
+                    # Re-include seen (but NOT query)
+                    refill_df = df[df["stack_idx"] == query_stack].copy()
+                    refill_df = refill_df.drop(index=idx, errors='ignore')
+                    refill_df["cosine_sim"] = refill_df.index.map(lambda i: input_sims[i])
+                    same_stack_df = refill_df.sort_values("cosine_sim", ascending=False)
+            else:
+                # Still need to drop query index
+                same_stack_df["cosine_sim"] = same_stack_df.index.map(lambda i: input_sims[i])
+                same_stack_df = same_stack_df.sort_values("cosine_sim", ascending=False)
+
+            same_stack_sorted = same_stack_df.head(k)
+            same_stack_idxs = same_stack_sorted.index.tolist()
+            same_stack_sims = same_stack_sorted["cosine_sim"].tolist()
+            results.append({
+                    "index": idx,
+                    "stack_idx": query_stack,
+                    "embedding_neighbors": topk_embedding_idx.tolist(),
+                    "embedding_similarities": embedding_sims[topk_embedding_idx].tolist(),
+                    "embedding_stack_matches": emb_stack_matches,
+                    "input_neighbors": topk_input_idx.tolist(),
+                    "input_similarities": input_sims[topk_input_idx].tolist(),
+                    "input_stack_matches": input_stack_matches,
+                    "same_stack_neighbors": same_stack_idxs,
+                    "same_stack_similarities": same_stack_sims
+                })
+
+        return pd.DataFrame(results)

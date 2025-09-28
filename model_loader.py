@@ -234,26 +234,23 @@ def safe_get(args, attr, default):
 
 
 def prepare_masked_dataloader(df, interpolate_to_16k=False, args=None):
-    mask_ratio = safe_get(args,"mask_ratio", 0.15)
-    batch_size = safe_get(args,"batch_size", 8)
-    masking_type = safe_get(args,"masking_type", "random")
+    mask_ratio = args.mask_ratio
+    batch_size = args.batch_size
+    masking_type = args.masking_type
 
     masked_dataset = []
-    df = normalize_to_audio_range(df)
+    df["data"] = normalize_to_audio_range(df["data"])
     for i, row in df.iterrows():
-        sample_dict = {"data": row.values.tolist()}
-        if interpolate_to_16k:
-            sample_dict = resample_to_16k(sample_dict)
-        original = torch.tensor(sample_dict["data"], dtype=torch.float32)
+        original = torch.tensor(row["data"], dtype=torch.float32)
         masked = apply_masking(original, mask_ratio=mask_ratio, masking_type=masking_type)
-
+        df.at[i,"masked_data"] = masked.tolist()
         masked_dataset.append({
             "data": original,
             "masked_data": masked
         })
 
     dataloader = DataLoader(masked_dataset, batch_size=batch_size, collate_fn=simple_collate_fn)
-    return dataloader, masked_dataset
+    return dataloader, df
 
 def resample_to_16k(sample, original_sr=SOURCE_LENGTH, target_sr=TARGET_LENGTH): # stretches sample by interpolating a string from 245 to 16k to fit pre-trained model
     def resample_tensor(array):
@@ -284,11 +281,7 @@ def compute_stack_from_input_spectograms(input_df):
     input_df = input_df.copy()
     input_df['stack_idx'] = input_df.index // 10  # assign stack index
 
-    stack_dict = {
-        stack_idx: group.drop(columns='stack_idx')
-        for stack_idx, group in input_df.groupby('stack_idx')
-    }
-    return stack_dict
+    return input_df
 
 
 #--------------- model evaluation functions ----------------#
