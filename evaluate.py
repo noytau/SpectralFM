@@ -1,9 +1,14 @@
+import datetime
+
 from run_experiment import ExperimentRunner
 from testing import Testing
 from model_loader import *
 from compute_stats import *
 from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
+import matplotlib.pyplot as plt
+import scipy.signal
+import os
 
 
 class EvalExperiment(ExperimentRunner):
@@ -52,50 +57,59 @@ class EvalExperiment(ExperimentRunner):
         df = pd.DataFrame(all_rows)
         return df
 
-    def add_noisy_embeddings_to_df(self, df, model, device='cpu'):
+    def add_noisy_embeddings_to_df(self, df, noisy_data_columns, model, device='cpu'):
 
         model.eval()
         model.to(device)
 
-        noisy_embeddings = []
-        for i in range(len(df)):
-            x_noisy = torch.tensor(df.iloc[i]['noisy_data'], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            with torch.no_grad():
-                emb = model(x_noisy).last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
-            noisy_embeddings.append(emb)
+        # Find all columns starting with "data_"
 
-        df["noisy_embedding"] = noisy_embeddings
+        for col in noisy_data_columns:
+            embeddings_list = []
+            for i in range(len(df)):
+                x_noisy = torch.tensor(df.iloc[i][col], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    emb = model(x_noisy).last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
+                embeddings_list.append(emb)
+            df["embedding_" + col] = embeddings_list
+
         return df
 
-    def evaluate_embedding_robustness_to_noise_from_df(self, df, max_samples=None):
+    def evaluate_embedding_robustness_to_noise_from_df(self, df, noise_cols, max_samples=None):
         """
-        Compare clean vs noisy embeddings stored in df using cosine similarity.
+        Compare clean vs noisy embeddings and data for each noise type.
 
-        Assumes:
-            - df["embedding"]: clean embeddings
-            - df["noisy_embedding"]: noisy embeddings
-
-        Returns:
-            List of cosine similarities
+        Args:
+            df (pd.DataFrame): dataframe with columns ["data", "embeddings", "data_<noise>", "embedding_<noise>"]
+            noise_cols (list): list of noise column names (e.g. ["data_gaussian_0_001", "data_shot_low", ...])
+            max_samples (int, optional): limit number of samples to compute.
         """
-        from torch.nn.functional import cosine_similarity
-
-        similarities = []
         sample_indices = range(len(df)) if max_samples is None else range(min(max_samples, len(df)))
 
-        for i in sample_indices:
-            clean_emb = torch.tensor(df.iloc[i]["embeddings"]).float()
-            noisy_emb = torch.tensor(df.iloc[i]["noisy_embeddings"]).float()
-            sim = cosine_similarity(clean_emb.unsqueeze(0), noisy_emb.unsqueeze(0)).item()
-            similarities.append(sim)
+        for noise_col in noise_cols:
+            emb_col = "embedding_" + noise_col
+            data_sims = []
+            emb_sims = []
 
-        return similarities
+            for i in sample_indices:
+                clean_data = torch.tensor(df.iloc[i]["data"]).float()
+                noisy_data = torch.tensor(df.iloc[i][noise_col]).float()
+                clean_emb = torch.tensor(df.iloc[i]["embeddings"]).float()
+                noisy_emb = torch.tensor(df.iloc[i][emb_col]).float()
 
-    def compare_embeddings(self,test_data):
-        pass
+                # Compute cosine similarities
+                data_sim = cosine_similarity(clean_data.unsqueeze(0), noisy_data.unsqueeze(0)).item()
+                emb_sim = cosine_similarity(clean_emb.unsqueeze(0), noisy_emb.unsqueeze(0)).item()
 
-    def classifier_head(self, test_data):
-        pass
+                data_sims.append(data_sim)
+                emb_sims.append(emb_sim)
+
+            # Save results as new columns
+            df[f"data_noise_similarity_{noise_col.replace('data_', '')}"] = data_sims
+            df[f"embedding_noise_similarity_{noise_col.replace('data_', '')}"] = emb_sims
+
+        return df
+
 
     def print_eval_summary(self, eval_method, test_data, results):
         print(f"Evaluation Summary for method: {eval_method}")
@@ -109,12 +123,12 @@ class EvalExperiment(ExperimentRunner):
         test = Testing(model=None, df=df, test_method=self.args.test_method, stack_method=self.args.stack_method)
         test_data = test.get_test_data()
 
-        all_data = self.create_comp_df(test_data)
+        all_data, noise_cols = self.create_comp_df(test_data)
 
         comparison_results = self.compare_similarity_by_stack_membership(all_data, k=5)
         print(comparison_results.head())
 
-        self.evaluate_stats_and_visualizations(all_data, comparison_results)
+        self.evaluate_stats_and_visualizations(all_data, comparison_results, noise_cols)
 
 
     def create_comp_df(self, test_data):
@@ -133,21 +147,39 @@ class EvalExperiment(ExperimentRunner):
         outputs, embeddings = evaluate_embedding_from_model(self.args, dataloader)
         all_data['embeddings'] = [emb.detach().cpu() for emb in embeddings]
 
-        all_data = self.add_noisy_data_to_df(all_data, noise_std=0.001)  # fixme - add in args + add different noise methods
-        all_data = self.add_noisy_embeddings_to_df(all_data, self.model, device=self.model.device)
+        all_data, noisy_cols = self.add_noisy_data_to_df(all_data)
+        all_data = self.add_noisy_embeddings_to_df(all_data, noisy_cols, self.model, device=self.model.device)
 
-        return all_data
+        return all_data, noisy_cols
 
-    def add_noisy_data_to_df(self, df, noise_std=0.05):
-        df["noisy_data"] = df["data"].apply(
-            lambda x: (np.array(x) + np.random.normal(0, noise_std, size=len(x))).tolist()
-        )
-        return df
+    # fixme noy: ask nimrod about the noise additions, specifically shot noise gaussian
+    def add_noisy_data_to_df(self, df):
+        noise_data_cols = {
+            "data_gaussian_std": [],
+            "data_gaussian_mean": [],
+            "data_shot_low": [],
+            "data_shot_high": [],
+            "data_gain_low": [],
+            "data_gain_high": []
+        }
+        # fixme chack values of data (-1 to 1?)
+        for x in df["data"]:
+            x = np.array(x)
+            noise_data_cols["data_gaussian_std"].append(x + np.random.normal(0, 0.01, size=len(x)))
+            noise_data_cols["data_gaussian_mean"].append(x + np.random.normal(2, 0.001, size=len(x)))
+            noise_data_cols["data_shot_low"].append(np.random.poisson((x - x.min() + 1e-4) * 0.1) / 0.1 - 1e-4)
+            noise_data_cols["data_shot_high"].append(np.random.poisson((x - x.min() + 1e-4) * 0.05) / 0.05 - 1e-4)
+            noise_data_cols["data_gain_low"].append(x * np.random.normal(1, 0.05))
+            noise_data_cols["data_gain_high"].append(x * np.random.normal(1, 0.1))
 
-    def evaluate_stats_and_visualizations(self, signal_comp_df, match_df, k=5):
+        for name, values in noise_data_cols.items():
+            df[name] = values
+        return df, noise_data_cols
 
-        stats = Stats(df=signal_comp_df, argparse=self.args)
-        stats.output_dir = "/mnt5/noy/code/logs/eval_outputs/27-09-25/mask=0.25-epoch=1_batch=32_loss_fn=mse" # fixme pass from args
+    def evaluate_stats_and_visualizations(self, signal_comp_df, match_df, noise_cols, k=5):
+
+        #output_dir = f"{self.args.output_path}/eval_outputs/{datetime.today().strftime('%d-%m-%y')}_{self.args.model_name}" # fixme pass from args
+        stats = Stats(df=signal_comp_df, argparse=self.args, eval=True)
         # Compute diff in match length between embedding and input space
         match_df["match_diff"] = match_df.apply(
             lambda row: len(set(row["embedding_stack_matches"])) - len(set(row["input_stack_matches"])),
@@ -189,10 +221,31 @@ class EvalExperiment(ExperimentRunner):
                 k=5
             )
 
-        # fixme move to if noise robustness?
-        sims = self.evaluate_embedding_robustness_to_noise_from_df(signal_comp_df)
-        #stats.plot_noise_robustness_histogram(sims, noise_std=0.3)
-        #stats.plot_robustness_scatter(signal_comp_df, sims, noise_std=0.3)
+
+        # fixme noy not sure its necessary to iterate over all best/worst - maybe calculate avg similarity for best/worst sets?
+        signal_comp_df = self.evaluate_embedding_robustness_to_noise_from_df(signal_comp_df, noise_cols)
+        # Iterate over each noise type and compute best/worst indices for each type independently
+        for noise_col in noise_cols:
+            emb_sim_col = f"embedding_noise_similarity_{noise_col.replace('data_', '')}"
+            if emb_sim_col not in signal_comp_df.columns:
+                print(f"Skipping {noise_col}, missing column {emb_sim_col}")
+                continue
+
+            noise_sim = np.array(signal_comp_df[emb_sim_col])
+            best_noisy_idx = noise_sim.argsort()[-k:][::-1]
+            worst_noisy_idx = noise_sim.argsort()[:k]
+
+            print(f"\nNoise type: {noise_col}")
+            print(f"Top-{k} best noisy indices ({noise_col}):", best_noisy_idx.tolist())
+            print(f"Top-{k} worst noisy indices ({noise_col}):", worst_noisy_idx.tolist())
+
+            stats.plot_noise_robustness_histogram(signal_comp_df, [noise_col])
+
+            for idx in best_noisy_idx:
+                stats.plot_noisy_vs_clean_spectrogram(signal_comp_df, idx, [noise_col], status="Best")
+
+            for idx in worst_noisy_idx:
+                stats.plot_noisy_vs_clean_spectrogram(signal_comp_df, idx, [noise_col], status="Worst")
 
     def compare_similarity_by_stack_membership(
             self,

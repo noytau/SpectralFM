@@ -12,6 +12,7 @@ PARAMS = {
     "batch_size":    {"column": "Batch Size",     "default": 32},
     "epoch":         {"column": "Epochs",         "default": 1},
     "model_path":    {"column": "Model Path",     "default": None},
+    "output_path":   {"column": "Output Path",    "default": "/mnt5/noy/code/outputs"},
     "mode":          {"column": "Mode",           "default": "train"},
     "eval_method":   {"column": "Eval Method",    "default": "signal_completion"},
     "test_method":   {"column": "Test Method",    "default": "index_in_distribution_stack_holdout"},
@@ -57,6 +58,8 @@ class ArgsParser:
         args.batch_size = int(get_arg("batch_size"))
         args.epoch = int(get_arg("epoch"))
         args.model_path = get_arg("model_path")
+        args.model_name = args.model_path.split('/')[-1].strip(".pt").strip("\'") if args.model_path else None
+        args.output_path = get_arg("output_path")
         args.mode = get_arg("mode")
         args.eval_method = get_arg("eval_method")
         args.test_method = get_arg("test_method")

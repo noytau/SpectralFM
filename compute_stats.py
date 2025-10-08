@@ -26,16 +26,18 @@ class Stats:
     """
     Used to plot graphs, collect statistics on data.
     """
-    def __init__(self, df, argparse=None):
+    def __init__(self, df, argparse=None, eval=False):
         import datetime
 
         self.df = df
         date_str = datetime.datetime.now().date().isoformat()
-        if argparse:
-            experiment_string = argparse.model_path.split('/')[-1]
-            experiment_string = "experiment-" + experiment_string # fixme noy consider including len of dataset
+        experiment_string = argparse.model_name if argparse.model_name is not None else f"experiment-{date_str}"
+
+        if eval:
+            experiment_string = "evaluations/" + experiment_string
         else:
-            experiment_string = f"experiment-{date_str}"
+            if eval:
+                experiment_string = "trainings/" + experiment_string
         output_dir = os.path.join(PLOTS_DIR, experiment_string)
         self.output_dir = output_dir
 
@@ -1018,15 +1020,49 @@ class Stats:
         plt.savefig(os.path.join(self.output_dir, fname))
         plt.close()
 
-    def plot_noise_robustness_histogram(self, similarities, noise_std, fname="embedding_noise_robustness.png"):
-        plt.figure(figsize=(6, 4))
-        plt.hist(similarities, bins=30, color='purple', alpha=0.7)
-        plt.title(f"Embedding Similarity (Noisy vs Clean) — σ={noise_std}")
-        plt.xlabel("Cosine Similarity")
-        plt.ylabel("Frequency")
-        plt.grid(True)
+    def plot_noise_robustness_histogram(self, df, noise_cols):
+        """
+        Plots histograms comparing cosine similarities:
+        - Clean vs noisy data
+        - Clean embedding vs noisy embedding
+        for each noise column in noise_cols.
+        """
+
+        n_noises = len(noise_cols)
+        fig, axes = plt.subplots(1, n_noises, figsize=(5 * n_noises, 4))
+        if n_noises == 1:
+            axes = [axes]
+
+        for i, noise_col in enumerate(noise_cols):
+            ax = axes[i]
+            emb_col = "embedding_" + noise_col
+
+            data_sims = []
+            emb_sims = []
+
+            for j in range(len(df)):
+                clean_data = torch.tensor(df.iloc[j]["data"]).float()
+                noisy_data = torch.tensor(df.iloc[j][noise_col]).float()
+                clean_emb = torch.tensor(df.iloc[j]["embeddings"]).float()
+                noisy_emb = torch.tensor(df.iloc[j][emb_col]).float()
+
+                data_sim = cosine_similarity(clean_data.unsqueeze(0), noisy_data.unsqueeze(0)).item()
+                emb_sim = cosine_similarity(clean_emb.unsqueeze(0), noisy_emb.unsqueeze(0)).item()
+
+                data_sims.append(data_sim)
+                emb_sims.append(emb_sim)
+
+            ax.hist(data_sims, bins=30, alpha=0.6, label="Data vs Noisy Data", color="skyblue")
+            ax.hist(emb_sims, bins=30, alpha=0.6, label="Embeddings vs Noisy Embeddings", color="orange")
+            ax.set_title(noise_col.replace("data_", "").replace("_", " "))
+            ax.set_xlabel("Cosine Similarity")
+            ax.set_ylabel("Frequency")
+            ax.legend()
+
         plt.tight_layout()
-        plt.savefig(os.path.join(self.output_dir, fname))
+        fname = f"noise_robustness_histogran.png"
+        output_path = os.path.join(self.output_dir, fname)
+        plt.savefig(output_path)
         plt.close()
 
     def plot_robustness_scatter(self, df, similarities, noise_std, fname="robustness_scatter.png"):
@@ -1054,6 +1090,62 @@ class Stats:
         plt.savefig(fname)
         plt.close()
         print(f"Saved: {fname}")
+
+    def plot_noisy_vs_clean_spectrogram(self, df, idx, noise_cols, status=""):
+        """
+        Plot side-by-side comparisons of the clean and noisy spectrograms for different noise types.
+
+        Args:
+            df (pd.DataFrame): dataframe containing columns "data" and multiple "data_<noise>" columns.
+            idx (int): index of the sample to visualize.
+            noise_cols (list): list of noisy data column names (e.g. ["data_gaussian_0_001", "data_shot_low", ...]).
+            status (str): optional tag for title (e.g. "Best", "Worst").
+        """
+        n_noises = len(noise_cols)
+        fig, axes = plt.subplots(1, n_noises, figsize=(5 * n_noises, 4))
+        if n_noises == 1:
+            axes = [axes]
+
+        clean = np.array(df.iloc[idx]["data"])
+
+        for i, noise_col in enumerate(noise_cols):
+            ax = axes[i]
+            noisy = np.array(df.iloc[idx][noise_col])
+
+            ax.plot(clean, label="Clean", color="black", linewidth=1.2)
+            ax.plot(noisy, label=noise_col.replace("data_", "").replace("_", " "), alpha=0.8)
+            ax.set_title(noise_col.replace("data_", "").replace("_", " ") + f" | idx {idx} {status}")
+            ax.set_xlabel("Time / Frequency bins")
+            ax.set_ylabel("Amplitude")
+            ax.legend()
+
+        plt.tight_layout()
+        fname = f"{status}_noisy_vs_clean_{idx}.png"
+        output_path = os.path.join(self.output_dir, fname)
+        plt.savefig(output_path)
+        plt.close()
+
+    def plot_noisy_vs_clean_spectrogram_old(self, df, index, status):
+        """
+        Plot the raw 1D signals for clean and noisy data (not spectrogram heatmaps).
+        Plots both signals in a single plot with legend.
+        """
+        clean_signal = np.array(df.iloc[index]["data"])
+        noisy_signal = np.array(df.iloc[index]["noisy_data"])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(clean_signal, color='blue', label='Clean')
+        plt.plot(noisy_signal, color='orange', label='Noisy')
+        plt.xlabel("Time")
+        plt.ylabel("Amplitude")
+        plt.title(f"Clean vs Noisy ({status}, index={index}, input similarity={df.iloc[index]['data_noise_similarity']:.3f}, embedding similarity={df.iloc[index]['embedding_noise_similarity']:.3f})")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        fname = f"{status}_noisy_vs_clean_{index}.png"
+        output_path = os.path.join(self.output_dir, fname)
+        plt.savefig(output_path)
+        plt.close()
 
 
 
