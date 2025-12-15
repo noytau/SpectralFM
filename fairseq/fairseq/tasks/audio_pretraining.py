@@ -118,7 +118,7 @@ class AudioPretrainingTask(FairseqTask):
     def load_dataset(self, split: str, task_cfg: FairseqDataclass = None, **kwargs):
         data_path = self.cfg.data
         task_cfg = task_cfg or self.cfg
-        print(f"data_path = {data_path}, task_cfg = {task_cfg}")
+
         # upgrade old task
         if isinstance(task_cfg, Namespace):
             if not hasattr(task_cfg, "autoregressive"):

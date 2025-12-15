@@ -123,7 +123,6 @@ class TestFairseqSpeech(unittest.TestCase):
     @classmethod
     def get_batch_iterator(cls, task, test_split, max_tokens, max_positions):
         task.load_dataset(test_split)
-        print("NOY loaded dataset") 
         return task.get_batch_iterator(
             dataset=task.dataset(test_split),
             max_tokens=max_tokens,
