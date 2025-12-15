@@ -38,8 +38,8 @@ RUN git clone https://github.com/facebookresearch/fairseq.git /app/fairseq && \
     cd /app/fairseq && \
     pip install --no-cache-dir -e .
 
-# Clone the SpectralFM repository
-RUN git clone https://github.com/noytau/SpectralFM.git /storage/noy/spectralfm_code
+RUN mkdir -p /storage/noy/ && \
+    git clone https://github.com/noytau/SpectralFM.git /storage/noy/spectralfm_code
 
 ENV FORCE_CUDA=1
 ENV PYTHONPATH=/storage/noy/spectralfm_code:/app/fairseq
