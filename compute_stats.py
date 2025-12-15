@@ -18,7 +18,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 # internal imports
 from data_parser import *
-from model_loader import *
 
 PLOTS_DIR = "/mnt5/noy/code/plots"
 
@@ -1018,6 +1017,83 @@ class Stats:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, fname))
+        plt.close()
+
+    def plot_match_score_histogram(self, match_df):
+        """
+        Plot histogram comparing input vs embedding stack matches,
+        with higher-resolution bins and counts annotated on top of bars.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # Drop the summary row
+        df = match_df[match_df["index"] != "average_score"].copy()
+
+        # Extract lengths of matches (integer counts)
+        input_matches = df["input_stack_matches"].apply(len)
+        emb_matches = df["embedding_stack_matches"].apply(len)
+
+        # Choose bins with finer resolution (0.5) based on max count
+        max_matches = max(input_matches.max(), emb_matches.max())
+        bins = np.arange(-0.5, max_matches + 1.5, 0.5)
+
+        plt.figure(figsize=(10, 6))
+
+        # Plot histograms for input and embedding matches (counts, not density)
+        counts_input, bins_input, patches_input = plt.hist(
+            input_matches,
+            bins=bins,
+            alpha=0.4,
+            label="Input-space matches"
+        )
+
+        counts_emb, bins_emb, patches_emb = plt.hist(
+            emb_matches,
+            bins=bins,
+            alpha=0.4,
+            label="Embedding-space matches"
+        )
+
+        # Annotate counts on top of each bar (slightly offset to avoid overlap)
+        for c, patch in zip(counts_input, patches_input):
+            if c == 0:
+                continue
+            x = patch.get_x() + patch.get_width() / 2 - 0.1 * patch.get_width()
+            plt.text(
+                x,
+                c,
+                f"{int(c)}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                zorder=5
+            )
+
+        for c, patch in zip(counts_emb, patches_emb):
+            if c == 0:
+                continue
+            x = patch.get_x() + patch.get_width() / 2 + 0.1 * patch.get_width()
+            plt.text(
+                x,
+                c,
+                f"{int(c)}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                zorder=5
+            )
+
+        plt.xlabel("Match Count")
+        plt.ylabel("Count")
+        plt.title("Histogram: Input vs Embedding Stack Matches")
+        plt.legend()
+        plt.grid(alpha=0.25)
+        plt.tight_layout()
+        #plt.show()
+        fname = f"match_score_histogram_embedding_vs_input.png"
+        output_path = os.path.join(self.output_dir, fname)
+        plt.savefig(output_path)
         plt.close()
 
     def plot_noise_robustness_histogram(self, df, noise_cols):

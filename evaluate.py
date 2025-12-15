@@ -198,6 +198,8 @@ class EvalExperiment(ExperimentRunner):
         match_df_with_score = pd.concat([match_df, score_row], ignore_index=True)
         match_df_with_score.to_csv(os.path.join(stats.output_dir, "match_df.csv"), index=False)
 
+        stats.plot_match_score_histogram(match_df_with_score)
+
         # Get k best (most agreement) and k worst (most disagreement)
         best_matches = match_df.nsmallest(k, "match_diff")
         worst_matches = match_df.nlargest(k, "match_diff")
@@ -223,7 +225,9 @@ class EvalExperiment(ExperimentRunner):
 
 
         # fixme noy not sure its necessary to iterate over all best/worst - maybe calculate avg similarity for best/worst sets?
-        signal_comp_df = self.evaluate_embedding_robustness_to_noise_from_df(signal_comp_df, noise_cols)
+        #signal_comp_df = self.evaluate_embedding_robustness_to_noise_from_df(signal_comp_df, noise_cols)
+        #stats.plot_noise_robustness_histogram(signal_comp_df, noise_cols)
+
         # Iterate over each noise type and compute best/worst indices for each type independently
         for noise_col in noise_cols:
             emb_sim_col = f"embedding_noise_similarity_{noise_col.replace('data_', '')}"
@@ -238,8 +242,6 @@ class EvalExperiment(ExperimentRunner):
             print(f"\nNoise type: {noise_col}")
             print(f"Top-{k} best noisy indices ({noise_col}):", best_noisy_idx.tolist())
             print(f"Top-{k} worst noisy indices ({noise_col}):", worst_noisy_idx.tolist())
-
-            stats.plot_noise_robustness_histogram(signal_comp_df, [noise_col])
 
             for idx in best_noisy_idx:
                 stats.plot_noisy_vs_clean_spectrogram(signal_comp_df, idx, [noise_col], status="Best")

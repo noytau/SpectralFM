@@ -1,5 +1,14 @@
 from transformers import Data2VecAudioModel, AutoFeatureExtractor
 import torch
+import sys
+sys.path.append("/mnt5/noy/fairseq") # fixme change to your fairseq path
+
+from fairseq import checkpoint_utils
+#from examples.data2vec.models import Data2VecAudioModel
+#from examples.data2vec.models.modalities.audio import Data2VecAudioModel
+from examples.data2vec.models.data2vec_audio import Data2VecAudioModel
+import soundfile
+import torch, soundfile as sf
 from torch.utils.data import DataLoader
 from transformers import Wav2Vec2FeatureExtractor, Data2VecAudioModel, AutoConfig, TrainingArguments, Data2VecAudioConfig
 import torch
@@ -47,40 +56,6 @@ import matplotlib.pyplot as plt
 import os
 
 
-# Load Data2Vec Audio model and feature extractor
-def load_data2vec_new_model(model_name="facebook/data2vec-audio-base"):
-    # config = AutoConfig.from_pretrained(model_name) fixme debug
-    config = Data2VecAudioConfig()
-    config.conv_feature_layers = [
-        [512, 5, 2],  # kernel=5, stride=2
-        [512, 3, 2],
-        [512, 3, 2],
-        [512, 2, 2]
-    ]
-
-    model = Data2VecAudioModel(config) # Initialize model with custom config
-    # feature_extractor = Wav2Vec2FeatureExtractor(
-    #     feature_size=1,
-    #     sampling_rate=16000, # fixme can be changed
-    #     padding_value=0.0,
-    #     return_attention_mask=True,
-    #     do_normalize=True
-    # )
-
-    #print(model.config.conv_feature_layers)
-    #print("Model conv layers:")
-    #for i, layer in enumerate(model.feature_extractor.conv_layers):
-    #    print(f"Layer {i}: {layer}")
-
-    #print("Conv layers:", model.config.conv_feature_layers)
-
-    # fixme debug
-    #print("Feature extractor:", feature_extractor)
-
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return model.to(device), device
-
 def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
     # fixme add all these to a custom function
@@ -99,6 +74,28 @@ def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-b
     args.model = model.to(args.device) # fixme what am I doing here
     return model.to(args.device), model.feature_extractor, args.optimizer, args.device
 
+def load_fairseq_data2vec_model(args, model_path="/mnt5/noy/fairseq/base_libri_960h.pt"): # fixme change to return model, not eval
+    from fairseq.data.dictionary import Dictionary
+
+    # Load pretrained checkpoint
+    #state = torch.load(model_path, map_location=torch.device('cpu')) # fixme change to gpu if available
+    #model = Data2VecAudioModel.build_model(state['cfg']['model'])
+    #model.load_state_dict(state['model'], strict=False)
+
+    #model, cfg, task = torch.hub.load(
+    #    'facebookresearch/fairseq',
+    #    'data2vec_audio_base',
+    #    source='github'  # optional
+    #)
+
+    torch.serialization.add_safe_globals([Dictionary])
+
+    state = torch.load(model_path,  map_location="cpu")
+    # Build and load model
+    cfg = state["cfg"]["model"]
+    model = Data2VecAudioModel.build_model(cfg)
+    return model.to(args.device), model.feature_extractor, args.optimizer, args.device
+
 def load_original_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
     optimizer = torch.optim.Adam(model.feature_extractor.parameters(), lr=1e-4)
@@ -113,6 +110,7 @@ def normalize_to_audio_range(df):
 # Collate function for DataLoader
 def simple_collate_fn(batch):
 
+    # fixme: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach()
     data = [torch.tensor(sample["data"], dtype=torch.float32) for sample in batch]
     masked_data = [torch.tensor(sample["masked_data"], dtype=torch.float32) for sample in batch]
     return {
@@ -157,6 +155,158 @@ def prepare_resampled_dataloader(df, interpolate_to_16k=True, batch_size=8):
     all_data = torch.stack(resampled_tensors)  # shape: [N, 16000]
     dataloader = DataLoader(all_data, batch_size=batch_size, collate_fn=simple_collate_fn)
     return dataloader
+
+def convert_flac_to_wav(input_root, output_root): # used to tests LibSpeech dataset
+    """
+    Convert all .flac files in the given directory (and subdirectories) to .wav format.
+    Saves the .wav files in the same location as the .flac files.
+
+    Args:
+        root (str): Root directory to search for .flac files.
+    """
+    import os, soundfile as sf
+    from glob import glob
+    import torchaudio
+    from tqdm import tqdm
+
+    target_sr = 16000
+    # Walk through all subdirectories
+    for root, _, files in os.walk(input_root):
+        for fname in tqdm(files, desc=f"Converting {root}", leave=False):
+            if not fname.endswith(".flac"):
+                continue
+
+            in_path = os.path.join(root, fname)
+
+            # Create parallel output folder structure
+            rel_dir = os.path.relpath(root, input_root)
+            out_dir = os.path.join(output_root, rel_dir)
+            os.makedirs(out_dir, exist_ok=True)
+
+            out_path = os.path.join(out_dir, os.path.splitext(fname)[0] + ".wav")
+
+            # Skip if already converted
+            if os.path.exists(out_path):
+                continue
+
+            # Load + resample
+            wav, sr = torchaudio.load(in_path)
+            if sr != target_sr:
+                wav = torchaudio.functional.resample(wav, sr, target_sr)
+
+            # Convert to mono (LibriSpeech is stereo)
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+
+            # Save as WAV
+            torchaudio.save(out_path, wav, target_sr)
+
+def create_data2vec_audio_config(): # fixme noy need to review this entire chunk..
+    cfg = Data2VecAudioConfig()
+    cfg.conv_feature_layers = "[(512, 10, 5)] + [(512, 3, 2)] * 4 + [(512, 2, 2)] + [(512, 2, 2)]"
+    cfg.encoder_layers = 12
+    cfg.average_top_k_layers = 12
+    cfg.conv_pos_groups = 16
+    cfg.layer_type = "transformer"
+    cfg.activation_fn = "gelu"
+    cfg.encoder_attention_heads = 12
+    cfg.activation_dropout = 0.1
+
+    # === Architecture ===
+    cfg.encoder_embed_dim = 768
+    cfg.encoder_layers = 12
+    cfg.encoder_ffn_embed_dim = 3072
+    cfg.encoder_attention_heads = 12
+    cfg.activation_fn = "gelu"
+    cfg.layer_norm_first = False
+    cfg.layerdrop = 0.05
+
+    # === Dropouts ===
+    cfg.dropout_input = 0.1
+    cfg.dropout_features = 0.1
+    cfg.attention_dropout = 0.1
+    cfg.activation_dropout = 0.0
+    cfg.encoder_layerdrop = 0.05
+    cfg.dropout = 0.1
+
+    # === Feature extractor (conv frontend) ===
+    cfg.extractor_mode = "layer_norm"
+    cfg.conv_feature_layers = "[(512,10,5)] + [(512,3,2)]*4 + [(512,2,2)] + [(512,2,2)]"
+    cfg.conv_bias = False
+    cfg.feature_grad_mult = 0.1
+
+    # === Positional convolution ===
+    cfg.conv_pos = 128
+    cfg.conv_pos_groups = 16
+    cfg.conv_pos_depth = 5
+    cfg.conv_pos_pre_ln = False
+
+    # === Masking parameters ===
+    cfg.mask_prob = 0.65
+    cfg.mask_selection = "static"
+    cfg.mask_other = 0
+    cfg.mask_length = 10
+    cfg.no_mask_overlap = False
+    cfg.mask_min_space = 1
+    cfg.mask_channel_prob = 0.0
+    cfg.mask_channel_length = 64
+    cfg.mask_channel_before = False
+    cfg.mask_channel_selection = "static"
+    cfg.mask_channel_other = 0
+    cfg.no_mask_channel_overlap = False
+    cfg.mask_channel_min_space = 1
+
+    # === EMA (teacher / self-distillation) ===
+    cfg.ema_decay = 0.999
+    cfg.ema_end_decay = 0.9999
+    cfg.ema_anneal_end_step = 75000
+    cfg.ema_same_dtype = True
+    cfg.ema_encoder_only = False
+
+    # === Loss / reconstruction ===
+    cfg.loss_beta = 0.0
+    cfg.loss_scale = None
+    cfg.recon_loss = 0.0
+    cfg.recon_dim = 0
+    cfg.d2v_loss = 1.0
+    cfg.mean_loss = False
+    cfg.reconstruct_all = False
+    cfg.min_target_var = 0.1
+    cfg.min_pred_var = 0.01
+
+    # === Additional Fairseq args ===
+    cfg.qk_scale = None
+    cfg.cosine_attention = False
+    cfg.max_update = 400000
+    cfg.seed = 1
+    cfg.encoder_layers_to_keep = None
+    cfg.layer_norm_target_layer = False
+    cfg.batch_norm_target_layer = False
+    cfg.instance_norm_target_layer = False
+    cfg.log_norms = True
+    cfg.shared_decoder = None
+    cfg.dropout_input = 0.1
+    cfg.dropout_features = 0.1
+
+    # === Data2Vec multi-modality support ===
+    cfg.modalities = {"audio": {"feature_encoder_spec": cfg.conv_feature_layers}}
+    cfg.supported_modality = "AUDIO"
+    cfg.mae_init = False
+    cfg.bert_init = True
+    cfg.skip_ema = False
+    cfg.cls_loss = 0.0
+    cfg.alt_cls_targets = False
+    cfg.decoder_group = False
+
+    cfg.required_seq_len_multiple = 2  # Fairseq uses this to pad inputs to a multiple of X
+    cfg.checkpoint_activations = False  # controls activation checkpointing
+    cfg.offload_activations = False  # for memory saving
+    cfg.encoder_layerdrop = 0.0  # layer dropout probability
+    cfg.feature_grad_mult = 1.0  # gradient scaling for feature extractor
+    cfg.extractor_mode = "layer_norm"  # ensures correct mode for ConvFeatureExtractionModel
+    cfg.ema_transformer_only = False
+
+    return cfg
 
 def apply_masking(original, mask_ratio=0.15, masking_type="random"):
     """
@@ -376,7 +526,7 @@ def train_feature_extractor_only(model, optimizer, dataloader, device, mask_type
     return model_string
 
 # fixme change path to something nicer
-#
+
 def load_trained_model(args):
 
     model, feature_extractor, optimizer, device = load_custom_data2vec_audio_model(args)
