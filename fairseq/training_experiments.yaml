@@ -1,0 +1,81 @@
+# Hydra multi-run configuration for fairseq training
+# This configuration defines a parameter sweep over epochs, batch sizes,
+# mask ratios, learning rate schedulers and dataset directories.
+# Each run is given a unique job number which is used to construct
+# a run name logged to Weights & Biases (WANDB).  The WANDB project
+# is set to 'train_feature_extractor_only'.
+
+defaults:
+  - override /hydra/sweeper: basic
+  - override /hydra/launcher: basic
+
+# Configure Hydra for multi-run sweeping
+hydra:
+  mode: MULTIRUN
+  job:
+    # Name each job using the sweep index
+    name: train_feature_extractor_${hydra.job.num}
+    # Set environment variables for each job.  WANDB_NAME makes
+    # the run name visible in the Weights & Biases UI while
+    # WANDB_PROJECT places all runs in the same project.
+    env_set:
+      WANDB_PROJECT: train_feature_extractor_only
+      WANDB_NAME: train_feature_extractor_${hydra.job.num}
+  sweep:
+    # Store results in sub‑directories named by job number
+    subdir: ${hydra.job.num}
+
+# Training options that will be overridden by the sweep parameters.
+optimization:
+  max_epoch: ${sweep.epoch}
+  lr: 0.0015            # base learning rate chosen within the requested 0.002–0.001 range
+  lr_scheduler: ${sweep.lr_scheduler}
+  # lr_end is only used by the polynomial decay scheduler; ignored otherwise
+  lr_end: 0.001
+
+# Dataset options (point to pre‑built manifest directories)
+dataset:
+  data: ${sweep.dataset}
+  batch_size: ${sweep.batch_size}
+
+# Model options
+model:
+  # mask_prob controls the fraction of the input audio that is masked
+  mask_prob: ${sweep.mask_ratio}
+
+# Define the sweep dimensions.  Hydra’s basic sweeper will create
+# the Cartesian product of all lists below.  This yields
+# 3 (epochs) × 3 (batch sizes) × 3 (mask ratios) × 3 (lr schedulers) ×
+# 4 (datasets) = 324 distinct runs.
+sweep:
+  epoch:
+    - 1
+    - 2
+    - 3
+  batch_size:
+    - 8
+    - 16
+    - 32
+  mask_ratio:
+    - 0.25
+    - 0.4
+    - 0.5
+  # Dataset manifest directories.  Replace these with the actual paths to
+  # your single and multi‑channel manifests.
+  dataset:
+    - data/single_channel_1m
+    - data/single_channel_5m
+    - data/single_channel_10m
+    - data/multi_channel
+  # Learning rate scheduler variants.  All three schedulers use the same
+  # base learning rate of 0.0015.  The polynomial scheduler will decay
+  # the learning rate to 0.001 by the end of training (controlled by lr_end).
+  # The cosine scheduler smoothly anneals the learning rate between a maximum
+  # and minimum using a cosine function【208938804940326†L64-L87】.  The
+  # inverse_sqrt scheduler decays the learning rate proportionally to the
+  # inverse square root of the update number【208938804940326†L119-L137】.
+  lr_scheduler:
+    - polynomial_decay
+    - cosine
+    - inverse_sqrt
+

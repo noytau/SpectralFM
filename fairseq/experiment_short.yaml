@@ -1,0 +1,136 @@
+################################################################################
+# TRAINING EXPERIMENTS – CLEAN VERSION (10 RUNS)
+################################################################################
+
+# Choose one preset (run1 … run10) or leave null for default values
+preset: null
+
+
+################################################################################
+# BASE PARAMETERS (used when preset=null)
+################################################################################
+
+epoch: 1
+batch_size: 8
+mask_ratio: 0.25
+lr_scheduler: polynomial_decay
+dataset: single_channel_1m
+
+
+################################################################################
+# W&B LOGGING
+################################################################################
+
+hydra:
+  job:
+    env_set:
+      WANDB_PROJECT: train_feature_extractor_only
+      WANDB_NAME: fe_run_${preset}_${hydra.job.num}
+
+
+################################################################################
+# PRESET DEFINITIONS (10 RUNS)
+################################################################################
+
+preset_overrides:
+
+  run1:
+    epoch: 1
+    batch_size: 8
+    mask_ratio: 0.25
+    lr_scheduler: polynomial_decay
+    dataset: single_channel_1m
+
+  run2:
+    epoch: 1
+    batch_size: 16
+    mask_ratio: 0.40
+    lr_scheduler: cosine
+    dataset: single_channel_5m
+
+  run3:
+    epoch: 1
+    batch_size: 32
+    mask_ratio: 0.50
+    lr_scheduler: inverse_sqrt
+    dataset: multi_channel
+
+  run4:
+    epoch: 2
+    batch_size: 8
+    mask_ratio: 0.30
+    lr_scheduler: polynomial_decay
+    dataset: single_channel_10m
+
+  run5:
+    epoch: 2
+    batch_size: 16
+    mask_ratio: 0.25
+    lr_scheduler: cosine
+    dataset: single_channel_1m
+
+  run6:
+    epoch: 2
+    batch_size: 32
+    mask_ratio: 0.40
+    lr_scheduler: inverse_sqrt
+    dataset: single_channel_5m
+
+  run7:
+    epoch: 3
+    batch_size: 8
+    mask_ratio: 0.50
+    lr_scheduler: cosine
+    dataset: multi_channel
+
+  run8:
+    epoch: 3
+    batch_size: 16
+    mask_ratio: 0.25
+    lr_scheduler: inverse_sqrt
+    dataset: single_channel_10m
+
+  run9:
+    epoch: 3
+    batch_size: 32
+    mask_ratio: 0.40
+    lr_scheduler: polynomial_decay
+    dataset: single_channel_1m
+
+  run10:
+    epoch: 3
+    batch_size: 32
+    mask_ratio: 0.50
+    lr_scheduler: cosine
+    dataset: single_channel_5m
+
+
+################################################################################
+# CONDITIONAL APPLY LOGIC
+################################################################################
+
+apply:
+  epoch:       ${preset_overrides.${preset}.epoch,       ${epoch}}
+  batch_size:  ${preset_overrides.${preset}.batch_size,  ${batch_size}}
+  mask_ratio:  ${preset_overrides.${preset}.mask_ratio,  ${mask_ratio}}
+  lr_scheduler: ${preset_overrides.${preset}.lr_scheduler,${lr_scheduler}}
+  dataset:     ${preset_overrides.${preset}.dataset,     ${dataset}}
+
+
+################################################################################
+# FAIRSEQ TRAINING CONFIG
+################################################################################
+
+task:
+  name: spectral_pretraining
+  data: ${apply.dataset}
+
+optimization:
+  max_epoch: ${apply.epoch}
+  lr_scheduler: ${apply.lr_scheduler}
+  max_update: 0
+  lr: 0.0015
+
+model:
+  mask_ratio: ${apply.mask_ratio}
+  batch_size: ${apply.batch_size}

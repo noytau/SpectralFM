@@ -1,0 +1,2 @@
+- task.data=/mnt5/noy/fairseq/LibriSpeech/
+- distributed_training.distributed_world_size=4
