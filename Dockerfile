@@ -36,7 +36,7 @@ RUN python -m pip install --no-cache-dir "pip<24.1"
 # This location is safe because it is NOT in /storage
 RUN git clone https://github.com/facebookresearch/fairseq.git /app/fairseq && \
     cd /app/fairseq && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir --verbose --default-timeout 1000 --trusted-host pypi.org --trusted-host files.pythonhosted.org -e .
 
 RUN git clone https://github.com/noytau/SpectralFM.git /app/spectralfm_code
 

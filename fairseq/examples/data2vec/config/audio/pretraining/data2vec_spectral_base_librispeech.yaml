@@ -1,5 +1,7 @@
 # @package _group_
 
+# fixme noy add default inheritence instead of copying from base librispeach 
+
 common:
   fp16: true
   log_format: json
@@ -12,22 +14,22 @@ checkpoint:
   keep_interval_updates: 1
   no_epoch_checkpoints: true
 
+task:
+  _name: audio_pretraining
+  data: data/single_channel_1m/
+  max_sample_size: 320000
+  min_sample_size: 32000
+  normalize: true
 hydra:
   job:
     env_set:
       WANDB_PROJECT: train_feature_extractor_only
-      WANDB_NAME: "lr${optimizer.lr[0]}_bs${model.batch_size}_mr${model.mask_prob}_${hydra.job.num}"
-
-task:
-  _name: audio_pretraining
-  data: data/single_channel_1m/
-  max_sample_size: 245 # fixme 320000
-  min_sample_size: 245 # fixme 32000
-  normalize: true
+      wandb_run_name: data2vec_base_libri_yaml
+        #wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}
 
 dataset:
-  num_workers: 8
-  max_tokens: 400000
+  num_workers: 6
+  max_tokens: 3800000
   skip_invalid_size_inputs_valid_test: true
   validate_interval: 5
   required_batch_size_multiple: 1
@@ -66,9 +68,14 @@ model:
   dropout_features: 0.0
   feature_grad_mult: 1.0
   encoder_embed_dim: 768
-
-  mask_prob: 0.5
-  mask_length: 8
+  
+  conv_feature_layers: '[(512,5,5)]'
+    # conv_feature_layers: '[(512,10,5)] + [(512,3,2)] * 4 + [(512,2,2)] * 2'
+    #final_dim: 256 # fixme noy change encoder dims
+    #encoder_layers: 4
+    
+  mask_prob: 0.65
+  mask_length: 10
 
   loss_beta: 0
   loss_scale: null
