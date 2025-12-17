@@ -465,8 +465,6 @@ def import_user_module(args):
     module_path = getattr(args, "user_dir", None)
     if module_path is not None:
         module_path = os.path.abspath(args.user_dir)
-        print(f"DEBUG: Initial user_dir from args: {args.user_dir}")
-        print(f"DEBUG: Absolute module_path: {module_path}")
         if not os.path.exists(module_path) and not os.path.isfile(
             os.path.dirname(module_path)
         ):
