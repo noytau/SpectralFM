@@ -127,6 +127,7 @@ class ModelCriterion(FairseqCriterion):
             sum(log.get("sample_size", 0) for log in logging_outputs)
         )
 
+        print(f"NOY DEBUG sample_size = {sample_size}") # fixme noy - used for debug
         metrics.log_scalar("loss", loss_sum / sample_size, sample_size, round=3)
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)

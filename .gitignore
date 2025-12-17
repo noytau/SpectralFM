@@ -52,3 +52,7 @@ wandb/
 *.onnx
 *.safetensors
 
+# Large files (explicitly ignored after removal from Git history)
+fairseq/base_libri.pt
+fairseq/audio_base_ls.pt
+fairseq/base_libri_960h.pt

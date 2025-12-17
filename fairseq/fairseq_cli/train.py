@@ -27,6 +27,10 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+np.float = float
+np.int = int
+np.bool = bool
+
 from fairseq import checkpoint_utils, options, quantization_utils, tasks, utils
 from fairseq.data import data_utils, iterators
 from fairseq.data.plasma_utils import PlasmaStore
@@ -307,9 +311,14 @@ def train(
             if distributed_utils.is_master(cfg.distributed_training)
             else None
         ),
-        wandb_run_name=os.environ.get(
-            "WANDB_NAME", os.path.basename(cfg.checkpoint.save_dir)
-        ),
+        wandb_run_name=(getattr(cfg.common, "wandb_run_name", os.path.basename(cfg.checkpoint.save_dir))),
+        #os.environ.get(
+        #  "WANDB_NAME", getattr(cfg.common, "wandb_run_name", os.path.basename(cfg.checkpoint.save_dir))
+        #),
+        # fixme noy 
+        #wandb_run_name=os.environ.get(
+        #    "WANDB_NAME", os.path.basename(cfg.checkpoint.save_dir)
+        #),
         azureml_logging=(
             cfg.common.azureml_logging
             if distributed_utils.is_master(cfg.distributed_training)
@@ -323,13 +332,14 @@ def train(
     valid_subsets = cfg.dataset.valid_subset.split(",")
     should_stop = False
     num_updates = trainer.get_num_updates()
+    
     logger.info("Start iterating over samples")
     for i, samples in enumerate(progress):
         with metrics.aggregate("train_inner"), torch.autograd.profiler.record_function(
             "train_step-%d" % i
         ):
             log_output = trainer.train_step(samples)
-
+            
         if log_output is not None:  # not OOM, overflow, ...
             # log mid-epoch stats
             num_updates = trainer.get_num_updates()
@@ -505,9 +515,12 @@ def validate(
                 if distributed_utils.is_master(cfg.distributed_training)
                 else None
             ),
-            wandb_run_name=os.environ.get(
-                "WANDB_NAME", os.path.basename(cfg.checkpoint.save_dir)
+            wandb_run_name=(getattr(cfg.common, "wandb_run_name", os.path.basename(cfg.checkpoint.save_dir))
             ),
+
+            #wandb_run_name=os.environ.get(
+            #    "WANDB_NAME", os.path.basename(cfg.checkpoint.save_dir)
+            #),
         )
 
         # create a new root metrics aggregator so validation metrics

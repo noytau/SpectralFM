@@ -6,6 +6,7 @@
 
 import logging
 import os
+import mlflow
 
 import hydra
 import torch
@@ -46,6 +47,23 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
             OmegaConf.to_container(cfg, resolve=True, enum_to_str=True)
         )
     OmegaConf.set_struct(cfg, True)
+    # --- Initialize MLflow run ---
+    mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
+    mlflow.set_experiment("SpectralFM")
+
+    mlflow.start_run(run_name=f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}")
+
+    # Log key config parameters
+    mlflow.log_params({
+        "model": cfg.model._name,
+        "task": cfg.task._name,
+        "mask_prob": getattr(cfg.model, "mask_prob", None),
+        "batch_size": cfg.dataset.batch_size,
+        "learning_rate": cfg.optimization.lr[0],
+    })
+
+
+
 
     try:
         if cfg.common.profile:
@@ -67,6 +85,16 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
         )
     except:
         best_val = None
+
+    if mlflow.active_run():
+        try:
+            # Optionally log the best validation metric
+            if "best_val" in locals() and best_val is not None:
+                mlflow.log_metric(cfg.checkpoint.best_checkpoint_metric, best_val)
+            mlflow.end_run()
+            logger.info("MLflow run closed successfully.")
+        except Exception as e:
+            logger.warning(f"Failed to close MLflow run cleanly: {e}")
 
     if best_val is None:
         best_val = float("inf")

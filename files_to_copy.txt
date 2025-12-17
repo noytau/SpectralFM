@@ -1,0 +1,11 @@
+examples/data2vec/models/data2vec_audio.py
+fairseq/criterions/model_criterion.py
+fairseq/data/audio/raw_audio_dataset.py
+fairseq/dataclass/configs.py
+fairseq/logging/progress_bar.py
+fairseq/models/__init__.py
+fairseq/tasks/audio_pretraining.py
+fairseq/tasks/fairseq_task.py
+fairseq_cli/hydra_train.py
+fairseq_cli/train.py
+tests/speech/__init__.py

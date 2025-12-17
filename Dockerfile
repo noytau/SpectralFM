@@ -38,11 +38,10 @@ RUN git clone https://github.com/facebookresearch/fairseq.git /app/fairseq && \
     cd /app/fairseq && \
     pip install --no-cache-dir -e .
 
-RUN mkdir -p /storage/noy/ && \
-    git clone https://github.com/noytau/SpectralFM.git /storage/noy/spectralfm_code
+RUN git clone https://github.com/noytau/SpectralFM.git /app/spectralfm_code
 
 ENV FORCE_CUDA=1
-ENV PYTHONPATH=/storage/noy/spectralfm_code:/app/fairseq
+ENV PYTHONPATH=/storage/noy/spectralfm_code:/app/spectralfm_code
 
 # --- SSH SETUP ---
 RUN mkdir -p /var/run/sshd
