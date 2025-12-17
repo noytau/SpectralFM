@@ -10,7 +10,7 @@ attrs==25.4.0
 Authlib==1.6.5
 bitarray==3.7.2
 blinker==1.9.0
-Bottleneck @ file:///croot/bottleneck_1731058641041/work
+Bottleneck
 cachetools==6.2.1
 certifi==2025.10.5
 cffi==2.0.0
@@ -18,9 +18,9 @@ charset-normalizer==3.4.3
 click==8.3.0
 cloudpickle==3.1.1
 colorama==0.4.6
-contourpy @ file:///croot/contourpy_1732540045555/work
+contourpy
 cryptography==45.0.7
-cycler @ file:///tmp/build/80754af9/cycler_1637851556182/work
+cycler
 cyclopts==3.24.0
 Cython==3.1.4
 databricks-sdk==0.67.0
@@ -37,7 +37,7 @@ fastapi==0.119.0
 fastmcp==2.12.4
 filelock==3.20.0
 Flask==3.1.2
-fonttools @ file:///home/task_175975444451365/conda-bld/fonttools_1759754870571/work
+fonttools
 frozenlist==1.8.0
 fsspec==2025.9.0
 gitdb==4.0.12
@@ -64,7 +64,7 @@ joblib==1.5.2
 jsonschema==4.25.1
 jsonschema-path==0.3.4
 jsonschema-specifications==2025.9.1
-kiwisolver @ file:///croot/kiwisolver_1737039087198/work
+kiwisolver
 lazy-object-proxy==1.12.0
 lxml==6.0.2
 Mako==1.3.10
@@ -74,8 +74,8 @@ matplotlib==3.10.6
 mcp==1.17.0
 mdurl==0.1.2
 mkl-service==2.5.2
-mkl_fft @ file:///croot/mkl_fft_1751317925336/work
-mkl_random @ file:///croot/mkl_random_1751318527880/work
+mkl_fft
+mkl_random
 mlflow==3.4.0
 mlflow-skinny==3.4.0
 mlflow-tracing==3.4.0
@@ -84,7 +84,7 @@ mpmath==1.3.0
 multidict==6.7.0
 multiprocess==0.70.16
 networkx==3.4.2
-numexpr @ file:///croot/numexpr_1755766469354/work
+numexpr
 numpy==2.2.6
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
@@ -109,11 +109,11 @@ opentelemetry-api==1.37.0
 opentelemetry-proto==1.37.0
 opentelemetry-sdk==1.37.0
 opentelemetry-semantic-conventions==0.58b0
-packaging @ file:///croot/packaging_1753775359799/work
-pandas @ file:///home/task_175982153789305/conda-bld/pandas_1759822248912/work/dist/pandas-2.3.3-cp310-cp310-linux_x86_64.whl#sha256=0de7c83109c411cc2a74419a396c92f65e3d1e457fb4d835e5f100cfb04393a7
+packaging
+pandas==2.3.3
 parse==1.20.2
 pathable==0.4.4
-pillow @ file:///croot/pillow_1752524526621/work
+pillow
 platformdirs==4.5.0
 portalocker==3.2.0
 propcache==0.4.1
@@ -126,12 +126,12 @@ pydantic==2.12.0
 pydantic-settings==2.11.0
 pydantic_core==2.41.1
 Pygments==2.19.2
-pyparsing @ file:///croot/pyparsing_1731445506121/work
+pyparsing
 pyperclip==1.11.0
-python-dateutil @ file:///croot/python-dateutil_1716495738603/work
+python-dateutil
 python-dotenv==1.1.1
 python-multipart==0.0.20
-pytz @ file:///croot/pytz_1752135852232/work
+pytz
 PyYAML==6.0.3
 referencing==0.36.2
 regex==2025.9.18
@@ -145,9 +145,9 @@ sacrebleu==2.5.1
 safetensors==0.6.2
 scikit-learn==1.7.2
 scipy==1.15.3
-seaborn @ file:///croot/seaborn_1749110291192/work
+seaborn
 sentry-sdk==2.41.0
-six @ file:///croot/six_1744271502820/work
+six
 smmap==5.0.2
 sniffio==1.3.1
 soundfile==0.13.1
@@ -170,7 +170,7 @@ transformers==4.57.0
 triton==3.4.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
-tzdata @ file:///croot/python-tzdata_1746123641790/work
+tzdata
 umap==0.1.1
 urllib3==2.5.0
 uvicorn==0.37.0
