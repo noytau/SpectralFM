@@ -13,12 +13,11 @@ import os
 
 class EvalExperiment(ExperimentRunner):
     def __init__(self, eval_args):
-        super().__init__(...)
         self.args = eval_args
         self.eval_method = eval_args.eval_method
         self.model = eval_args.model
-        self.eval_mode = True  # skip training
         print(f"Initialized evaluation with method: {self.eval_method}, test method: {self.args.test_method}, stack method: {self.args.stack_method}")
+
 
     def evaluate_signal_completion(self, test_data):
         print(f"Evaluating signal completion on {len(test_data)} samples...")

@@ -1019,6 +1019,45 @@ class Stats:
         plt.savefig(os.path.join(self.output_dir, fname))
         plt.close()
 
+    def plot_match_score_histogram_n(self, match_df):
+        """
+        Plot histogram of match scores and overlay input vs embedding match distributions.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # Drop the summary row
+        df = match_df[match_df["index"] != "average_score"].copy()
+
+        # Main score values
+        scores = df["match_score"].astype(float)
+
+        # Extract lengths of matches
+        input_matches = df["input_stack_matches"].apply(len)
+        emb_matches = df["embedding_stack_matches"].apply(len)
+
+        plt.figure(figsize=(10, 6))
+
+        # --- Histogram of score ---
+        #plt.hist(scores, bins=20, alpha=0.5, label="Match Score", density=True)
+
+        # --- Overlay: input vs embedding distribution ---
+        plt.hist(input_matches, bins=np.arange(-0.5, 6.5, 1),
+                 alpha=0.4, label="Input-space matches", density=True)
+
+        plt.hist(emb_matches, bins=np.arange(-0.5, 6.5, 1),
+                 alpha=0.4, label="Embedding-space matches", density=True)
+
+        plt.xlabel("Score / Match Count")
+        plt.ylabel("Density")
+        plt.title("Histogram: Match Score + Input vs Embedding")
+        plt.legend()
+        plt.grid(alpha=0.25)
+        plt.tight_layout()
+        #plt.show()
+        plt.savefig(os.path.join(self.output_dir, "fname"))
+        plt.close()
+
     def plot_match_score_histogram(self, match_df):
         """
         Plot histogram comparing input vs embedding stack matches,

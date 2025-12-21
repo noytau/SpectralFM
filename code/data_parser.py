@@ -1,4 +1,3 @@
-import pickle
 import pandas as pd
 import matplotlib.pyplot as plt
 import logging
@@ -6,11 +5,10 @@ import os
 from datetime import datetime
 from datasets import Dataset
 import argparse
+import torchaudio
+import numpy as np
+import torch
 
-NOVA_SAMPLES_PATH = ('/mnt5/noy/nova_samples/')
-#NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
-#NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
-NOVA_MULTI_CHNL = NOVA_SAMPLES_PATH + 'multi_chnl/'
 
 # Data parsing and inspection functions
 
@@ -82,64 +80,68 @@ def parse_dataset_to_dict(df):
     print_multi_channels_info(channel_dfs)
     return channel_dfs
 
-def inspect_pkl(path, img_shape=(28, 28)): # Used for initial dataset with no mixed channels
-    with open(path, 'rb') as f:
-        data = pickle.load(f)
 
-    print(f"Type: {type(data)}")
-
-    if isinstance(data, pd.DataFrame):
-        print(f"Shape: {data.shape}")
-        print("Previewing first 5 images:")
-
-        for i in range(5):
-            img_array = data.iloc[i].values.reshape(img_shape)
-            plt.figure()
-            plt.imshow(img_array, cmap='gray')
-            plt.title(f"Image {i}")
-            plt.axis('off')
-            plt.show()
-
-
-    elif isinstance(data, dict):
-        print("Preview (dict):")
-        for i, (k, v) in enumerate(data.items()):
-            print(f"{k}: {v}")
-            if i >= 4:
-                break
-    elif isinstance(data, list):
-        print("Preview (list):")
-        print(data[:5])
-    else:
-        print("Preview:")
-        print(data)
-
-
-def parse_directory_to_dict(directory):
+def parse_wav_directory_to_dict(directory):
     """
-    Parse all .pkl files in a directory into a list of dictionaries.
+    Parse all .wav files in a directory into a list of dictionaries.
 
     Each item in the list contains:
-    - 'data': the DataFrame loaded from the file
+    - 'data': the DataFrame loaded from the file (spectrogram)
     - 'source': the filename from which the DataFrame was loaded
 
-    :param directory: Path to the directory containing .pkl files.
+    :param directory: Path to the directory containing .wav files.
     :return: List of dicts with keys 'data' and 'source'.
     """
     import os
     dataset = []
 
+    import torchaudio
+    import numpy as np
+    import torch
+    
+    # Helper to create spectrogram from waveform
+    def prepare_spectrogram(waveform, sample_rate=16000, n_mels=128):
+        mel_spectrogram_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=400,
+            hop_length=160,
+            n_mels=n_mels
+        )
+        spectrogram = mel_spectrogram_transform(waveform)
+        return spectrogram
+
+    def load_wav_to_dataframe(wav_path, sample_rate=16000, n_mels=128):
+        try:
+            waveform, sr = torchaudio.load(wav_path)
+            if sr != sample_rate:
+                waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
+            
+            # Ensure waveform is mono if it's stereo
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+            spectrogram = prepare_spectrogram(waveform, sample_rate, n_mels)
+            # Convert spectrogram to DataFrame
+            # Each row is a time step, each column is a mel band
+            df = pd.DataFrame(spectrogram.squeeze(0).numpy())
+            return df
+        except Exception as e:
+            print(f"Error loading or processing {wav_path}: {e}")
+            return None
+
+    dataset = []
     for filename in os.listdir(directory):
-        file_path = os.path.join(directory, filename)
-        with open(file_path, 'rb') as f:
-            data = pickle.load(f)
-            if isinstance(data, pd.DataFrame):
+        if filename.endswith(".wav"):
+            file_path = os.path.join(directory, filename)
+            df = load_wav_to_dataframe(file_path)
+            if df is not None:
                 dataset.append({
-                    'data': data,
+                    'data': df,
                     'source': filename
                 })
-            else:
-                print(f"Skipping {filename}: not a DataFrame")
+        else:
+            print(f"Skipping {filename}: not a .wav file")
+
 
     print(f"Parsed {len(dataset)} files from {directory}")  # fixme debug
     return dataset
@@ -162,7 +164,7 @@ def run_data_parser(samples_path):
     # parse both directories
     # fixme divide this function into single and multi parser functions
     #multi_data = parse_directory_to_dict(NOVA_MULTI_CHNL)
-    single_data = parse_directory_to_dict(samples_path)
+    single_data = parse_wav_directory_to_dict(samples_path)
 
     # merge into one list if needed
     #combined_data = single_data + multi_data
@@ -236,19 +238,3 @@ def setup_logger(log_dir="logs", prefix="run"):
     return logger, log_filename
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--debug', action='store_true', help='Use debug_chnl directory')
-    parser.add_argument('--test', action='store_true', help='Use single_chnl directory')
-    args = parser.parse_args()
-
-    if args.debug:
-        NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'debug_chnl/'
-    elif args.test:
-        NOVAL_SINGLE_CHNL = NOVA_SAMPLES_PATH + 'single_chnl/'
-    else:
-        raise ValueError("Please specify either --debug or --test")
-
-    run_data_parser()

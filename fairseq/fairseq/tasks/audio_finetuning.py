@@ -10,7 +10,8 @@ import os
 from fairseq.data.multi_corpus_dataset import MultiCorpusDataset
 import torch
 import json
-
+from run_experiment import ExperimentRunner
+from evaluate import EvalExperiment # Import EvalExperiment
 from argparse import Namespace
 from dataclasses import dataclass, field
 from typing import Optional, Any, OrderedDict
@@ -107,6 +108,39 @@ class AudioFinetuningConfig(AudioPretrainingConfig):
         metadata={
             "help": "override default dictionary location"
         }
+    )
+    eval_mode: bool = field(
+        default=False, metadata={"help": "Enable custom evaluation mode"}
+    )
+    eval_method: str = field(
+        default="signal_completion",
+        metadata={
+            "help": "Evaluation method to use: signal_completion, noise_robustness, compare_embeddings, classifier_head"
+        },
+    )
+    test_method: str = field(
+        default="index_in_distribution_stack_holdout",
+        metadata={
+            "help": "Test method to use: index_out_of_distribution, index_in_distribution_stack_holdout, test_in_distribution_partial_stack"
+        },
+    )
+    stack_method: str = field(
+        default="none",
+        metadata={
+            "help": "Stack method to use"
+        },
+    )
+    model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to saved model for evaluation"},
+    )
+    csv_path: Optional[str] = field(
+        default="/mnt5/noy/code/logs/run_masking.csv",
+        metadata={"help": "Path to CSV file for experiment args"},
+    )
+    run_id: int = field(
+        default=1,
+        metadata={"help": "Run ID for experiment args"},
     )
 
 @register_task("audio_finetuning", dataclass=AudioFinetuningConfig)
@@ -232,6 +266,25 @@ class AudioFinetuningTask(AudioPretrainingTask):
 
     def valid_step(self, sample, model, criterion):
         loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
+
+        if self.cfg.eval_mode:
+            # Prepare a dummy args object for EvalExperiment
+            eval_args = Namespace(
+                eval_method=self.cfg.eval_method,
+                test_method=self.cfg.test_method,
+                stack_method=self.cfg.stack_method,
+                model=model,
+                model_path=self.cfg.model_path,
+                csv_path=self.cfg.csv_path,
+                run_id=self.cfg.run_id,
+                debug=False, # Assuming debug is off for fairseq eval
+                mode='eval', # Set mode to eval
+            )
+            # Instantiate and run EvalExperiment
+            evaluator = EvalExperiment(eval_args)
+            evaluator.run_evaluation()
+            logger.info("EvalExperiment finished running.")
+
         if self.cfg.eval_wer and self.cfg.autoregressive:
             metrics = self._inference_with_wer(self.sequence_generator, sample, model)
             logging_output["_num_char_errors"] = metrics["num_char_errors"]

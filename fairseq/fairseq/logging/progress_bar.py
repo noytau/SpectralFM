@@ -426,15 +426,21 @@ class TensorboardProgressBarWrapper(BaseProgressBar):
     def __init__(self, wrapped_bar, tensorboard_logdir):
         self.wrapped_bar = wrapped_bar
         self.tensorboard_logdir = tensorboard_logdir
+        self.writer = None
 
         if SummaryWriter is None:
             logger.warning(
                 "tensorboard not found, please install with: pip install tensorboard"
             )
+        elif not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            self.writer = self._writer("")
 
     def _writer(self, key):
         if SummaryWriter is None:
             return None
+        if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+            return None # Only rank 0 should write to tensorboard
+
         _writers = _tensorboard_writers
         if key not in _writers:
             _writers[key] = SummaryWriter(os.path.join(self.tensorboard_logdir, key))
