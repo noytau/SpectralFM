@@ -73,6 +73,9 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=True,
         metadata={"help": "whether to momentum update only the transformer layers"},
     )
+    skip_pretrained_weights: bool = field(
+        default=False, metadata={"help": "do not load pre-trained weights"}
+    )
 
     max_update: int = II("optimization.max_update")
 
@@ -228,27 +231,27 @@ class Data2VecAudioModel(BaseFairseqModel):
         model = cls(cfg)
         # fixme noy: review this code and understand which weights to load
         model_path = "/mnt5/noy/fairseq/base_libri.pt"
-        #if cfg.model_path:
-        if model_path:
-            logger.info(f"Loading pretrained checkpoint from {model_path}")
-            print(f"Loading pretrained checkpoint from {model_path}")
-            state = checkpoint_utils.load_checkpoint_to_cpu(model_path, {})
-            ckpt_model = state.get("model", state)
+        if not cfg.skip_pretrained_weights:
+            if model_path:
+                logger.info(f"Loading pretrained checkpoint from {model_path}")
+                print(f"Loading pretrained checkpoint from {model_path}")
+                state = checkpoint_utils.load_checkpoint_to_cpu(model_path, {})
+                ckpt_model = state.get("model", state)
 
-            missing, unexpected = model.load_state_dict(ckpt_model, strict=False)
-            logger.info(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
-            print(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
-            try:
-                # Example for checking a core transformer layer
-                layer_name = "encoder.layers.0.self_attn.k_proj.weight"
-                if layer_name in model.state_dict():
-                    weights = model.state_dict()[layer_name]
-                    print(f"\n✅ VERIFICATION: Loaded Weights Check for {layer_name}")
-                    print(f"  Mean: {weights.float().mean().item():.6f}")
-                    print(f"  Std Dev: {weights.float().std().item():.6f}")
-                    print(f"  Slice: {weights.flatten()[:5].tolist()}")
-            except Exception as e:
-                print(f"Could not inspect weights: {e}")
+                missing, unexpected = model.load_state_dict(ckpt_model, strict=False)
+                logger.info(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+                print(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+                try:
+                    # Example for checking a core transformer layer
+                    layer_name = "encoder.layers.0.self_attn.k_proj.weight"
+                    if layer_name in model.state_dict():
+                        weights = model.state_dict()[layer_name]
+                        print(f"\n✅ VERIFICATION: Loaded Weights Check for {layer_name}")
+                        print(f"  Mean: {weights.float().mean().item():.6f}")
+                        print(f"  Std Dev: {weights.float().std().item():.6f}")
+                        print(f"  Slice: {weights.flatten()[:5].tolist()}")
+                except Exception as e:
+                    print(f"Could not inspect weights: {e}")
 
         return model
 
