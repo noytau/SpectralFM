@@ -19,7 +19,7 @@ checkpoint:
 
 task:
   _name: audio_pretraining
-  data: /storage/noy/SpectralFM/fairseq/data/single_channel_all/
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_one
   # Adjusted to safely include your file length of 245
   max_sample_size: 500  
   min_sample_size: 200
@@ -103,6 +103,8 @@ model:
   ema_anneal_end_step: 30000
   ema_transformer_only: true
   ema_layers_only: true
+
+  skip_pretrained_weights: true
 
   require_same_masks: true
   mask_dropout: 0
