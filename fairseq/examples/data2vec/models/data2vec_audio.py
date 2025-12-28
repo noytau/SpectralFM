@@ -73,8 +73,8 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=True,
         metadata={"help": "whether to momentum update only the transformer layers"},
     )
-    skip_pretrained_weights: bool = field(
-        default=False, metadata={"help": "do not load pre-trained weights"}
+    train_only_fe: bool = field(
+        default=False, metadata={"help": "only train feature extractor"}
     )
 
     train_only_fe: bool = field(
@@ -158,11 +158,16 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         self.num_updates = 0
 
+<<<<<<< HEAD
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
         else:
             print("[+] Training the entire model (not only Feature-Extractor)")
             logger.info("[+] Training the entire model (not only Feature-Extractor)")
+=======
+        if self.cfg.train_only_fe:
+            self.freeze_all_except_feature_extractor()
+>>>>>>> c6c8058758972f130ab130391c932aaf9beb768e
 
     def freeze_all_except_feature_extractor(self):
         for name, p in self.named_parameters():
