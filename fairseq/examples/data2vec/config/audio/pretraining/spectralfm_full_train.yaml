@@ -7,8 +7,8 @@ common:
   log_interval: 100
   tensorboard_logdir: tb
   user_dir: /storage/noy/SpectralFM/fairseq/examples/
-  wandb_project: "spectralfm_batch_sweep"
-  wandb_run_name: "5m_data_bs32_uf2"
+  wandb_project: "spectralfm_runai_full_train"
+  wandb_run_name: "runai_full_train_1m_data_lrbs512_uf2"
     #wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}  
 
 checkpoint:
@@ -37,7 +37,7 @@ dataset:
   # FIXED OOM: Replaced max_tokens with max_sentences (batch size)
   # Start with 128. If you have memory left, try 256 or 512.
   # max_sentences: 128
-  batch_size: 320
+  batch_size: 512 
   validate_interval_updates: 500 # fixme change to 1k or more  
   skip_invalid_size_inputs_valid_test: true
   validate_interval: 1
@@ -60,7 +60,7 @@ criterion:
 optimization:
   max_update: 21000
   max_epoch: 22  
-  lr: [0.001]
+  lr: [0.0001]
   update_freq: [4]
   # Optional: Increase update_freq to simulate larger batches if needed
   # update_freq: [1] 
@@ -73,8 +73,9 @@ optimizer:
 
 lr_scheduler: 
   #_name: fixed
-  _name: tri_stage # fixme removed for now
-  phase_ratio: [0.1, 0.4, 0.5]
+  _name: cosine # fixme removed for now
+  warmup_updates: 4000
+  #phase_ratio: [0.1, 0.4, 0.5]
 
 model:
   _name: data2vec_audio
@@ -105,6 +106,7 @@ model:
   ema_layers_only: true
 
   skip_pretrained_weights: true
+  train_only_fe: false
 
   require_same_masks: true
   mask_dropout: 0

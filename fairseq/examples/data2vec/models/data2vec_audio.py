@@ -77,6 +77,10 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=False, metadata={"help": "do not load pre-trained weights"}
     )
 
+    train_only_fe: bool = field(
+                    default=True, metadata={"help": "Train only feature-extractor, freeze other parts"}
+                        )
+
     max_update: int = II("optimization.max_update")
 
     min_target_var: float = field(
@@ -154,7 +158,11 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         self.num_updates = 0
 
-        self.freeze_all_except_feature_extractor()
+        if cfg.train_only_fe:
+            self.freeze_all_except_feature_extractor()
+        else:
+            print("[+] Training the entire model (not only Feature-Extractor)")
+            logger.info("[+] Training the entire model (not only Feature-Extractor)")
 
     def freeze_all_except_feature_extractor(self):
         for name, p in self.named_parameters():
@@ -162,6 +170,7 @@ class Data2VecAudioModel(BaseFairseqModel):
                 p.requires_grad = False
 
         print("[INFO] ONLY feature extractor is trainable")
+        logger.info("[INFO] ONLY feature extractor is trainable")
 
     def load_model_weights(self, state, model, cfg):
         if "_ema" in state["model"]:
