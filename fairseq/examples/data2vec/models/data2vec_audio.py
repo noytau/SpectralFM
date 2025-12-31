@@ -88,7 +88,7 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     )
 
     model_path: Optional[str] = field(default=None)
-    no_pretrained_weights: bool = field(
+    skip_pretrained_weights: bool = field(
         default=False, metadata={"help": "if true, does not load pretrained weights"}
     )
 
@@ -106,7 +106,6 @@ class Data2VecAudioModel(BaseFairseqModel):
         self.cfg = cfg
 
         feature_enc_layers = eval(cfg.conv_feature_layers)
-        print(f"NOY DEBUG feature_enc_layers = {feature_enc_layers}") # fixme
         self.extractor_embed = feature_enc_layers[-1][0]
 
         self.model_path = cfg.model_path
@@ -239,7 +238,7 @@ class Data2VecAudioModel(BaseFairseqModel):
     def build_model(cls, cfg: Data2VecAudioConfig, task=None):
         """Build a new model instance."""
         model = cls(cfg)
-        if cfg.model_path and not cfg.no_pretrained_weights:
+        if cfg.model_path and not cfg.skip_pretrained_weights:
                 model_path = cfg.model_path
                 logger.info(f"Loading pretrained checkpoint from {model_path}")
                 print(f"Loading pretrained checkpoint from {model_path}")

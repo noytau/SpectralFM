@@ -6,6 +6,8 @@
 
 import logging
 import os
+import sys
+
 import mlflow
 
 import hydra
@@ -21,7 +23,6 @@ from fairseq.utils import reset_logging
 from fairseq_cli.train import main as pre_main
 
 logger = logging.getLogger("fairseq_cli.hydra_train")
-
 
 @hydra.main(config_path=os.path.join("..", "fairseq", "config"), config_name="config")
 def hydra_main(cfg: FairseqConfig) -> float:
