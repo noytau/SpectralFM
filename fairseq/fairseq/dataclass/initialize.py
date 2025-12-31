@@ -9,6 +9,30 @@ from hydra.core.config_store import ConfigStore
 from fairseq.dataclass.configs import FairseqConfig
 from omegaconf import DictConfig, OmegaConf
 
+def get_data_size(path):
+    if not path:
+        return "unknown"
+    basename = path.rstrip("/").split("/")[-1]
+    mapping = {
+        "single_channel_one": "1m",
+        "single_channel_1m": "1m",
+        "single_channel_all": "10m",
+        "single_channel_5m": "5m",
+        "multi_channel": "multi_channel",
+    }
+    return mapping.get(basename, basename)
+
+try:
+    # OmegaConf 2.1+
+    OmegaConf.register_new_resolver("get_data_size", get_data_size)
+except (AttributeError, AssertionError):
+    try:
+        # OmegaConf 2.0
+        OmegaConf.register_resolver("get_data_size", get_data_size)
+    except (AttributeError, AssertionError):
+        pass
+except:
+    pass
 
 logger = logging.getLogger(__name__)
 

@@ -9,31 +9,13 @@ import os
 import sys
 
 import mlflow
-
 import hydra
 import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
-def get_data_size(path):
-    if not path:
-        return "unknown"
-    basename = path.rstrip("/").split("/")[-1]
-    mapping = {
-        "single_channel_one": "1m",
-        "single_channel_1m": "1m",
-        "single_channel_all": "10m",
-        "single_channel_5m": "5m",
-        "multi_channel": "multi_channel",
-    }
-    return mapping.get(basename, basename)
-
-try:
-    OmegaConf.register_new_resolver("get_data_size", get_data_size)
-except:
-    pass # Already registered
-
-from fairseq import distributed_utils, metrics
+from fairseq import metrics
+import fairseq.distributed.utils as distributed_utils
 from fairseq.dataclass.configs import FairseqConfig
 from fairseq.dataclass.initialize import add_defaults, hydra_init
 from fairseq.dataclass.utils import omegaconf_no_object_check
