@@ -6,7 +6,7 @@ common:
   log_format: json
   log_interval: 100
   tensorboard_logdir: tb
-  user_dir: /mnt5/noy/fairseq/examples/data2vec
+  user_dir: /mnt5/noy/SpectralFM/fairseq/examples/data2vec
   wandb_project: "spectralfm_batch_sweep"
   wandb_run_name: "5m_data_bs32_uf2"
     #wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}  

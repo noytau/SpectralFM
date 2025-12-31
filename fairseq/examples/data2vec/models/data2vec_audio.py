@@ -74,12 +74,8 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         metadata={"help": "whether to momentum update only the transformer layers"},
     )
     train_only_fe: bool = field(
-        default=False, metadata={"help": "only train feature extractor"}
+        default=True, metadata={"help": "Train only feature-extractor, freeze other parts"}
     )
-
-    train_only_fe: bool = field(
-                    default=True, metadata={"help": "Train only feature-extractor, freeze other parts"}
-                        )
 
     max_update: int = II("optimization.max_update")
 
@@ -89,6 +85,11 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     min_pred_var: float = field(
         default=0.01,
         metadata={"help": "stop training if prediction var falls below this"},
+    )
+
+    model_path: Optional[str] = field(default=None)
+    no_pretrained_weights: bool = field(
+        default=False, metadata={"help": "if true, does not load pretrained weights"}
     )
 
 
@@ -108,9 +109,9 @@ class Data2VecAudioModel(BaseFairseqModel):
         print(f"NOY DEBUG feature_enc_layers = {feature_enc_layers}") # fixme
         self.extractor_embed = feature_enc_layers[-1][0]
 
-        # fixme model_path: Optional[str] = field(default=None)
-        self.model_path = "/mnt5/noy/fairseq/base_libri.pt" # fixme
-        print(f"model_path = { self.model_path }")
+        self.model_path = cfg.model_path
+        if self.model_path:
+            print(f"model_path = { self.model_path }")
         self.ema = None
         self.embed = cfg.encoder_embed_dim
 
@@ -158,16 +159,11 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         self.num_updates = 0
 
-<<<<<<< HEAD
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
         else:
             print("[+] Training the entire model (not only Feature-Extractor)")
             logger.info("[+] Training the entire model (not only Feature-Extractor)")
-=======
-        if self.cfg.train_only_fe:
-            self.freeze_all_except_feature_extractor()
->>>>>>> c6c8058758972f130ab130391c932aaf9beb768e
 
     def freeze_all_except_feature_extractor(self):
         for name, p in self.named_parameters():
@@ -243,10 +239,8 @@ class Data2VecAudioModel(BaseFairseqModel):
     def build_model(cls, cfg: Data2VecAudioConfig, task=None):
         """Build a new model instance."""
         model = cls(cfg)
-        # fixme noy: review this code and understand which weights to load
-        model_path = "/mnt5/noy/fairseq/base_libri.pt"
-        if not cfg.skip_pretrained_weights:
-            if model_path:
+        if cfg.model_path and not cfg.no_pretrained_weights:
+                model_path = cfg.model_path
                 logger.info(f"Loading pretrained checkpoint from {model_path}")
                 print(f"Loading pretrained checkpoint from {model_path}")
                 state = checkpoint_utils.load_checkpoint_to_cpu(model_path, {})
