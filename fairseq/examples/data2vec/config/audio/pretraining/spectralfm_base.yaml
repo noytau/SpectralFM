@@ -9,7 +9,7 @@ common:
   tensorboard_logdir: tb
   user_dir: /mnt5/noy/SpectralFM/fairseq/examples/data2vec
   wandb_project: "spectralfm_batch_sweep"
-  wandb_run_name: "5m_data_bs32_uf2"
+  wandb_run_name: "lr${optimization.lr[0]}_bs${dataset.batch_size}_${lr_scheduler._name}_${get_data_size:${task.data}}"
     #wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}  
 
 checkpoint:

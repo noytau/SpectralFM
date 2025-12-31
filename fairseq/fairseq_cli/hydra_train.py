@@ -15,6 +15,24 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
+def get_data_size(path):
+    if not path:
+        return "unknown"
+    basename = path.rstrip("/").split("/")[-1]
+    mapping = {
+        "single_channel_one": "1m",
+        "single_channel_1m": "1m",
+        "single_channel_all": "10m",
+        "single_channel_5m": "5m",
+        "multi_channel": "multi_channel",
+    }
+    return mapping.get(basename, basename)
+
+try:
+    OmegaConf.register_new_resolver("get_data_size", get_data_size)
+except:
+    pass # Already registered
+
 from fairseq import distributed_utils, metrics
 from fairseq.dataclass.configs import FairseqConfig
 from fairseq.dataclass.initialize import add_defaults, hydra_init
@@ -52,7 +70,11 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
     mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
     mlflow.set_experiment("SpectralFM")
 
-    mlflow.start_run(run_name=f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}")
+    run_name = getattr(cfg.common, "wandb_run_name", None)
+    if run_name is None or run_name == "":
+        run_name = f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}"
+
+    mlflow.start_run(run_name=run_name)
 
     # Log key config parameters
     mlflow.log_params({
