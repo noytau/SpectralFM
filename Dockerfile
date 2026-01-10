@@ -30,7 +30,7 @@ RUN apt-get update && \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# pin pip < 24.1 to handle omegaconf’s metadata issues
+# pin pip < 24.1 to handle omegaconf's metadata issues
 RUN python -m pip install --no-cache-dir "pip<24.1"
 
 # Clone and install fairseq into /app/fairseq
@@ -40,7 +40,16 @@ RUN git clone https://github.com/facebookresearch/fairseq.git /app/fairseq && \
     pip install --no-cache-dir -e .
 
 RUN git clone https://github.com/noytau/SpectralFM.git /app/spectralfm_code
-RUN pip install --no-cache-dir -r /app/spectralfm_code/requirements.txt
+
+# Create entrypoint script that sets up symlinks at runtime
+# This allows setup.sh to use /mnt5/noy/ paths (mounted at /storage/noy/)
+RUN echo '#!/bin/bash\n\
+# Create symlink so /mnt5/noy/ resolves to /storage/noy/ at runtime\n\
+mkdir -p /mnt5\n\
+ln -sfn /storage/noy /mnt5/noy 2>/dev/null || true\n\
+exec "$@"' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
 
 ENV FORCE_CUDA=1
 ENV PYTHONPATH=/storage/noy/spectralfm_code:/app/spectralfm_code
