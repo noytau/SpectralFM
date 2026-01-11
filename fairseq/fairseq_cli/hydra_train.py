@@ -53,27 +53,26 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
             OmegaConf.to_container(cfg, resolve=True, enum_to_str=True)
         )
     OmegaConf.set_struct(cfg, True)
-    # --- Initialize MLflow run ---
-    mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
-    mlflow.set_experiment("SpectralFM")
+    
+    # --- Initialize MLflow run (if available) ---
+    if MLFLOW_AVAILABLE:
+        mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
+        mlflow.set_experiment("SpectralFM")
 
-    run_name = getattr(cfg.common, "wandb_run_name", None)
-    if run_name is None or run_name == "":
-        run_name = f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}"
+        run_name = getattr(cfg.common, "wandb_run_name", None)
+        if run_name is None or run_name == "":
+            run_name = f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}"
 
-    mlflow.start_run(run_name=run_name)
+        mlflow.start_run(run_name=run_name)
 
-    # Log key config parameters
-    mlflow.log_params({
-        "model": cfg.model._name,
-        "task": cfg.task._name,
-        "mask_prob": getattr(cfg.model, "mask_prob", None),
-        "batch_size": cfg.dataset.batch_size,
-        "learning_rate": cfg.optimization.lr[0],
-    })
-
-
-
+        # Log key config parameters
+        mlflow.log_params({
+            "model": cfg.model._name,
+            "task": cfg.task._name,
+            "mask_prob": getattr(cfg.model, "mask_prob", None),
+            "batch_size": cfg.dataset.batch_size,
+            "learning_rate": cfg.optimization.lr[0],
+        })
 
     try:
         if cfg.common.profile:
@@ -96,7 +95,7 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
     except:
         best_val = None
 
-    if mlflow.active_run():
+    if MLFLOW_AVAILABLE and mlflow.active_run():
         try:
             # Optionally log the best validation metric
             if "best_val" in locals() and best_val is not None:
