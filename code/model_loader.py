@@ -177,7 +177,7 @@ def load_fairseq_model_for_evaluation(model_path, device=None):
     return model, checkpoint_info["cfg"]
 
 
-def load_fairseq_data2vec_model(args, model_path="/mnt5/noy/fairseq/base_libri_960h.pt"):
+def load_fairseq_data2vec_model(args, model_path="/mnt5/noy/SpectralFM/fairseq/base_libri.pt"):
     """Legacy function - loads fairseq checkpoint with args compatibility."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
