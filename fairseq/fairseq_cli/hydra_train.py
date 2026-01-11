@@ -8,7 +8,12 @@ import logging
 import os
 import sys
 
-import mlflow
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    
 import hydra
 import torch
 from hydra.core.hydra_config import HydraConfig
