@@ -8,10 +8,12 @@
 import logging
 import os
 import sys
+import socket
+import subprocess
 
 from argparse import Namespace
 from dataclasses import dataclass, field
-from typing import Optional, OrderedDict
+from typing import Optional, OrderedDict, Tuple
 from fairseq.data.multi_corpus_dataset import MultiCorpusDataset
 from omegaconf import MISSING, II, OmegaConf
 
@@ -23,6 +25,194 @@ from . import FairseqTask, register_task
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Environment Detection and Path Translation for RunAI <-> Geoffrey
+# ============================================================================
+#
+# RunAI cluster:
+#   - GPUs: NVIDIA A5000 or A6000
+#   - Path prefix: /storage/noy
+#
+# Geoffrey server (132.66.52.64):
+#   - GPUs: 8x NVIDIA GeForce RTX 2080
+#   - Path prefix: /mnt5/noy
+#
+# ============================================================================
+
+# Path mappings between environments
+RUNAI_PREFIX = "/storage/noy"
+GEOFFREY_PREFIX = "/mnt5/noy"
+
+# Known data directory patterns (for matching datasets: multi, 1m, all, 10k)
+DATA_DIR_PATTERNS = [
+    "single_channel_1m",
+    "single_channel_10k", 
+    "single_channel_all",
+    "single_channel_multi",
+    "nova_data",
+]
+
+
+def detect_current_environment() -> str:
+    """
+    Detect whether we're running on RunAI or Geoffrey server.
+    
+    Returns:
+        "runai" if running on RunAI (NVIDIA A5000 or A6000 GPU)
+        "geoffrey" if running on Geoffrey server (RTX 2080 GPUs, IP 132.66.52.64)
+        "unknown" otherwise
+    """
+    # Method 1: Check GPU type
+    # - RunAI: NVIDIA A5000 or A6000
+    # - Geoffrey: 8x NVIDIA GeForce RTX 2080
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            gpu_name = result.stdout.strip().lower()
+            # RunAI GPUs: A5000 or A6000
+            if "a5000" in gpu_name or "a6000" in gpu_name:
+                logger.info(f"Detected RunAI environment (GPU: {gpu_name})")
+                return "runai"
+            # Geoffrey GPUs: RTX 2080
+            elif "2080" in gpu_name or "rtx 2080" in gpu_name:
+                logger.info(f"Detected Geoffrey environment (GPU: {gpu_name})")
+                return "geoffrey"
+    except Exception as e:
+        logger.debug(f"GPU detection failed: {e}")
+    
+    # Method 2: Check hostname/IP for Geoffrey server
+    try:
+        hostname = socket.gethostname()
+        # Get all IPs associated with this host
+        ip_addr = socket.gethostbyname(hostname)
+        
+        # Geoffrey server IP
+        if ip_addr.startswith("132.66.52"):
+            logger.info(f"Detected Geoffrey environment (IP: {ip_addr})")
+            return "geoffrey"
+    except Exception as e:
+        logger.debug(f"Hostname detection failed: {e}")
+    
+    # Method 3: Check if /mnt5/noy exists (Geoffrey) vs /storage/noy (RunAI)
+    if os.path.exists("/mnt5/noy"):
+        logger.info("Detected Geoffrey environment (path /mnt5/noy exists)")
+        return "geoffrey"
+    elif os.path.exists("/storage/noy"):
+        logger.info("Detected RunAI environment (path /storage/noy exists)")
+        return "runai"
+    
+    logger.warning("Could not detect environment, defaulting to 'unknown'")
+    return "unknown"
+
+
+def detect_checkpoint_environment(data_path: str) -> str:
+    """
+    Detect which environment a checkpoint was trained on based on its data path.
+    
+    Args:
+        data_path: The data path from the checkpoint config
+        
+    Returns:
+        "runai" if checkpoint was from RunAI
+        "geoffrey" if checkpoint was from Geoffrey
+        "unknown" otherwise
+    """
+    if data_path is None:
+        return "unknown"
+    
+    if data_path.startswith(RUNAI_PREFIX) or data_path.startswith("/storage/"):
+        return "runai"
+    elif data_path.startswith(GEOFFREY_PREFIX) or data_path.startswith("/mnt5/"):
+        return "geoffrey"
+    
+    return "unknown"
+
+
+def translate_data_path(data_path: str, from_env: str, to_env: str) -> str:
+    """
+    Translate a data path from one environment to another.
+    
+    Handles paths like:
+    - /storage/noy/fairseq/data/single_channel_1m/ <-> /mnt5/noy/fairseq/data/single_channel_1m/
+    - /storage/noy/SpectralFM/fairseq/data/... <-> /mnt5/noy/SpectralFM/fairseq/data/...
+    
+    Args:
+        data_path: Original data path
+        from_env: Source environment ("runai" or "geoffrey")
+        to_env: Target environment ("runai" or "geoffrey")
+        
+    Returns:
+        Translated path for the target environment
+    """
+    if from_env == to_env:
+        return data_path
+    
+    if from_env == "runai" and to_env == "geoffrey":
+        # RunAI -> Geoffrey: /storage/noy -> /mnt5/noy
+        translated = data_path.replace(RUNAI_PREFIX, GEOFFREY_PREFIX)
+        # Also handle /storage/ without /noy
+        translated = translated.replace("/storage/", "/mnt5/")
+    elif from_env == "geoffrey" and to_env == "runai":
+        # Geoffrey -> RunAI: /mnt5/noy -> /storage/noy
+        translated = data_path.replace(GEOFFREY_PREFIX, RUNAI_PREFIX)
+        translated = translated.replace("/mnt5/", "/storage/")
+    else:
+        logger.warning(f"Unknown environment translation: {from_env} -> {to_env}")
+        return data_path
+    
+    logger.info(f"Translated data path: {data_path} -> {translated}")
+    return translated
+
+
+def maybe_translate_path_for_eval(data_path: str) -> str:
+    """
+    Check if we need to translate the data path for evaluation.
+    
+    This is called when loading a dataset for evaluation. If the checkpoint
+    was trained in a different environment than the current one, translate
+    the path accordingly.
+    
+    Args:
+        data_path: The data path from the checkpoint config
+        
+    Returns:
+        Translated path if needed, otherwise original path
+    """
+    current_env = detect_current_environment()
+    checkpoint_env = detect_checkpoint_environment(data_path)
+    
+    if current_env == "unknown" or checkpoint_env == "unknown":
+        logger.warning(
+            f"Could not detect environments (current={current_env}, checkpoint={checkpoint_env}). "
+            f"Using original path: {data_path}"
+        )
+        return data_path
+    
+    if current_env != checkpoint_env:
+        logger.info(
+            f"Environment mismatch detected! "
+            f"Checkpoint from {checkpoint_env}, running on {current_env}. "
+            f"Translating data path..."
+        )
+        translated_path = translate_data_path(data_path, checkpoint_env, current_env)
+        
+        # Verify the translated path exists
+        if os.path.exists(translated_path):
+            logger.info(f"Translated path exists: {translated_path}")
+            return translated_path
+        else:
+            logger.warning(
+                f"Translated path does not exist: {translated_path}. "
+                f"Falling back to original: {data_path}"
+            )
+            return data_path
+    
+    return data_path
 
 
 @dataclass
@@ -118,7 +308,15 @@ class AudioPretrainingTask(FairseqTask):
     def load_dataset(self, split: str, task_cfg: FairseqDataclass = None, **kwargs):
         data_path = self.cfg.data
         task_cfg = task_cfg or self.cfg
+        
+        # Translate data path if running evaluation in different environment than training
+        original_path = data_path
+        data_path = maybe_translate_path_for_eval(data_path)
+        if data_path != original_path:
+            logger.info(f"Data path translated for cross-environment evaluation: {original_path} -> {data_path}")
+        
         print(f"data_path = {data_path}, task_cfg = {task_cfg}")
+        
         # upgrade old task
         if isinstance(task_cfg, Namespace):
             if not hasattr(task_cfg, "autoregressive"):

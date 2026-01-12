@@ -25,6 +25,14 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
+import warnings
+import logging
+
+# Suppress torchaudio/torio FFmpeg extension loading warnings
+# These are non-critical - torchaudio will fall back to available FFmpeg versions
+logging.getLogger("torio._extension.utils").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", message=".*FFmpeg.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*libavutil.*", category=UserWarning)
 
 # Add fairseq to path using relative path from this file's location
 _FAIRSEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fairseq")
@@ -248,8 +256,11 @@ class EvaluationRunner:
         Returns:
             EvalResult with metrics
         """
+        print(f"[DEBUG] evaluate_checkpoint received eval_methods: {eval_methods} (type: {type(eval_methods)})")
+        
         if eval_methods is None:
             eval_methods = ["embedding_similarity"]
+            print(f"[DEBUG] eval_methods was None, using default: {eval_methods}")
         
         print(f"\n{'='*60}")
         print(f"Evaluating: {checkpoint_info.run_name}")
@@ -276,6 +287,9 @@ class EvaluationRunner:
         
         metrics = {"best_loss": best_loss} if best_loss is not None else {}
         
+        # Store cfg for use in evaluation methods
+        self._current_cfg = cfg
+        
         # Run each evaluation method
         for method in eval_methods:
             try:
@@ -287,11 +301,19 @@ class EvaluationRunner:
                     method_metrics = self._eval_noise_robustness(model)
                 elif method == "stack_similarity":
                     method_metrics = self._eval_stack_similarity(model)
+                elif method == "validation_loss":
+                    method_metrics = self._eval_validation_loss(model, cfg)
                 else:
                     print(f"[!] Unknown eval method: {method}")
                     continue
                     
-                metrics.update(method_metrics)
+                if method_metrics:
+                    metrics.update(method_metrics)
+                    # Debug: print what metrics were added
+                    if method == "validation_loss":
+                        print(f"[DEBUG] Added validation_loss metrics: {list(method_metrics.keys())}")
+                else:
+                    print(f"[!] Warning: {method} returned empty metrics")
             except Exception as e:
                 print(f"[!] Error in {method}: {e}")
                 import traceback
@@ -309,14 +331,25 @@ class EvaluationRunner:
             config_summary=config_summary
         )
         
+        # Debug: print metrics keys to help diagnose
+        if eval_methods and "validation_loss" in eval_methods:
+            if "eval_loss" in metrics:
+                print(f"[DEBUG] ✓ eval_loss found in metrics: {metrics.get('eval_loss')}")
+            elif "validation_loss_error" in metrics:
+                print(f"[DEBUG] ✗ validation_loss failed with error: {metrics.get('validation_loss_error')}")
+            else:
+                print(f"[DEBUG] ⚠ validation_loss method run but no eval_loss or error found. Metrics keys: {list(metrics.keys())[:20]}")
+        
         self.results.append(result)
         return result
     
     def evaluate_all(self, checkpoints: List[CheckpointInfo], 
                     eval_methods: List[str] = None) -> List[EvalResult]:
         """Evaluate multiple checkpoints."""
+        print(f"[DEBUG] evaluate_all received eval_methods: {eval_methods} (type: {type(eval_methods)})")
         results = []
         for ckpt in tqdm(checkpoints, desc="Evaluating checkpoints"):
+            print(f"[DEBUG] Calling evaluate_checkpoint with eval_methods: {eval_methods}")
             result = self.evaluate_checkpoint(ckpt, eval_methods)
             results.append(result)
         return results
@@ -442,6 +475,186 @@ class EvaluationRunner:
         
         return metrics
     
+    def load_eval_dataset_fairseq(self, cfg, split="valid", max_samples=None, verbose=True):
+        """
+        Load evaluation data using fairseq's task.load_dataset and __getitem__.
+        This ensures evaluation uses the exact same data loading as training.
+        
+        Args:
+            cfg: The saved config from the checkpoint
+            split: Dataset split to load ("valid" or "train")
+            max_samples: Maximum samples to load for efficiency (None = all)
+            verbose: Whether to print loading messages
+            
+        Returns:
+            task: The fairseq task
+            samples: List of samples (if max_samples specified), else None
+            dataset: The fairseq dataset
+        """
+        from fairseq import tasks
+        
+        # Build task from config
+        task = tasks.setup_task(cfg.task)
+        
+        # Load dataset using the same method as training
+        task.load_dataset(split, task_cfg=cfg.task)
+        dataset = task.dataset(split)
+        
+        if verbose:
+            print(f"[+] Loaded {len(dataset)} samples from fairseq dataset")
+        
+        # If max_samples specified, load individual samples
+        samples = None
+        if max_samples is not None:
+            sample_size = min(max_samples, len(dataset))
+            indices = list(range(sample_size))
+            
+            samples = []
+            for idx in tqdm(indices, desc=f"Loading {split} data"):
+                # This calls FileAudioDataset.__getitem__()
+                sample = dataset[idx]
+                samples.append(sample)
+        
+        return task, samples, dataset
+    
+    def _eval_validation_loss(self, model, cfg) -> Dict[str, float]:
+        """
+        Evaluate the model using trainer.valid_step (same as train.py's validate function).
+        
+        This mimics the exact validation done during training:
+        - Uses trainer.get_valid_iterator() for batching
+        - Uses trainer.valid_step(sample) which handles GPU, metrics, etc.
+        
+        Returns:
+            Dictionary with validation loss metrics
+        """
+        from fairseq.trainer import Trainer
+        from fairseq.logging import metrics as fairseq_metrics
+        
+        print("[+] Evaluating validation loss using trainer.valid_step...")
+        
+        try:
+            print("[DEBUG] Step 1: Loading dataset...")
+            # Load dataset using our helper (allows custom paths later)
+            # Note: Prints may come from:
+            # 1. model.build_model() if model_path is set in config (data2vec_audio.py lines 243-261)
+            # 2. fairseq's internal task/trainer initialization
+            # 3. load_eval_dataset_fairseq (now suppressed with verbose=False)
+            task, _, dataset = self.load_eval_dataset_fairseq(cfg, split="valid", max_samples=None, verbose=False)
+            print(f"[DEBUG] Step 1 complete: Loaded dataset with {len(dataset)} samples")
+            
+            print("[DEBUG] Step 2: Building criterion...")
+            # Build criterion
+            criterion = task.build_criterion(cfg.criterion)
+            print("[DEBUG] Step 2 complete: Criterion built")
+            
+            print("[DEBUG] Step 3: Creating trainer...")
+            # Ensure model is on the correct device
+            # Trainer will move data to its device, so model must match
+            # Check what device Trainer will use (same logic as Trainer.__init__)
+            use_cuda = torch.cuda.is_available() and not getattr(cfg.common, 'cpu', False)
+            trainer_device = torch.device("cuda" if use_cuda else "cpu")
+            model_device = next(model.parameters()).device
+            print(f"[DEBUG] Trainer will use device: {trainer_device}, Model currently on: {model_device}")
+            print(f"[DEBUG] CUDA available: {torch.cuda.is_available()}, cfg.common.cpu: {getattr(cfg.common, 'cpu', 'not set')}")
+            
+            if model_device != trainer_device:
+                print(f"[DEBUG] Moving model from {model_device} to {trainer_device}")
+                model = model.to(trainer_device)
+                # Verify move was successful
+                new_model_device = next(model.parameters()).device
+                print(f"[DEBUG] Model now on device: {new_model_device}")
+            
+            # Ensure EMA model is also on the correct device
+            # EMA model is stored separately in model.ema.model and might not be moved with model.to()
+            if hasattr(model, 'ema') and model.ema is not None and hasattr(model.ema, 'model') and model.ema.model is not None:
+                try:
+                    ema_model_device = next(model.ema.model.parameters()).device
+                    print(f"[DEBUG] EMA model device before: {ema_model_device}")
+                    if ema_model_device != trainer_device:
+                        print(f"[DEBUG] Moving EMA model from {ema_model_device} to {trainer_device}")
+                        model.ema.model = model.ema.model.to(trainer_device)
+                        # Verify EMA move
+                        new_ema_device = next(model.ema.model.parameters()).device
+                        print(f"[DEBUG] EMA model now on device: {new_ema_device}")
+                except Exception as e:
+                    print(f"[DEBUG] Could not check/move EMA model: {e}")
+            
+            # Create trainer (same as in training)
+            trainer = Trainer(cfg, task, model, criterion)
+            print(f"[DEBUG] Trainer created with device: {trainer.device}")
+            print("[DEBUG] Step 3 complete: Trainer created")
+            
+            print("[DEBUG] Step 4: Getting valid iterator...")
+            # Get valid iterator (same as train.py validate function)
+            itr = trainer.get_valid_iterator("valid").next_epoch_itr(shuffle=False)
+            print("[DEBUG] Step 4 complete: Iterator obtained")
+            
+            print(f"[+] Running validation...")
+            
+            all_losses = []
+            num_batches = 0
+            
+            # Validation loop (same as train.py validate function)
+            with fairseq_metrics.aggregate(new_root=True) as agg:
+                for sample in tqdm(itr, desc="Computing validation loss"):
+                    # trainer.valid_step handles: move to GPU, model.eval(), torch.no_grad()
+                    log_output = trainer.valid_step(sample)
+                    
+                    if log_output:
+                        # Print full log_output structure for first batch (debugging)
+                        if num_batches == 0:
+                            print(f"\n[DEBUG] First batch log_output keys: {list(log_output.keys())}")
+                            print(f"[DEBUG] Full log_output: {log_output}")
+                        
+                        loss_val = log_output.get("loss", 0)
+                        sample_size = log_output.get("sample_size", 0)
+                        nsentences = log_output.get("nsentences", 0)
+                        
+                        # Print detailed loss info for debugging
+                        print(f"  Batch {num_batches + 1}: loss={loss_val:.6f}, sample_size={sample_size}, nsentences={nsentences}")
+                        if "regression" in log_output:
+                            print(f"    regression loss: {log_output.get('regression', 0):.6f}")
+                        
+                        all_losses.append(float(loss_val))
+                        num_batches += 1
+                    else:
+                        print(f"  Batch {num_batches + 1}: log_output is None or empty")
+                
+                # Get aggregated stats
+                stats = agg.get_smoothed_values()
+            
+            # Build result metrics
+            result_metrics = {
+                "eval_loss": float(stats.get("loss", np.mean(all_losses) if all_losses else 0)),
+                "eval_loss_std": float(np.std(all_losses)) if all_losses else 0.0,
+                "eval_loss_min": float(min(all_losses)) if all_losses else 0.0,
+                "eval_loss_max": float(max(all_losses)) if all_losses else 0.0,
+                "eval_num_batches": num_batches,
+            }
+            
+            # Add other metrics from aggregation
+            for key, val in stats.items():
+                if key not in ["loss"]:
+                    result_metrics[f"eval_{key}"] = float(val) if isinstance(val, (int, float)) else val
+            
+            print(f"\n[+] Validation Loss Results:")
+            print(f"    Loss:     {result_metrics['eval_loss']:.6f}")
+            print(f"    Std:      {result_metrics['eval_loss_std']:.6f}")
+            print(f"    Batches:  {result_metrics['eval_num_batches']}")
+            
+            return result_metrics
+            
+        except Exception as e:
+            print(f"\n[!] ========== ERROR in validation loss evaluation ==========")
+            print(f"[!] Error type: {type(e).__name__}")
+            print(f"[!] Error message: {str(e)}")
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[!] Full traceback:\n{error_traceback}")
+            print(f"[!] ============================================================\n")
+            return {"validation_loss_error": str(e), "validation_loss_error_traceback": error_traceback}
+    
     def _eval_signal_completion(self, model) -> Dict[str, float]:
         """
         Evaluate signal completion/reconstruction capability.
@@ -456,23 +669,14 @@ class EvaluationRunner:
         - MSE loss at masked positions
         - Comparison across different masking strategies (causal vs random)
         """
-        import torchaudio
-        import glob
         from scipy.stats import pearsonr, spearmanr
         
         device = next(model.parameters()).device
         model.eval()
         
-        # Load wav files
-        wav_files = glob.glob(os.path.join(self.data_dir, "*.wav"))
-        if len(wav_files) == 0:
-            return {"error": f"No wav files found in {self.data_dir}"}
-        
-        # Sample for efficiency
-        sample_size = min(100, len(wav_files))
-        import random
-        random.seed(42)
-        sampled_files = random.sample(wav_files, sample_size)
+        # Load dataset using fairseq infrastructure
+        _, samples, dataset = self.load_eval_dataset_fairseq(self._current_cfg, split="valid", max_samples=100)
+        sample_size = len(samples)
         
         print(f"[+] Evaluating signal completion on {sample_size} samples...")
         
@@ -487,18 +691,16 @@ class EvaluationRunner:
         }
         
         with torch.no_grad():
-            for idx, wav_path in enumerate(tqdm(sampled_files, desc="Signal completion eval")):
+            for idx, sample in enumerate(tqdm(samples, desc="Signal completion eval")):
                 try:
-                    # Load wav file
-                    waveform, sr = torchaudio.load(wav_path)
-                    if sr != 16000:
-                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
+                    # Get source from fairseq-loaded sample (already preprocessed)
+                    source = sample["source"]
+                    sample_id = sample.get("id", idx)
                     
                     # Prepare input: [batch, seq_len]
-                    data = waveform.squeeze(0).to(device)  # [seq_len]
-                    data = data.unsqueeze(0)  # [1, seq_len]
+                    data = source.to(device)
+                    if data.dim() == 1:
+                        data = data.unsqueeze(0)  # [1, seq_len]
                     
                     # Get ground truth embeddings (unmasked)
                     gt_result = model.extract_features(data, padding_mask=None, mask=False)
@@ -506,7 +708,7 @@ class EvaluationRunner:
                     
                     sample_result = {
                         "index": idx,
-                        "file": os.path.basename(wav_path),
+                        "sample_id": int(sample_id),
                         "seq_len": gt_embeddings.shape[1],
                     }
                     
@@ -570,7 +772,7 @@ class EvaluationRunner:
                     completion_results.append(sample_result)
                     
                 except Exception as e:
-                    print(f"[!] Error processing {wav_path}: {e}")
+                    print(f"[!] Error processing sample {idx}: {e}")
                     import traceback
                     traceback.print_exc()
                     continue
@@ -1483,18 +1685,59 @@ class EvaluationRunner:
             # Key metrics
             m = result.metrics
             
+            # Debug: print all metric keys to help diagnose
+            if not any(key.startswith("eval_") for key in m.keys()):
+                print(f"[DEBUG] Run {result.run_name}: No eval_* keys found. Available keys: {list(m.keys())[:10]}...")
+            
+            # Show which evaluation methods were run
+            eval_methods_run = []
+            if "eval_loss" in m:
+                eval_methods_run.append("validation_loss")
+            if "sim_variance_ratio" in m or "input_mean_sim" in m or "emb_mean_sim" in m:
+                eval_methods_run.append("embedding_similarity")
+            if "stack_match_score_mean" in m:
+                eval_methods_run.append("stack_similarity")
+            if any(f"noise_{nt}_emb_sim_mean" in m for nt in ["gaussian_std", "gaussian_mean", "gain_low", "gain_high"]):
+                eval_methods_run.append("noise_robustness")
+            if any(f"completion_{s}_cos_sim_mean" in m for s in ["causal_50", "causal_25", "random_30", "random_50"]):
+                eval_methods_run.append("signal_completion")
+            
+            if eval_methods_run:
+                lines.append(f"**Evaluation Methods Run:** {', '.join(eval_methods_run)}")
+                lines.append("")
+            
             # Best loss from training
             if "best_loss" in m and m["best_loss"] is not None:
                 lines.append(f"**Training Best Loss:** {m['best_loss']:.6f}")
                 lines.append("")
             
-            if "pearson_corr" in m:
+            # Validation loss (if validation_loss method was run)
+            if "eval_loss" in m:
+                lines.append("**Validation Loss:**")
+                lines.append(f"  - Loss: {m.get('eval_loss', 'N/A'):.6f}")
+                if "eval_loss_std" in m:
+                    lines.append(f"  - Std: {m.get('eval_loss_std', 0):.6f}")
+                if "eval_loss_min" in m:
+                    lines.append(f"  - Min: {m.get('eval_loss_min', 0):.6f}")
+                if "eval_loss_max" in m:
+                    lines.append(f"  - Max: {m.get('eval_loss_max', 0):.6f}")
+                if "eval_num_batches" in m:
+                    lines.append(f"  - Batches: {m.get('eval_num_batches', 0)}")
+                lines.append("")
+            elif "validation_loss_error" in m:
+                lines.append("**Validation Loss:**")
+                lines.append(f"  - Error: {m.get('validation_loss_error', 'Unknown error')}")
+                lines.append("")
+            
+            # Embedding Quality (skip Pearson/Spearman as requested)
+            if "sim_variance_ratio" in m or "input_mean_sim" in m or "emb_mean_sim" in m:
                 lines.append("**Embedding Quality:**")
-                lines.append(f"  - Pearson correlation (input vs emb sim): {m.get('pearson_corr', 'N/A'):.4f}")
-                lines.append(f"  - Spearman correlation: {m.get('spearman_corr', 'N/A'):.4f}")
-                lines.append(f"  - Variance ratio: {m.get('sim_variance_ratio', 'N/A'):.4f}")
-                lines.append(f"  - Input similarity: mean={m.get('input_mean_sim', 0):.4f}, std={m.get('input_std_sim', 0):.4f}")
-                lines.append(f"  - Embedding similarity: mean={m.get('emb_mean_sim', 0):.4f}, std={m.get('emb_std_sim', 0):.4f}")
+                if "sim_variance_ratio" in m:
+                    lines.append(f"  - Variance ratio: {m.get('sim_variance_ratio', 'N/A'):.4f}")
+                if "input_mean_sim" in m:
+                    lines.append(f"  - Input similarity: mean={m.get('input_mean_sim', 0):.4f}, std={m.get('input_std_sim', 0):.4f}")
+                if "emb_mean_sim" in m:
+                    lines.append(f"  - Embedding similarity: mean={m.get('emb_mean_sim', 0):.4f}, std={m.get('emb_std_sim', 0):.4f}")
                 lines.append("")
             
             if "stack_match_score_mean" in m:
@@ -1543,14 +1786,14 @@ class EvaluationRunner:
             lines.append("## COMPARATIVE ANALYSIS")
             lines.append("")
             
-            # Best performers
-            pearson_scores = [(r.run_name, r.metrics.get("pearson_corr", -999)) for r in results]
-            pearson_scores.sort(key=lambda x: x[1], reverse=True)
-            
-            if pearson_scores[0][1] > -999:
-                lines.append("**Best Embedding Correlation:**")
-                for i, (name, score) in enumerate(pearson_scores[:3]):
-                    lines.append(f"  {i+1}. {name}: {score:.4f}")
+            # Best performers (skip Pearson/Spearman as requested)
+            # Best validation loss (lower is better)
+            val_loss_scores = [(r.run_name, r.metrics.get("eval_loss", 999)) for r in results if "eval_loss" in r.metrics]
+            if val_loss_scores:
+                val_loss_scores.sort(key=lambda x: x[1])  # Lower is better
+                lines.append("**Best Validation Loss:**")
+                for i, (name, score) in enumerate(val_loss_scores[:3]):
+                    lines.append(f"  {i+1}. {name}: {score:.6f}")
                 lines.append("")
             
             match_scores = [(r.run_name, r.metrics.get("stack_match_score_mean", -999)) for r in results]
@@ -1575,9 +1818,9 @@ class EvaluationRunner:
         lines.append("=" * 60)
         lines.append("## INTERPRETATION GUIDE")
         lines.append("")
-        lines.append("**Pearson/Spearman Correlation:**")
-        lines.append("  Higher values (>0.5) indicate embeddings preserve input similarity structure.")
-        lines.append("  Low values suggest the model is learning different representations.")
+        lines.append("**Validation Loss:**")
+        lines.append("  Lower values indicate better model performance on validation set.")
+        lines.append("  This is the same metric used during training.")
         lines.append("")
         lines.append("**Variance Ratio:**")
         lines.append("  Values near 0 suggest mode collapse (all embeddings similar).")
@@ -1970,7 +2213,7 @@ def main():
                        help="Directory containing evaluation data")
     parser.add_argument("--eval_methods", type=str, nargs="+",
                        default=["embedding_similarity"],
-                       help="Evaluation methods to run: embedding_similarity, noise_robustness, stack_similarity, signal_completion")
+                       help="Evaluation methods to run: embedding_similarity, noise_robustness, stack_similarity, signal_completion, validation_loss")
     parser.add_argument("--best_only", action="store_true",
                        help="Only evaluate checkpoint_best.pt files")
     parser.add_argument("--latest_only", action="store_true",
@@ -1989,7 +2232,7 @@ def main():
     
     # If --all_methods, use all available eval methods
     if args.all_methods:
-        args.eval_methods = ["embedding_similarity", "noise_robustness", "stack_similarity", "signal_completion"]
+        args.eval_methods = ["embedding_similarity", "noise_robustness", "stack_similarity", "signal_completion", "validation_loss"]
     
     # Discover checkpoints
     if args.checkpoint:
@@ -2020,9 +2263,11 @@ def main():
         print(f"    - {ckpt.run_name} ({ckpt.checkpoint_type})")
     
     print(f"[+] Running evaluation methods: {args.eval_methods}")
+    print(f"[DEBUG] args.eval_methods type: {type(args.eval_methods)}, value: {args.eval_methods}")
     
     # Run evaluations
     runner = EvaluationRunner(args.output_dir, args.data_dir)
+    print(f"[DEBUG] About to call evaluate_all with eval_methods: {args.eval_methods}")
     results = runner.evaluate_all(checkpoints, args.eval_methods)
     
     # Create lookup for best_loss by run_name

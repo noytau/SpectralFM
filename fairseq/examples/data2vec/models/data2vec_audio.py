@@ -436,12 +436,41 @@ class Data2VecAudioModel(BaseFairseqModel):
             "losses": {},
         }
 
+        # Check if EMA is initialized (fallback for edge cases)
+        # EMA should be initialized via set_num_updates() when loading checkpoints.
+        # However, if optimizer_history is missing or num_updates is not available,
+        # EMA might not be initialized. This fallback handles those cases.
+        if self.ema is None: 
+            if self.final_proj is None:
+                # Model has been converted for fine-tuning (remove_pretraining_modules called)
+                # EMA is not needed in this case, but forward() should not be called with mask=True
+                raise RuntimeError(
+                    "EMA is None and final_proj is None. "
+                    "This model has been converted for fine-tuning and cannot compute pretraining loss. "
+                    "Use extract_features() with features_only=True instead."
+                )
+            # Fallback: Initialize EMA lazily if somehow not initialized
+            # This can happen if checkpoint doesn't have optimizer_history or num_updates
+            logger.warning(
+                "EMA not initialized during model loading - initializing lazily from current model state. "
+                "This may indicate the checkpoint is missing optimizer_history/num_updates."
+            )
+            self.make_ema_teacher()
+            if self.cfg.ema_transformer_only:
+                self.ema.model.load_state_dict(self.encoder.state_dict())
+            else:
+                self.ema.model.load_state_dict(self.state_dict())
+
         with torch.no_grad():
             self.ema.model.eval()
 
+            # EMA model is in fp32 (ema_fp32=True), so convert inputs to float32
+            # to avoid dtype mismatch errors when main model is in fp16
             if self.cfg.ema_transformer_only:
+                # Convert pre_encoder_features to float32 for EMA model
+                pre_encoder_features_fp32 = pre_encoder_features.float() if pre_encoder_features.dtype != torch.float32 else pre_encoder_features
                 y, layer_results = self.ema.model.extract_features(
-                    pre_encoder_features,
+                    pre_encoder_features_fp32,
                     padding_mask=padding_mask,
                     min_layer=self.cfg.encoder_layers - self.average_top_k_layers,
                 )
@@ -451,8 +480,10 @@ class Data2VecAudioModel(BaseFairseqModel):
                     "layer_results": layer_results,
                 }
             else:
+                # Convert source to float32 for EMA model
+                source_fp32 = source.float() if source.dtype != torch.float32 else source
                 y = self.ema.model.extract_features(
-                    source=source,
+                    source=source_fp32,
                     padding_mask=orig_padding_mask,
                     mask=False,
                 )

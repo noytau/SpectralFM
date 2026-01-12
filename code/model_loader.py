@@ -82,6 +82,7 @@ def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-b
 def load_fairseq_checkpoint(checkpoint_path, device=None):
     """
     Load a fairseq data2vec checkpoint from the outputs directory.
+    Uses fairseq's built-in load_model_ensemble_and_task for proper loading.
     
     Args:
         checkpoint_path: Path to checkpoint file (e.g., checkpoint_best.pt)
@@ -93,21 +94,24 @@ def load_fairseq_checkpoint(checkpoint_path, device=None):
         checkpoint_info: Dict with training info (step, epoch, etc.)
     """
     from fairseq import checkpoint_utils
-    from omegaconf import OmegaConf, open_dict
-    # Import fairseq model explicitly (not the transformers version)
-    from examples.data2vec.models.data2vec_audio import Data2VecAudioModel as FairseqData2VecAudioModel
+    from omegaconf import open_dict
     
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     print(f"[+] Loading fairseq checkpoint from: {checkpoint_path}")
     
-    # Load checkpoint
-    state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
+    # Use fairseq's built-in method to load model, config, and task
+    # This handles all the proper initialization (EMA, set_num_updates, etc.)
+    models, cfg, task = checkpoint_utils.load_model_ensemble_and_task(
+        [checkpoint_path],
+        arg_overrides={},
+        strict=False,  # Allow missing/unexpected keys for backward compatibility
+    )
     
-    # Extract configuration
-    cfg = state["cfg"]
-    model_cfg = cfg["model"]
+    # Extract the first model from ensemble (usually just one model)
+    model = models[0]
+    model_cfg = cfg.model
     
     # Handle missing config keys for older checkpoints
     default_keys = {
@@ -122,23 +126,10 @@ def load_fairseq_checkpoint(checkpoint_path, device=None):
                 model_cfg[key] = default_val
                 print(f"[+] Added missing config key: {key}={default_val}")
     
-    # Build model from config using fairseq model class
-    model = FairseqData2VecAudioModel.build_model(model_cfg)
+    # Load checkpoint state separately to extract checkpoint info
+    state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
     
-    # Load model weights
-    model_state = state.get("model", {})
-    
-    # Remove EMA keys if present
-    if "_ema" in model_state:
-        del model_state["_ema"]
-    
-    missing, unexpected = model.load_state_dict(model_state, strict=False)
-    
-    if missing:
-        print(f"[!] Missing keys: {len(missing)}")
-    if unexpected:
-        print(f"[!] Unexpected keys: {len(unexpected)}")
-    
+    # Move model to device and set to eval mode
     model = model.to(device)
     model.eval()
     
