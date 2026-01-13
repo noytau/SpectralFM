@@ -129,9 +129,10 @@ def load_fairseq_checkpoint(checkpoint_path, device=None):
     # Load checkpoint state separately to extract checkpoint info
     state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
     
-    # Move model to device and set to eval mode
+    # Move model to device
+    # Note: model.eval() is NOT called here - it's handled by fairseq's trainer.valid_step()
+    # This keeps the flow consistent with fairseq's validation implementation
     model = model.to(device)
-    model.eval()
     
     checkpoint_info = {
         "num_updates": state.get("optimizer_history", [{}])[-1].get("num_updates", 0) if state.get("optimizer_history") else 0,
@@ -145,27 +146,6 @@ def load_fairseq_checkpoint(checkpoint_path, device=None):
     print(f"    - Updates: {checkpoint_info['num_updates']}")
     
     return model, model_cfg, checkpoint_info
-
-
-def load_fairseq_model_for_evaluation(model_path, device=None):
-    """
-    Load a fairseq checkpoint for evaluation.
-    
-    Args:
-        model_path: Path to checkpoint_best.pt or any checkpoint file
-        device: Target device
-        
-    Returns:
-        model: Model in eval mode
-        cfg: Full configuration dict
-    """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    model, model_cfg, checkpoint_info = load_fairseq_checkpoint(model_path, device)
-    model.eval()
-    
-    return model, checkpoint_info["cfg"]
 
 
 def load_fairseq_data2vec_model(args, model_path="/mnt5/noy/SpectralFM/fairseq/base_libri.pt"):

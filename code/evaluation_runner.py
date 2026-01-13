@@ -39,7 +39,7 @@ _FAIRSEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
 if _FAIRSEQ_PATH not in sys.path:
     sys.path.insert(0, _FAIRSEQ_PATH)
 
-from model_loader import load_fairseq_checkpoint, load_fairseq_model_for_evaluation
+from model_loader import load_fairseq_checkpoint
 from omegaconf import OmegaConf
 
 
@@ -244,6 +244,31 @@ class EvaluationRunner:
         # Store intermediate data for comprehensive reporting
         self.eval_data: Dict[str, Any] = {}
         
+    def _prepare_model_for_eval(self, model, cfg):
+        """
+        Prepare model for evaluation: move to correct device.
+        Note: model.eval() is NOT called here - fairseq's trainer.valid_step() handles it.
+        This function only ensures the model is on the correct device.
+        
+        Returns:
+            model: The prepared model (on correct device)
+            device: The device the model is on
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
+        # Note: model.eval() is called by fairseq's trainer.valid_step() internally
+        
+        # Ensure EMA model is also on correct device
+        if hasattr(model, 'ema') and model.ema is not None and hasattr(model.ema, 'model'):
+            try:
+                ema_device = next(model.ema.model.parameters()).device
+                if ema_device != device:
+                    model.ema.model = model.ema.model.to(device)
+            except Exception:
+                pass
+        
+        return model, device
+    
     def evaluate_checkpoint(self, checkpoint_info: CheckpointInfo, 
                           eval_methods: List[str] = None) -> EvalResult:
         """
@@ -256,11 +281,8 @@ class EvaluationRunner:
         Returns:
             EvalResult with metrics
         """
-        print(f"[DEBUG] evaluate_checkpoint received eval_methods: {eval_methods} (type: {type(eval_methods)})")
-        
         if eval_methods is None:
             eval_methods = ["embedding_similarity"]
-            print(f"[DEBUG] eval_methods was None, using default: {eval_methods}")
         
         print(f"\n{'='*60}")
         print(f"Evaluating: {checkpoint_info.run_name}")
@@ -272,7 +294,8 @@ class EvaluationRunner:
         
         # Load model and extract best_loss from checkpoint
         try:
-            model, cfg = load_fairseq_model_for_evaluation(checkpoint_info.path)
+            model, model_cfg, checkpoint_info_loaded = load_fairseq_checkpoint(checkpoint_info.path)
+            cfg = checkpoint_info_loaded["cfg"]  # Full config from checkpoint
             
             # Extract best_loss directly from checkpoint
             best_loss = self._extract_best_loss(checkpoint_info.path)
@@ -290,28 +313,67 @@ class EvaluationRunner:
         # Store cfg for use in evaluation methods
         self._current_cfg = cfg
         
-        # Run each evaluation method
+        # Prepare model once: device alignment
+        # Note: model.eval() is handled by fairseq's trainer.valid_step() during validation
+        model, device = self._prepare_model_for_eval(model, cfg)
+        
+        # Run validation_loss first (fairseq's trainer.valid_step() will call model.eval() internally)
+        print("[+] Running validation loss evaluation...")
+        # fixme debug val_metrics = self._eval_validation_loss(model, cfg, debug=False)
+        # metrics.update(val_metrics)
+        
+        # Load samples for embedding extraction (same pattern as frozen/random)
+        print("[+] Loading samples for embedding extraction...")
+        task, samples_for_embeddings, dataset = self.load_eval_dataset_fairseq(
+            cfg, split="valid", max_samples=100, verbose=False
+        )
+        
+        if samples_for_embeddings is None or len(samples_for_embeddings) == 0:
+            raise RuntimeError("Failed to load samples for embedding extraction!")
+        
+        print(f"[+] Loaded {len(samples_for_embeddings)} samples for embedding extraction")
+        
+        # Extract embeddings separately (same pattern as frozen/random)
+        embedding_data = self._extract_trained_model_embeddings(
+            model, samples_for_embeddings, device
+        )
+        
+        if embedding_data is None:
+            raise RuntimeError("Failed to extract embeddings from trained model - this should not happen!")
+        
+        inputs, embeddings, embedding_samples = embedding_data
+        sample_ids = [int(s.get("id", idx)) for idx, s in enumerate(embedding_samples)]
+        print(f"[+] Using extracted embeddings: {len(inputs)} samples")
+        
+        # All evaluation methods now receive the same data from validation_loss
+        # Run each evaluation method (skip validation_loss since it already ran)
         for method in eval_methods:
+            if method == "validation_loss":
+                continue  # Already ran above
+            
             try:
                 if method == "embedding_similarity":
-                    method_metrics = self._eval_embedding_similarity(model)
+                    method_metrics = self._eval_embedding_similarity(
+                        checkpoint_info.path,
+                        embedding_samples,
+                        device,
+                        checkpoint_info=checkpoint_info,
+                        best_loss=best_loss
+                    )
                 elif method == "signal_completion":
-                    method_metrics = self._eval_signal_completion(model)
+                    # Pass model, device, and samples from validation
+                    method_metrics = self._eval_signal_completion(model, device, embedding_samples)
                 elif method == "noise_robustness":
-                    method_metrics = self._eval_noise_robustness(model)
+                    # Pass model, device, and samples from validation
+                    method_metrics = self._eval_noise_robustness(model, device, embedding_samples)
                 elif method == "stack_similarity":
-                    method_metrics = self._eval_stack_similarity(model)
-                elif method == "validation_loss":
-                    method_metrics = self._eval_validation_loss(model, cfg)
+                    method_metrics = self._eval_stack_similarity(inputs, embeddings)
                 else:
                     print(f"[!] Unknown eval method: {method}")
                     continue
                     
                 if method_metrics:
                     metrics.update(method_metrics)
-                    # Debug: print what metrics were added
-                    if method == "validation_loss":
-                        print(f"[DEBUG] Added validation_loss metrics: {list(method_metrics.keys())}")
                 else:
                     print(f"[!] Warning: {method} returned empty metrics")
             except Exception as e:
@@ -319,6 +381,20 @@ class EvaluationRunner:
                 import traceback
                 traceback.print_exc()
                 metrics[f"{method}_error"] = str(e)
+        
+        # Generate basic 2-panel similarity matrix plot (embeddings are always available from validation)
+        # The 4-way comparison is generated inside _eval_embedding_similarity
+        embedding_methods = {"embedding_similarity", "stack_similarity"}
+        needs_embeddings = bool(embedding_methods & set(eval_methods))
+        if needs_embeddings:
+            try:
+                # Basic 2-panel similarity matrices (separate from 4-way comparison)
+                self.plot_similarity_matrices(
+                    checkpoint_info, inputs, embeddings,
+                    best_loss=best_loss, save_plots=True
+                )
+            except Exception as e:
+                print(f"[!] Error generating similarity plots: {e}")
         
         # Extract key config parameters for comparison
         config_summary = self._extract_config_summary(checkpoint_info.config)
@@ -331,33 +407,331 @@ class EvaluationRunner:
             config_summary=config_summary
         )
         
-        # Debug: print metrics keys to help diagnose
-        if eval_methods and "validation_loss" in eval_methods:
-            if "eval_loss" in metrics:
-                print(f"[DEBUG] ✓ eval_loss found in metrics: {metrics.get('eval_loss')}")
-            elif "validation_loss_error" in metrics:
-                print(f"[DEBUG] ✗ validation_loss failed with error: {metrics.get('validation_loss_error')}")
-            else:
-                print(f"[DEBUG] ⚠ validation_loss method run but no eval_loss or error found. Metrics keys: {list(metrics.keys())[:20]}")
-        
         self.results.append(result)
         return result
     
     def evaluate_all(self, checkpoints: List[CheckpointInfo], 
                     eval_methods: List[str] = None) -> List[EvalResult]:
         """Evaluate multiple checkpoints."""
-        print(f"[DEBUG] evaluate_all received eval_methods: {eval_methods} (type: {type(eval_methods)})")
         results = []
         for ckpt in tqdm(checkpoints, desc="Evaluating checkpoints"):
-            print(f"[DEBUG] Calling evaluate_checkpoint with eval_methods: {eval_methods}")
             result = self.evaluate_checkpoint(ckpt, eval_methods)
             results.append(result)
         return results
     
-    def _eval_embedding_similarity(self, model) -> Dict[str, float]:
+    def _extract_embeddings(self, model, device, max_samples: int = 100) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """
+        Extract embeddings using fairseq's data loading infrastructure.
+        Assumes model is already in eval mode and on correct device.
+        
+        Args:
+            model: The loaded model (already in eval mode)
+            device: The device to use
+            max_samples: Maximum number of samples to process
+            
+        Returns:
+            Tuple of (inputs, embeddings, sample_ids)
+        """
+        # Load dataset using fairseq infrastructure
+        _, samples, _ = self.load_eval_dataset_fairseq(
+            self._current_cfg, split="valid", max_samples=max_samples, verbose=False
+        )
+        
+        inputs = []
+        embeddings = []
+        sample_ids = []
+        
+        with torch.no_grad():
+            for idx, sample in enumerate(tqdm(samples, desc="Extracting embeddings")):
+                try:
+                    source = sample["source"]
+                    sample_id = sample.get("id", idx)
+                    
+                    # Prepare input: [batch, seq_len]
+                    data = source.to(device)
+                    if data.dim() == 1:
+                        data = data.unsqueeze(0)
+                    
+                    # Store input for input-space similarity
+                    inputs.append(source.cpu().numpy())
+                    
+                    # Get features (no masking for embedding extraction)
+                    result = model.extract_features(data, padding_mask=None, mask=False)
+                    emb = result["x"].mean(dim=1).cpu().numpy().squeeze()
+                    embeddings.append(emb)
+                    sample_ids.append(int(sample_id))
+                    
+                except Exception as e:
+                    print(f"[!] Error processing sample {idx}: {e}")
+                    continue
+        
+        inputs_arr = np.stack(inputs) if inputs else np.array([])
+        embeddings_arr = np.stack(embeddings) if embeddings else np.array([])
+        
+        return inputs_arr, embeddings_arr, sample_ids
+    
+    def _extract_embeddings_from_samples(self, model, device, samples: List[Dict], 
+                                         handle_batches: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extract embeddings from pre-loaded samples (ensures exact same samples for all models).
+        
+        Args:
+            model: The model (already in eval mode)
+            device: The device to use
+            samples: Pre-loaded samples from fairseq dataset (can be individual samples or batched)
+            handle_batches: If True, handles batched samples (splits them into individual samples)
+        
+        Returns:
+            Tuple of (inputs, embeddings)
+        """
+        inputs = []
+        embeddings = []
+        failed_samples = 0
+        
+        # Get model dtype for dtype matching
+        model_dtype = next(model.parameters()).dtype
+        
+        with torch.no_grad():
+            for idx, sample in enumerate(tqdm(samples, desc="Extracting embeddings")):
+                try:
+                    # Handle different sample structures
+                    if "source" not in sample:
+                        # Try alternative keys
+                        if "net_input" in sample and "source" in sample["net_input"]:
+                            source = sample["net_input"]["source"]
+                        elif "src_tokens" in sample:
+                            source = sample["src_tokens"]
+                        else:
+                            raise KeyError(f"Sample {idx} does not have 'source' key. Available keys: {list(sample.keys()) if isinstance(sample, dict) else 'N/A'}")
+                    else:
+                        source = sample["source"]
+                    
+                    # Convert to tensor if it's not already
+                    if not isinstance(source, torch.Tensor):
+                        source = torch.tensor(source) if isinstance(source, (list, np.ndarray)) else source
+                    
+                    # Handle batched samples
+                    if handle_batches and isinstance(source, torch.Tensor) and source.dim() > 1 and source.shape[0] > 1:
+                        # Process each sample in the batch
+                        batch_size = source.shape[0]
+                        for b in range(batch_size):
+                            source_single = source[b]
+                            data = source_single.to(device)
+                            if data.dim() == 1:
+                                data = data.unsqueeze(0)
+                            
+                            # Ensure dtype matches model
+                            if data.dtype != model_dtype:
+                                data = data.to(dtype=model_dtype)
+                            
+                            # Store input
+                            inputs.append(source_single.cpu().numpy())
+                            
+                            # Extract embeddings
+                            result = model.extract_features(data, padding_mask=None, mask=False)
+                            emb = result["x"].mean(dim=1).cpu().numpy().squeeze()
+                            embeddings.append(emb)
+                    else:
+                        # Single sample (handle_batches=False means samples are already individual)
+                        # Convert to tensor if needed and move to device
+                        if isinstance(source, torch.Tensor):
+                            # Ensure tensor is contiguous (in case it's a view/slice)
+                            source_contig = source.contiguous() if not source.is_contiguous() else source
+                            data = source_contig.to(device)
+                        elif isinstance(source, np.ndarray):
+                            data = torch.from_numpy(source).to(device)
+                        else:
+                            data = torch.tensor(source).to(device)
+                        
+                        if data.dim() == 1:
+                            data = data.unsqueeze(0)
+                        
+                        # Ensure dtype matches model
+                        if data.dtype != model_dtype:
+                            data = data.to(dtype=model_dtype)
+                        
+                        # Store input (convert to numpy, ensure it's on CPU and contiguous)
+                        if isinstance(source, torch.Tensor):
+                            # Detach and clone to ensure we have a CPU copy
+                            source_np = source.detach().cpu().contiguous().numpy()
+                        else:
+                            source_np = np.array(source)
+                        inputs.append(source_np)
+                        
+                        # Extract embeddings
+                        result = model.extract_features(data, padding_mask=None, mask=False)
+                        emb = result["x"].mean(dim=1).cpu().numpy().squeeze()
+                        embeddings.append(emb)
+                    
+                except Exception as e:
+                    failed_samples += 1
+                    if failed_samples <= 3:  # Only print first 3 errors to avoid spam
+                        print(f"[!] Error processing sample {idx}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    continue
+        
+        if failed_samples > 0:
+            print(f"[!] Warning: Failed to extract embeddings from {failed_samples}/{len(samples)} samples")
+        
+        if len(inputs) == 0:
+            print(f"[!] Error: No embeddings extracted! All {len(samples)} samples failed.")
+        
+        inputs_arr = np.stack(inputs) if inputs else np.array([])
+        embeddings_arr = np.stack(embeddings) if embeddings else np.array([])
+        
+        return inputs_arr, embeddings_arr
+    
+    def _extract_inputs_from_samples(self, samples: List[Dict]) -> np.ndarray:
+        """
+        Extract input data from samples (without needing a model).
+        Ensures consistent input extraction across all embedding sources.
+        
+        Args:
+            samples: Pre-loaded samples from fairseq dataset
+            
+        Returns:
+            Inputs array [N, seq_len]
+        """
+        inputs = []
+        
+        for idx, sample in enumerate(samples):
+            try:
+                # Handle different sample structures
+                if "source" not in sample:
+                    if "net_input" in sample and "source" in sample["net_input"]:
+                        source = sample["net_input"]["source"]
+                    elif "src_tokens" in sample:
+                        source = sample["src_tokens"]
+                    else:
+                        raise KeyError(f"Sample {idx} does not have 'source' key. Available keys: {list(sample.keys()) if isinstance(sample, dict) else 'N/A'}")
+                else:
+                    source = sample["source"]
+                
+                # Convert to numpy
+                if isinstance(source, torch.Tensor):
+                    # Handle batched samples
+                    if source.dim() > 1 and source.shape[0] > 1:
+                        batch_size = source.shape[0]
+                        for b in range(batch_size):
+                            source_single = source[b]
+                            inputs.append(source_single.detach().cpu().contiguous().numpy())
+                    else:
+                        inputs.append(source.detach().cpu().contiguous().numpy())
+                elif isinstance(source, np.ndarray):
+                    if source.ndim > 1 and source.shape[0] > 1:
+                        # Batched
+                        for b in range(source.shape[0]):
+                            inputs.append(source[b])
+                    else:
+                        inputs.append(source)
+                else:
+                    inputs.append(np.array(source))
+                    
+            except Exception as e:
+                print(f"[!] Error extracting input from sample {idx}: {e}")
+                continue
+        
+        if len(inputs) == 0:
+            print(f"[!] Error: No inputs extracted from {len(samples)} samples")
+            return np.array([])
+        
+        return np.stack(inputs)
+    
+    def _load_embeddings_from_checkpoint(self, checkpoint_path: str, samples: List[Dict], device, 
+                                         checkpoint_name: str = "checkpoint") -> Optional[np.ndarray]:
+        """
+        Generic function to load embeddings from a checkpoint path.
+        
+        Args:
+            checkpoint_path: Path to the checkpoint file
+            samples: Pre-loaded samples from fairseq dataset
+            device: The device to use
+            checkpoint_name: Name for logging purposes (e.g., "frozen encoder", "random init")
+            
+        Returns:
+            Embeddings array or None if failed
+        """
+        if samples is None:
+            print(f"[!] Warning: No samples provided for {checkpoint_name} embeddings")
+            return None
+        
+        try:
+            if not os.path.exists(checkpoint_path):
+                print(f"[!] {checkpoint_name.capitalize()} checkpoint not found at {checkpoint_path}")
+                return None
+            
+            print(f"[+] Loading {checkpoint_name} checkpoint from {checkpoint_path}...")
+            model, model_cfg, checkpoint_info = load_fairseq_checkpoint(checkpoint_path)
+            cfg = checkpoint_info["cfg"]  # Full config from checkpoint
+            self._current_cfg = cfg
+            model, model_device = self._prepare_model_for_eval(model, cfg)
+            
+            # Use the device from _prepare_model_for_eval (model might have been moved)
+            # Extract embeddings using the EXACT same samples
+            _, embeddings = self._extract_embeddings_from_samples(
+                model, model_device, samples
+            )
+            del model  # Free memory
+            return embeddings
+            
+        except Exception as e:
+            print(f"[!] Failed to load {checkpoint_name} embeddings: {e}")
+            return None
+    
+    def _load_frozen_encoder_embeddings(self, samples: List[Dict], device) -> Optional[np.ndarray]:
+        """
+        Load embeddings from frozen encoder checkpoint (train_only_fe=True).
+        
+        Args:
+            samples: Pre-loaded samples from fairseq dataset
+            device: The device to use
+            
+        Returns:
+            Embeddings array or None if failed
+        """
+        FROZEN_ENCODER_PATH = "/mnt5/noy/SpectralFM/checkpoints/runai/2025-12-27_00-06-01/checkpoint_best.pt"
+        # fixme FROZEN_ENCODER_PATH = "/mnt5/noy/SpectralFM/checkpoints/runai/2026-01-12_11-44-25/checkpoint_best.pt"
+        
+        return self._load_embeddings_from_checkpoint(
+            FROZEN_ENCODER_PATH, samples, device, checkpoint_name="frozen encoder"
+        )
+    
+    def _load_random_init_embeddings(self, samples: List[Dict], device) -> Optional[np.ndarray]:
+        """
+        Load embeddings from a random init checkpoint (no training).
+        
+        Args:
+            samples: Pre-loaded samples from fairseq dataset
+            device: The device to use
+            
+        Returns:
+            Embeddings array or None if failed
+        """
+        # TODO: Update this path to point to a random init checkpoint
+        RANDOM_INIT_PATH = "/mnt5/noy/SpectralFM/checkpoints/runai/2026-01-12_11-44-25/checkpoint_best.pt"  # FIXME: Replace with actual random init checkpoint
+        
+        return self._load_embeddings_from_checkpoint(
+            RANDOM_INIT_PATH, samples, device, checkpoint_name="random init"
+        )
+    
+    def _eval_embedding_similarity(self, checkpoint_path: str, samples: List[Dict], device,
+                                    checkpoint_info: CheckpointInfo = None,
+                                    best_loss: Optional[float] = None) -> Dict[str, float]:
         """
         Evaluate embedding quality by comparing input-space vs embedding-space similarity.
+        Also generates a 4-way similarity matrix comparison plot.
         
+        All embeddings (evaluated model, frozen encoder, random init) are loaded from checkpoints
+        using the EXACT same samples to ensure fair comparison.
+        
+        Args:
+            checkpoint_path: Path to the evaluated model checkpoint
+            samples: Pre-loaded samples (used for ALL embedding extractions)
+            device: Device to use (for all models)
+            checkpoint_info: Checkpoint info (for saving plots)
+            best_loss: Training loss (for plot title)
+            
         A good model should:
         - Preserve relative similarities (similar inputs -> similar embeddings)
         - Have higher variance in embedding similarity than a collapsed model
@@ -365,70 +739,93 @@ class EvaluationRunner:
         """
         from sklearn.metrics.pairwise import cosine_similarity
         from scipy.stats import pearsonr, spearmanr
-        import numpy as np
-        import torchaudio
-        import glob
         
-        device = next(model.parameters()).device
-        model.eval()
+        print(f"[+] Running embedding similarity analysis...")
         
-        # Load wav files directly from data_dir
-        wav_files = glob.glob(os.path.join(self.data_dir, "*.wav"))
+        if samples is None or len(samples) == 0:
+            return {"error": "No samples provided for embedding similarity analysis"}
         
-        if len(wav_files) == 0:
-            return {"error": f"No wav files found in {self.data_dir}"}
+        if device is None:
+            return {"error": "No device provided for embedding similarity analysis"}
         
-        # Sample for efficiency
-        sample_size = min(100, len(wav_files))
-        import random
-        random.seed(42)
-        sampled_files = random.sample(wav_files, sample_size)
+        # Store original cfg
+        original_cfg = self._current_cfg
         
-        print(f"[+] Loading {sample_size} wav files for evaluation...")
+        # Extract inputs from samples (same for all comparisons)
+        print(f"[+] Extracting inputs from {len(samples)} samples...")
+        inputs = self._extract_inputs_from_samples(samples)
         
-        inputs = []
-        embeddings = []
+        if len(inputs) == 0:
+            return {"error": "Failed to extract inputs from samples"}
         
-        with torch.no_grad():
-            for wav_path in tqdm(sampled_files, desc="Extracting embeddings"):
-                try:
-                    # Load wav file
-                    waveform, sr = torchaudio.load(wav_path)
-                    
-                    # Resample if needed
-                    if sr != 16000:
-                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    
-                    # Convert to mono if stereo
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
-                    
-                    # Store input for input-space similarity
-                    input_flat = waveform.squeeze(0).cpu().numpy()
-                    inputs.append(input_flat)
-                    
-                    # Prepare input: [batch, seq_len]
-                    data = waveform.squeeze(0).to(device)  # [seq_len]
-                    data = data.unsqueeze(0)  # [1, seq_len]
-                    
-                    # Get features
-                    result = model.extract_features(data, padding_mask=None, mask=False)
-                    emb = result["x"].mean(dim=1).cpu().numpy()  # [1, embed_dim]
-                    embeddings.append(emb.squeeze())
-                except Exception as e:
-                    print(f"[!] Error processing {wav_path}: {e}")
-                    continue
+        n_samples = len(inputs)
+        print(f"[+] Extracted inputs from {n_samples} samples")
         
+        # Load embeddings from evaluated model checkpoint
+        print(f"[+] Loading embeddings from evaluated model checkpoint...")
+        embeddings = self._load_embeddings_from_checkpoint(
+            checkpoint_path, samples, device, checkpoint_name="evaluated model"
+        )
+        
+        if embeddings is None or len(embeddings) == 0:
+            return {"error": "Failed to load embeddings from evaluated model checkpoint"}
+        
+        if len(embeddings) != n_samples:
+            error_msg = f"Mismatch: evaluated model embeddings has {len(embeddings)} samples, expected {n_samples}"
+            print(f"[!] Error: {error_msg}")
+            return {"error": error_msg}
+        
+        # Load baseline embeddings (using the EXACT same samples)
+        embeddings_frozen = None
+        embeddings_random = None
+        best_loss_frozen = None
+        
+        embeddings_frozen = self._load_frozen_encoder_embeddings(samples, device)
+        
+        # Extract best_loss from frozen encoder checkpoint
+        if embeddings_frozen is not None:
+            FROZEN_ENCODER_PATH = "/mnt5/noy/SpectralFM/checkpoints/runai/2025-12-27_00-06-01/checkpoint_best.pt"
+            best_loss_frozen = self._extract_best_loss(FROZEN_ENCODER_PATH)
+            if best_loss_frozen is not None:
+                print(f"[+] Frozen encoder best_loss: {best_loss_frozen:.4f}")
+        
+        embeddings_random = self._load_random_init_embeddings(samples, device)
+        
+        # Validate baseline embeddings have the same count
+        if embeddings_frozen is not None:
+            n_frozen = len(embeddings_frozen)
+            if n_frozen != n_samples:
+                print(f"[!] Warning: Frozen encoder embeddings has {n_frozen} samples, expected {n_samples}. Skipping frozen encoder comparison.")
+                embeddings_frozen = None
+                best_loss_frozen = None
+        
+        if embeddings_random is not None:
+            n_random = len(embeddings_random)
+            if n_random != n_samples:
+                print(f"[!] Warning: Random init embeddings has {n_random} samples, expected {n_samples}. Skipping random init comparison.")
+                embeddings_random = None
+        
+        # Restore original cfg
+        self._current_cfg = original_cfg
+        
+        # Final validation: all embeddings should have the same number of samples
         if len(embeddings) < 2:
             return {"error": "Not enough valid samples for similarity computation"}
         
-        # Stack arrays
-        inputs = np.stack(inputs)
-        embeddings = np.stack(embeddings)
-        
-        # Compute similarity matrices
+        # Compute similarity matrices (all should have the same number of samples now)
         input_sim_matrix = cosine_similarity(inputs)
         emb_sim_matrix = cosine_similarity(embeddings)
+        emb_sim_frozen = cosine_similarity(embeddings_frozen) if embeddings_frozen is not None else None
+        emb_sim_random = cosine_similarity(embeddings_random) if embeddings_random is not None else None
+        
+        # Final validation: ensure all similarity matrices have the same shape
+        expected_shape = (n_samples, n_samples)
+        assert input_sim_matrix.shape == expected_shape, f"Input sim matrix shape {input_sim_matrix.shape} != expected {expected_shape}"
+        assert emb_sim_matrix.shape == expected_shape, f"Embed sim matrix shape {emb_sim_matrix.shape} != expected {expected_shape}"
+        if emb_sim_frozen is not None:
+            assert emb_sim_frozen.shape == expected_shape, f"Frozen sim matrix shape {emb_sim_frozen.shape} != expected {expected_shape}"
+        if emb_sim_random is not None:
+            assert emb_sim_random.shape == expected_shape, f"Random sim matrix shape {emb_sim_random.shape} != expected {expected_shape}"
         
         # Get upper triangle indices (excluding diagonal)
         triu_idx = np.triu_indices_from(input_sim_matrix, k=1)
@@ -442,38 +839,111 @@ class EvaluationRunner:
         
         # Metrics
         metrics = {
-            # Input space metrics
             "input_mean_sim": float(np.mean(input_sims)),
             "input_std_sim": float(np.std(input_sims)),
-            
-            # Embedding space metrics
             "emb_mean_sim": float(np.mean(emb_sims)),
             "emb_std_sim": float(np.std(emb_sims)),
-            
-            # Comparison metrics (key indicators of model quality)
-            "pearson_corr": float(pearson_corr),  # How well embedding similarity tracks input similarity
+            "pearson_corr": float(pearson_corr),
             "pearson_p_value": float(pearson_p),
-            "spearman_corr": float(spearman_corr),  # Rank correlation
+            "spearman_corr": float(spearman_corr),
             "spearman_p_value": float(spearman_p),
-            
-            # Similarity ratio (embedding variance / input variance)
-            # Low ratio suggests mode collapse
             "sim_variance_ratio": float(np.std(emb_sims) / (np.std(input_sims) + 1e-8)),
-            
-            # Model info
             "emb_dim": embeddings.shape[1],
             "num_samples": len(embeddings),
             "num_pairs": len(input_sims),
         }
         
-        print(f"\n[+] Embedding Similarity Analysis:")
+        print(f"[+] Embedding Similarity Analysis:")
         print(f"    Input space:  mean={metrics['input_mean_sim']:.4f}, std={metrics['input_std_sim']:.4f}")
         print(f"    Embed space:  mean={metrics['emb_mean_sim']:.4f}, std={metrics['emb_std_sim']:.4f}")
         print(f"    Pearson corr: {metrics['pearson_corr']:.4f} (p={metrics['pearson_p_value']:.2e})")
-        print(f"    Spearman corr: {metrics['spearman_corr']:.4f}")
         print(f"    Variance ratio: {metrics['sim_variance_ratio']:.4f}")
         
+        # Generate 4-way similarity matrix comparison plot
+        if checkpoint_info is not None:
+            self._plot_embedding_similarity_comparison(
+                checkpoint_info, input_sim_matrix, emb_sim_matrix,
+                emb_sim_frozen, emb_sim_random, best_loss, best_loss_frozen
+            )
+        
         return metrics
+    
+    def _plot_embedding_similarity_comparison(self, checkpoint_info: CheckpointInfo,
+                                               input_sim: np.ndarray,
+                                               emb_sim_current: np.ndarray,
+                                               emb_sim_frozen: Optional[np.ndarray],
+                                               emb_sim_random: Optional[np.ndarray],
+                                               best_loss: Optional[float] = None,
+                                               best_loss_frozen: Optional[float] = None):
+        """
+        Plot 4-way similarity matrix comparison side by side.
+        
+        Args:
+            checkpoint_info: Checkpoint info
+            input_sim: Input space similarity matrix
+            emb_sim_current: Current model embedding similarity matrix
+            emb_sim_frozen: Frozen encoder embedding similarity matrix (optional)
+            emb_sim_random: Random init embedding similarity matrix (optional)
+            best_loss: Training loss for current model title
+            best_loss_frozen: Training loss for frozen encoder model title
+        """
+        # Build matrices list
+        matrices = [
+            ("Input Space", input_sim),
+            (f"Trained Model\n(loss: {best_loss:.3f})" if best_loss else "Trained Model", emb_sim_current),
+        ]
+        if emb_sim_frozen is not None:
+            frozen_title = "Frozen Transformer - train only FE\n"
+            if best_loss_frozen is not None:
+                frozen_title += f"\n(loss: {best_loss_frozen:.3f})"
+            matrices.append((frozen_title, emb_sim_frozen))
+        if emb_sim_random is not None:
+            matrices.append(("Random Init\n(no training)", emb_sim_random))
+        
+        n_matrices = len(matrices)
+        
+        run_plots_dir = self.plots_dir / checkpoint_info.run_name
+        run_plots_dir.mkdir(parents=True, exist_ok=True)
+        
+        fig, axes = plt.subplots(1, n_matrices, figsize=(5 * n_matrices, 5))
+        if n_matrices == 1:
+            axes = [axes]
+        
+        fig.suptitle(f"Embedding Similarity Comparison: {checkpoint_info.run_name}", 
+                    fontsize=14, fontweight='bold')
+        
+        # Determine number of samples for axis labels
+        n_samples = input_sim.shape[0]
+        
+        # Create sample index labels (show every Nth label to avoid clutter)
+        step = max(1, n_samples // 10)  # Show ~10 labels max
+        tick_positions = list(range(0, n_samples, step))
+        if n_samples - 1 not in tick_positions:
+            tick_positions.append(n_samples - 1)
+        tick_labels = [str(i) for i in tick_positions]
+        
+        for i, (title, sim_matrix) in enumerate(matrices):
+            sns.heatmap(sim_matrix, ax=axes[i], cmap="viridis",
+                       xticklabels=False, yticklabels=False,
+                       vmin=0, vmax=1)
+            axes[i].set_title(title, fontsize=11)
+            axes[i].set_xlabel(f"Sample Index (N={n_samples})", fontsize=10)
+            
+            # Add x-axis tick labels
+            axes[i].set_xticks(tick_positions)
+            axes[i].set_xticklabels(tick_labels, rotation=0, fontsize=8)
+            
+            if i == 0:
+                axes[i].set_ylabel(f"Sample Index (N={n_samples})", fontsize=10)
+                # Add y-axis tick labels
+                axes[i].set_yticks(tick_positions)
+                axes[i].set_yticklabels(tick_labels, rotation=0, fontsize=8)
+        
+        plt.tight_layout()
+        plt.savefig(run_plots_dir / "embedding_similarity_comparison.png", dpi=150)
+        plt.close()
+        
+        print(f"[+] Saved 4-way embedding similarity comparison to {run_plots_dir}")
     
     def load_eval_dataset_fairseq(self, cfg, split="valid", max_samples=None, verbose=True):
         """
@@ -496,6 +966,7 @@ class EvaluationRunner:
         # Build task from config
         task = tasks.setup_task(cfg.task)
         
+        # fixme noy - change this for valid loss and for other tasks
         # Load dataset using the same method as training
         task.load_dataset(split, task_cfg=cfg.task)
         dataset = task.dataset(split)
@@ -517,7 +988,7 @@ class EvaluationRunner:
         
         return task, samples, dataset
     
-    def _eval_validation_loss(self, model, cfg) -> Dict[str, float]:
+    def _eval_validation_loss(self, model, cfg, debug: bool = False) -> Dict[str, float]:
         """
         Evaluate the model using trainer.valid_step (same as train.py's validate function).
         
@@ -525,101 +996,59 @@ class EvaluationRunner:
         - Uses trainer.get_valid_iterator() for batching
         - Uses trainer.valid_step(sample) which handles GPU, metrics, etc.
         
+        Args:
+            model: The model
+            cfg: The config
+            debug: Debug flag for verbose output (default: False)
+        
         Returns:
-            Dictionary with validation loss metrics
+            Dict with validation loss metrics
         """
         from fairseq.trainer import Trainer
         from fairseq.logging import metrics as fairseq_metrics
         
-        print("[+] Evaluating validation loss using trainer.valid_step...")
+        print("[+] Evaluating validation loss...")
         
         try:
-            print("[DEBUG] Step 1: Loading dataset...")
-            # Load dataset using our helper (allows custom paths later)
-            # Note: Prints may come from:
-            # 1. model.build_model() if model_path is set in config (data2vec_audio.py lines 243-261)
-            # 2. fairseq's internal task/trainer initialization
-            # 3. load_eval_dataset_fairseq (now suppressed with verbose=False)
+            # Load dataset using fairseq infrastructure
             task, _, dataset = self.load_eval_dataset_fairseq(cfg, split="valid", max_samples=None, verbose=False)
-            print(f"[DEBUG] Step 1 complete: Loaded dataset with {len(dataset)} samples")
-            
-            print("[DEBUG] Step 2: Building criterion...")
-            # Build criterion
             criterion = task.build_criterion(cfg.criterion)
-            print("[DEBUG] Step 2 complete: Criterion built")
-            
-            print("[DEBUG] Step 3: Creating trainer...")
+
             # Ensure model is on the correct device
-            # Trainer will move data to its device, so model must match
-            # Check what device Trainer will use (same logic as Trainer.__init__)
             use_cuda = torch.cuda.is_available() and not getattr(cfg.common, 'cpu', False)
             trainer_device = torch.device("cuda" if use_cuda else "cpu")
             model_device = next(model.parameters()).device
-            print(f"[DEBUG] Trainer will use device: {trainer_device}, Model currently on: {model_device}")
-            print(f"[DEBUG] CUDA available: {torch.cuda.is_available()}, cfg.common.cpu: {getattr(cfg.common, 'cpu', 'not set')}")
-            
+
             if model_device != trainer_device:
-                print(f"[DEBUG] Moving model from {model_device} to {trainer_device}")
                 model = model.to(trainer_device)
-                # Verify move was successful
-                new_model_device = next(model.parameters()).device
-                print(f"[DEBUG] Model now on device: {new_model_device}")
             
             # Ensure EMA model is also on the correct device
-            # EMA model is stored separately in model.ema.model and might not be moved with model.to()
             if hasattr(model, 'ema') and model.ema is not None and hasattr(model.ema, 'model') and model.ema.model is not None:
                 try:
                     ema_model_device = next(model.ema.model.parameters()).device
-                    print(f"[DEBUG] EMA model device before: {ema_model_device}")
                     if ema_model_device != trainer_device:
-                        print(f"[DEBUG] Moving EMA model from {ema_model_device} to {trainer_device}")
                         model.ema.model = model.ema.model.to(trainer_device)
-                        # Verify EMA move
-                        new_ema_device = next(model.ema.model.parameters()).device
-                        print(f"[DEBUG] EMA model now on device: {new_ema_device}")
-                except Exception as e:
-                    print(f"[DEBUG] Could not check/move EMA model: {e}")
+                except Exception:
+                    pass
             
-            # Create trainer (same as in training)
+            # Create trainer and get iterator
             trainer = Trainer(cfg, task, model, criterion)
-            print(f"[DEBUG] Trainer created with device: {trainer.device}")
-            print("[DEBUG] Step 3 complete: Trainer created")
-            
-            print("[DEBUG] Step 4: Getting valid iterator...")
-            # Get valid iterator (same as train.py validate function)
             itr = trainer.get_valid_iterator("valid").next_epoch_itr(shuffle=False)
-            print("[DEBUG] Step 4 complete: Iterator obtained")
-            
-            print(f"[+] Running validation...")
             
             all_losses = []
             num_batches = 0
             
-            # Validation loop (same as train.py validate function)
+            # Validation loop - follows fairseq's pattern
             with fairseq_metrics.aggregate(new_root=True) as agg:
                 for sample in tqdm(itr, desc="Computing validation loss"):
-                    # trainer.valid_step handles: move to GPU, model.eval(), torch.no_grad()
+                    # Call trainer.valid_step() (matches fairseq's validate.py flow)
+                    # This sets model.eval() internally and processes the sample via _prepare_sample()
                     log_output = trainer.valid_step(sample)
                     
                     if log_output:
-                        # Print full log_output structure for first batch (debugging)
-                        if num_batches == 0:
-                            print(f"\n[DEBUG] First batch log_output keys: {list(log_output.keys())}")
-                            print(f"[DEBUG] Full log_output: {log_output}")
-                        
                         loss_val = log_output.get("loss", 0)
-                        sample_size = log_output.get("sample_size", 0)
-                        nsentences = log_output.get("nsentences", 0)
-                        
-                        # Print detailed loss info for debugging
-                        print(f"  Batch {num_batches + 1}: loss={loss_val:.6f}, sample_size={sample_size}, nsentences={nsentences}")
-                        if "regression" in log_output:
-                            print(f"    regression loss: {log_output.get('regression', 0):.6f}")
-                        
                         all_losses.append(float(loss_val))
                         num_batches += 1
-                    else:
-                        print(f"  Batch {num_batches + 1}: log_output is None or empty")
                 
                 # Get aggregated stats
                 stats = agg.get_smoothed_values()
@@ -655,7 +1084,52 @@ class EvaluationRunner:
             print(f"[!] ============================================================\n")
             return {"validation_loss_error": str(e), "validation_loss_error_traceback": error_traceback}
     
-    def _eval_signal_completion(self, model) -> Dict[str, float]:
+    def _extract_trained_model_embeddings(self, model, samples: List[Dict], device) -> Optional[Tuple[np.ndarray, np.ndarray, List[Dict]]]:
+        """
+        Extract embeddings from the trained model.
+        
+        Follows the exact same pattern as _load_frozen_encoder_embeddings and _load_random_init_embeddings:
+        - Receives pre-loaded samples from fairseq dataset
+        - Extract embeddings using _extract_embeddings_from_samples
+        
+        Args:
+            model: The trained model
+            samples: Pre-loaded samples from fairseq dataset
+            device: The device to use
+            
+        Returns:
+            Tuple of (inputs, embeddings, samples) or None if extraction failed
+        """
+        if samples is None:
+            print("[!] Warning: No samples provided for trained model embeddings")
+            return None
+        
+        try:
+            print(f"[+] Extracting embeddings from trained model ({len(samples)} samples)...")
+            
+            # Ensure model is in eval mode
+            model.eval()
+            
+            # Extract embeddings using the shared function (same as frozen/random)
+            inputs_arr, embeddings_arr = self._extract_embeddings_from_samples(
+                model, device, samples, handle_batches=True
+            )
+            
+            if len(inputs_arr) == 0 or len(embeddings_arr) == 0:
+                print(f"[!] Warning: Extracted empty arrays! inputs={len(inputs_arr)}, embeddings={len(embeddings_arr)}")
+                return None
+            
+            print(f"[+] Extracted embeddings from {len(inputs_arr)} samples")
+            
+            return (inputs_arr, embeddings_arr, samples)
+            
+        except Exception as e:
+            print(f"[!] Failed to extract trained model embeddings: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _eval_signal_completion(self, model, device, samples: List[Dict]) -> Dict[str, float]:
         """
         Evaluate signal completion/reconstruction capability.
         
@@ -664,6 +1138,11 @@ class EvaluationRunner:
         2. Masking portions of signals (second half for causal, random spans)
         3. Comparing model's contextualized representations at masked positions
         
+        Args:
+            model: The model (already in eval mode)
+            device: The device to use
+            samples: Pre-loaded samples from fairseq dataset
+        
         Key metrics:
         - Cosine similarity between predicted and target embeddings at masked positions
         - MSE loss at masked positions
@@ -671,13 +1150,7 @@ class EvaluationRunner:
         """
         from scipy.stats import pearsonr, spearmanr
         
-        device = next(model.parameters()).device
-        model.eval()
-        
-        # Load dataset using fairseq infrastructure
-        _, samples, dataset = self.load_eval_dataset_fairseq(self._current_cfg, split="valid", max_samples=100)
         sample_size = len(samples)
-        
         print(f"[+] Evaluating signal completion on {sample_size} samples...")
         
         # Results storage
@@ -831,61 +1304,45 @@ class EvaluationRunner:
         
         return metrics
     
-    def _eval_noise_robustness(self, model) -> Dict[str, float]:
+    def _eval_noise_robustness(self, model, device, samples: List[Dict]) -> Dict[str, float]:
         """
         Evaluate embedding robustness to various noise types.
         Compares clean vs noisy embeddings using cosine similarity.
-        Saves detailed noise data and generates noisy vs clean spectrograms.
+        
+        Args:
+            model: The model (already in eval mode)
+            device: The device to use
+            samples: Pre-loaded samples from fairseq dataset
         """
-        import torchaudio
-        import glob
-        
-        device = next(model.parameters()).device
-        model.eval()
-        
-        # Load wav files
-        wav_files = glob.glob(os.path.join(self.data_dir, "*.wav"))
-        if len(wav_files) == 0:
-            return {"error": f"No wav files found in {self.data_dir}"}
-        
-        # Sample for efficiency
-        sample_size = min(50, len(wav_files))
-        import random
-        random.seed(42)
-        sampled_files = random.sample(wav_files, sample_size)
-        
-        print(f"[+] Evaluating noise robustness on {sample_size} samples...")
+        print(f"[+] Evaluating noise robustness on {len(samples)} samples...")
         
         noise_types = {
-            "gaussian_std": lambda x: x + np.random.normal(0, 0.01, size=len(x)),
-            "gaussian_mean": lambda x: x + np.random.normal(0.02, 0.001, size=len(x)),
+            "gaussian_std": lambda x: x + np.random.normal(0, 0.01, size=x.shape),
+            "gaussian_mean": lambda x: x + np.random.normal(0.02, 0.001, size=x.shape),
             "gain_low": lambda x: x * np.random.normal(1, 0.05),
             "gain_high": lambda x: x * np.random.normal(1, 0.1),
         }
         
-        # Store per-sample results for detailed analysis
         noise_results = []
         
         with torch.no_grad():
-            for idx, wav_path in enumerate(tqdm(sampled_files, desc="Noise robustness eval")):
+            for idx, sample in enumerate(tqdm(samples, desc="Noise robustness eval")):
                 try:
-                    # Load wav file
-                    waveform, sr = torchaudio.load(wav_path)
-                    if sr != 16000:
-                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
+                    source = sample["source"]
+                    sample_id = sample.get("id", idx)
                     
-                    clean_data = waveform.squeeze(0).numpy()
+                    clean_data = source.cpu().numpy()
+                    
+                    # Prepare clean input
+                    data_tensor = source.unsqueeze(0).to(device) if source.dim() == 1 else source.to(device)
                     
                     # Get clean embedding
-                    data_tensor = waveform.squeeze(0).unsqueeze(0).to(device)
                     clean_result = model.extract_features(data_tensor, padding_mask=None, mask=False)
                     clean_emb = clean_result["x"].mean(dim=1).cpu().numpy().squeeze()
                     
                     sample_result = {
                         "index": idx,
-                        "file": os.path.basename(wav_path),
+                        "sample_id": int(sample_id),
                     }
                     
                     # Evaluate each noise type
@@ -896,32 +1353,28 @@ class EvaluationRunner:
                         noisy_result = model.extract_features(noisy_tensor, padding_mask=None, mask=False)
                         noisy_emb = noisy_result["x"].mean(dim=1).cpu().numpy().squeeze()
                         
-                        # Compute similarities using helper function
                         data_sim = compute_cosine_similarity(clean_data, noisy_data)
                         emb_sim = compute_cosine_similarity(clean_emb, noisy_emb)
                         
                         sample_result[f"{noise_type}_data_sim"] = data_sim
                         sample_result[f"{noise_type}_emb_sim"] = emb_sim
                         
-                        # Store noisy data for best/worst plotting (first few samples only)
+                        # Store data for visualization (first few samples only)
                         if idx < 10:
-                            if f"clean_data_{idx}" not in self.eval_data:
-                                self.eval_data[f"clean_data_{self._current_run_name}_{idx}"] = clean_data
+                            self.eval_data[f"clean_data_{self._current_run_name}_{idx}"] = clean_data
                             self.eval_data[f"noisy_data_{self._current_run_name}_{idx}_{noise_type}"] = noisy_data
                     
                     noise_results.append(sample_result)
                         
                 except Exception as e:
-                    print(f"[!] Error processing {wav_path}: {e}")
+                    print(f"[!] Error processing sample {idx}: {e}")
                     continue
         
-        # Create noise results dataframe and save
+        # Create and save results dataframe
         noise_df = pd.DataFrame(noise_results)
         noise_df_path = self.data_dir_out / f"noise_robustness_{self._current_run_name}.csv"
         noise_df.to_csv(noise_df_path, index=False)
-        print(f"[+] Saved noise robustness data to: {noise_df_path}")
         
-        # Store for visualization
         self.eval_data[f"noise_df_{self._current_run_name}"] = noise_df
         
         # Aggregate metrics
@@ -935,12 +1388,11 @@ class EvaluationRunner:
                 metrics[f"noise_{noise_type}_data_sim_std"] = float(np.std(data_sims))
                 metrics[f"noise_{noise_type}_emb_sim_mean"] = float(np.mean(emb_sims))
                 metrics[f"noise_{noise_type}_emb_sim_std"] = float(np.std(emb_sims))
-                # Robustness ratio: how much better embedding preserves identity than raw data
                 metrics[f"noise_{noise_type}_robustness_ratio"] = float(
                     np.mean(emb_sims) / (np.mean(data_sims) + 1e-8)
                 )
         
-        print(f"\n[+] Noise Robustness Analysis:")
+        print(f"[+] Noise Robustness Analysis:")
         for noise_type in noise_types:
             if f"noise_{noise_type}_emb_sim_mean" in metrics:
                 print(f"    {noise_type}: data_sim={metrics[f'noise_{noise_type}_data_sim_mean']:.4f}, "
@@ -949,64 +1401,23 @@ class EvaluationRunner:
         
         return metrics
 
-    def _eval_stack_similarity(self, model) -> Dict[str, float]:
+    def _eval_stack_similarity(self, inputs: np.ndarray, embeddings: np.ndarray) -> Dict[str, float]:
         """
         Evaluate similarity comparison by stack membership.
         Compares how well embedding-space neighbors match input-space neighbors,
         particularly for samples from the same "stack" (group).
+        
+        Args:
+            inputs: Pre-extracted input data [N, seq_len]
+            embeddings: Pre-extracted embeddings [N, embed_dim]
         """
-        from sklearn.metrics.pairwise import cosine_similarity
-        import torchaudio
-        import glob
-        
-        device = next(model.parameters()).device
-        model.eval()
-        
-        # Load wav files
-        wav_files = sorted(glob.glob(os.path.join(self.data_dir, "*.wav")))
-        if len(wav_files) == 0:
-            return {"error": f"No wav files found in {self.data_dir}"}
-        
-        sample_size = min(100, len(wav_files))
-        # Use first N samples to maintain stack structure (every 10 samples = 1 stack)
-        sampled_files = wav_files[:sample_size]
-        
-        print(f"[+] Evaluating stack similarity on {sample_size} samples...")
-        
-        inputs = []
-        embeddings = []
-        stack_indices = []
-        
-        with torch.no_grad():
-            for idx, wav_path in enumerate(tqdm(sampled_files, desc="Stack similarity eval")):
-                try:
-                    waveform, sr = torchaudio.load(wav_path)
-                    if sr != 16000:
-                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
-                    
-                    input_flat = waveform.squeeze(0).cpu().numpy()
-                    inputs.append(input_flat)
-                    
-                    data = waveform.squeeze(0).unsqueeze(0).to(device)
-                    result = model.extract_features(data, padding_mask=None, mask=False)
-                    emb = result["x"].mean(dim=1).cpu().numpy().squeeze()
-                    embeddings.append(emb)
-                    
-                    # Assign stack index (every 10 samples = 1 stack)
-                    stack_indices.append(idx // 10)
-                    
-                except Exception as e:
-                    print(f"[!] Error processing {wav_path}: {e}")
-                    continue
+        print(f"[+] Evaluating stack similarity...")
         
         if len(embeddings) < 10:
             return {"error": "Not enough valid samples for stack similarity"}
         
-        inputs = np.stack(inputs)
-        embeddings = np.stack(embeddings)
-        stack_indices = np.array(stack_indices)
+        # Assign stack indices (every 10 samples = 1 stack)
+        stack_indices = np.array([idx // 10 for idx in range(len(embeddings))])
         
         # Compare embedding vs input space similarity
         return self._compare_similarity_by_stack_membership(
@@ -1120,53 +1531,54 @@ class EvaluationRunner:
         }
         return noise_data
     
-    def plot_similarity_matrices(self, checkpoint_info: CheckpointInfo, 
+    def plot_similarity_matrices(self, checkpoint_info: CheckpointInfo,
+                                  inputs: np.ndarray = None,
+                                  embeddings: np.ndarray = None,
                                   best_loss: Optional[float] = None,
                                   save_plots: bool = True) -> Dict[str, Any]:
         """
         Generate and optionally save similarity matrix visualizations.
+        Uses the same cosine similarity calculation as _eval_embedding_similarity.
+        
+        Args:
+            checkpoint_info: Checkpoint info
+            inputs: Pre-extracted inputs (optional - will extract if not provided)
+            embeddings: Pre-extracted embeddings (optional - will extract if not provided)
+            best_loss: Training loss for title
+            save_plots: Whether to save plots
+            
+        Note:
+            Number of samples in cosine matrix is determined by max_samples parameter
+            in _eval_validation_loss() (default: 100). The matrix will be [N x N] where
+            N is the number of samples extracted during validation.
         """
         from sklearn.metrics.pairwise import cosine_similarity
-        import torchaudio
-        import glob
         
-        # Load model
-        model, cfg = load_fairseq_model_for_evaluation(checkpoint_info.path)
-        device = next(model.parameters()).device
-        model.eval()
-        
-        # Load samples
-        wav_files = glob.glob(os.path.join(self.data_dir, "*.wav"))[:50]
-        
-        inputs = []
-        embeddings = []
-        
-        with torch.no_grad():
-            for wav_path in tqdm(wav_files, desc="Loading for visualization"):
-                try:
-                    waveform, sr = torchaudio.load(wav_path)
-                    if sr != 16000:
-                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
-                    
-                    inputs.append(waveform.squeeze(0).cpu().numpy())
-                    
-                    data = waveform.squeeze(0).unsqueeze(0).to(device)
-                    result = model.extract_features(data, padding_mask=None, mask=False)
-                    emb = result["x"].mean(dim=1).cpu().numpy().squeeze()
-                    embeddings.append(emb)
-                except Exception:
-                    continue
+        # If embeddings not provided, extract them
+        if inputs is None or embeddings is None:
+            model, model_cfg, checkpoint_info_loaded = load_fairseq_checkpoint(checkpoint_info.path)
+            cfg = checkpoint_info_loaded["cfg"]  # Full config from checkpoint
+            self._current_cfg = cfg
+            model, device = self._prepare_model_for_eval(model, cfg)
+            inputs, embeddings, _ = self._extract_embeddings(model, device, max_samples=100)
         
         if len(embeddings) < 2:
             return {}
         
-        inputs = np.stack(inputs)
-        embeddings = np.stack(embeddings)
+        # Use the same calculation as _eval_embedding_similarity
+        # This ensures consistency between the metrics and the plots
+        input_sim_matrix = cosine_similarity(inputs)
+        emb_sim_matrix = cosine_similarity(embeddings)
         
-        input_sim = cosine_similarity(inputs)
-        emb_sim = cosine_similarity(embeddings)
+        # Print statistics (matching _eval_embedding_similarity format)
+        triu_idx = np.triu_indices_from(input_sim_matrix, k=1)
+        input_sims = input_sim_matrix[triu_idx]
+        emb_sims = emb_sim_matrix[triu_idx]
+        
+        print(f"[+] Similarity Matrices Plot:")
+        print(f"    Input similarity: shape={input_sim_matrix.shape}, mean={np.mean(input_sims):.4f}, std={np.std(input_sims):.4f}")
+        print(f"    Embedding similarity: shape={emb_sim_matrix.shape}, mean={np.mean(emb_sims):.4f}, std={np.std(emb_sims):.4f}")
+        print(f"    Number of samples: {len(embeddings)} (matrix size: {emb_sim_matrix.shape[0]}x{emb_sim_matrix.shape[1]})")
         
         loss_str = f" | Training Loss: {best_loss:.4f}" if best_loss is not None else ""
         
@@ -1178,15 +1590,15 @@ class EvaluationRunner:
             fig, axes = plt.subplots(1, 2, figsize=(14, 6))
             fig.suptitle(f"Run: {checkpoint_info.run_name}{loss_str}", fontsize=12, fontweight='bold')
             
-            sns.heatmap(input_sim, ax=axes[0], cmap="viridis", 
-                       xticklabels=False, yticklabels=False)
-            axes[0].set_title("Input Space Cosine Similarity")
+            sns.heatmap(input_sim_matrix, ax=axes[0], cmap="viridis", 
+                       xticklabels=False, yticklabels=False, vmin=0, vmax=1)
+            axes[0].set_title(f"Input Space Cosine Similarity (N={len(embeddings)})")
             axes[0].set_xlabel("Sample Index")
             axes[0].set_ylabel("Sample Index")
             
-            sns.heatmap(emb_sim, ax=axes[1], cmap="viridis",
-                       xticklabels=False, yticklabels=False)
-            axes[1].set_title("Embedding Space Cosine Similarity")
+            sns.heatmap(emb_sim_matrix, ax=axes[1], cmap="viridis",
+                       xticklabels=False, yticklabels=False, vmin=0, vmax=1)
+            axes[1].set_title(f"Embedding Space Cosine Similarity (N={len(embeddings)})")
             axes[1].set_xlabel("Sample Index")
             axes[1].set_ylabel("Sample Index")
             
@@ -1197,8 +1609,9 @@ class EvaluationRunner:
             print(f"[+] Saved similarity matrix plot to {run_plots_dir}")
         
         return {
-            "input_sim_matrix": input_sim,
-            "emb_sim_matrix": emb_sim,
+            "input_sim_matrix": input_sim_matrix,
+            "emb_sim_matrix": emb_sim_matrix,
+            "num_samples": len(embeddings),
         }
     
     def plot_noise_robustness_comparison(self, results: List[EvalResult], 
@@ -1684,10 +2097,6 @@ class EvaluationRunner:
             
             # Key metrics
             m = result.metrics
-            
-            # Debug: print all metric keys to help diagnose
-            if not any(key.startswith("eval_") for key in m.keys()):
-                print(f"[DEBUG] Run {result.run_name}: No eval_* keys found. Available keys: {list(m.keys())[:10]}...")
             
             # Show which evaluation methods were run
             eval_methods_run = []
@@ -2263,11 +2672,9 @@ def main():
         print(f"    - {ckpt.run_name} ({ckpt.checkpoint_type})")
     
     print(f"[+] Running evaluation methods: {args.eval_methods}")
-    print(f"[DEBUG] args.eval_methods type: {type(args.eval_methods)}, value: {args.eval_methods}")
     
     # Run evaluations
     runner = EvaluationRunner(args.output_dir, args.data_dir)
-    print(f"[DEBUG] About to call evaluate_all with eval_methods: {args.eval_methods}")
     results = runner.evaluate_all(checkpoints, args.eval_methods)
     
     # Create lookup for best_loss by run_name
@@ -2280,8 +2687,12 @@ def main():
             run_name = ckpt.run_name
             best_loss = loss_lookup.get(run_name)
             
-            # Similarity matrices (if requested or all_methods)
-            if args.plot_matrices or args.all_methods:
+            # Similarity matrices are generated inside evaluate_checkpoint when
+            # embedding_similarity or stack_similarity methods are run.
+            # Only generate here as a fallback if those methods weren't run but matrices are requested.
+            embedding_methods_run = {"embedding_similarity", "stack_similarity"} & set(args.eval_methods)
+            if (args.plot_matrices or args.all_methods) and len(embedding_methods_run) == 0:
+                # Fallback: generate if embedding methods weren't run
                 runner.plot_similarity_matrices(ckpt, best_loss=best_loss, save_plots=True)
             
             # Stack similarity visualizations
