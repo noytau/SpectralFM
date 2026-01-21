@@ -37,7 +37,7 @@ from fairseq.utils import buffered_arange, index_put, is_xla_tensor
 from .utils import pad_to_multiple
 
 EXTRACTOR_MODE_CHOICES = ChoiceEnum(["default", "layer_norm"])
-MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson"])
+MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson", "fixed"])
 LAYER_TYPE_CHOICES = ChoiceEnum(["transformer", "conformer", "trf_adp"])
 
 
@@ -1089,17 +1089,76 @@ class TransformerEncoder(nn.Module):
         min_layer=0,
         corpus_key=None,
     ):
-
+        # Store original dtype
+        original_dtype = x.dtype
+        
+        # For EMA models (which should be in fp32), ensure we work in float32 throughout
+        # Check if this is likely an EMA model by checking if input is float32
+        is_ema_model = (original_dtype == torch.float32)
+        
         if padding_mask is not None:
             x = index_put(x, padding_mask, 0)
 
         if self.pos_conv is not None:
-            x_conv = self.pos_conv(x.transpose(1, 2))
+            # Handle dtype conversion for pos_conv
+            # pos_conv is a Sequential, so we need to handle it carefully
+            x_input = x.transpose(1, 2)
+            
+            # Get the dtype of pos_conv parameters
+            try:
+                pos_conv_dtype = next(self.pos_conv.parameters()).dtype
+            except StopIteration:
+                # No parameters, use input dtype
+                pos_conv_dtype = x_input.dtype
+            
+            # For EMA model: keep everything in float32
+            if is_ema_model:
+                x_input = x_input.float()
+                # Convert pos_conv to float32 by calling it with float32 input
+                # This will handle the Sequential properly
+                x_conv = self.pos_conv(x_input)
+            else:
+                # Standard path: match dtypes
+                if x_input.dtype != pos_conv_dtype:
+                    x_input = x_input.to(dtype=pos_conv_dtype)
+                x_conv = self.pos_conv(x_input)
+            
             x_conv = x_conv.transpose(1, 2)
+            
+            # Ensure both are in the same dtype before addition
+            if is_ema_model:
+                x_conv = x_conv.float()
+                x = x.float()
+            elif x_conv.dtype != x.dtype:
+                x_conv = x_conv.to(dtype=x.dtype)
+            
             x = x + x_conv
 
         if not self.layer_norm_first:
-            x = self.layer_norm(x)
+            # Handle dtype mismatch for layer_norm (EMA model compatibility)
+            # Always use float32 for computation when it's EMA model
+            if self.layer_norm.weight is not None:
+                weight = self.layer_norm.weight.float()
+                bias = self.layer_norm.bias.float() if self.layer_norm.bias is not None else None
+            else:
+                weight = None
+                bias = None
+            
+            # Convert to float32 for computation
+            x_float = x.float()
+            x_normed = F.layer_norm(
+                x_float,
+                self.layer_norm.normalized_shape,
+                weight,
+                bias,
+                self.layer_norm.eps,
+            )
+            
+            # Convert back to original dtype if it wasn't float32
+            if is_ema_model:
+                x = x_normed  # Keep in float32 for EMA
+            else:
+                x = x_normed.to(dtype=original_dtype)
 
         # pad to the sequence length dimension
         x, pad_length = pad_to_multiple(
@@ -1113,6 +1172,10 @@ class TransformerEncoder(nn.Module):
                 padding_mask, self.required_seq_len_multiple, dim=-1, value=True
             )
         x = F.dropout(x, p=self.dropout, training=self.training)
+
+        # Ensure x is in float32 for EMA model before passing through transformer layers
+        if is_ema_model:
+            x = x.float()
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
@@ -1153,6 +1216,10 @@ class TransformerEncoder(nn.Module):
 
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)
+        
+        # Ensure x stays in float32 for EMA model
+        if is_ema_model:
+            x = x.float()
 
         # undo paddding
         if pad_length > 0:
@@ -1166,6 +1233,15 @@ class TransformerEncoder(nn.Module):
                 )
 
             layer_results = [undo_pad(*u) for u in layer_results]
+        
+        # Ensure layer_results are in float32 for EMA model
+        if is_ema_model:
+            layer_results = [
+                (r[0].float() if r[0] is not None else None,
+                 r[1].float() if r[1] is not None else None,
+                 r[2].float() if r[2] is not None else None)
+                for r in layer_results
+            ]
 
         return x, layer_results
 

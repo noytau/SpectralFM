@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, asdict
 import pandas as pd
 import torch
 import numpy as np
+import random
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -229,9 +230,25 @@ class CheckpointDiscovery:
 
 
 class EvaluationRunner:
-    """Runs evaluations on checkpoints and collects results."""
+    """
+    Runs evaluations on checkpoints and collects results.
+    
+    Data path priority for evaluation:
+    1. eval_data_dir parameter (if provided in evaluate_all/evaluate_checkpoint)
+    2. self.data_dir (if not default value)
+    3. cfg.task.data (from checkpoint config)
+    """
     
     def __init__(self, output_dir: str, data_dir: str = "/mnt5/noy/fairseq/data/single_channel_1m/"):
+        """
+        Initialize EvaluationRunner.
+        
+        Args:
+            output_dir: Directory to save evaluation results
+            data_dir: Default evaluation data directory (used if eval_data_dir not provided).
+                     Note: This is stored but only used if not the default value.
+                     Use eval_data_dir parameter in evaluate_all() for explicit control.
+        """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir = data_dir
@@ -244,6 +261,694 @@ class EvaluationRunner:
         # Store intermediate data for comprehensive reporting
         self.eval_data: Dict[str, Any] = {}
         
+        # Store pre-loaded samples for reuse across checkpoints
+        self._preloaded_samples_valid: Optional[List[Dict]] = None
+        self._preloaded_samples_custom: Optional[List[Dict]] = None
+        
+        # Store selected indices for pre-loaded samples
+        self._preloaded_indices_valid: Optional[List[int]] = None
+        self._preloaded_indices_custom: Optional[List[int]] = None
+        
+        # Directory for spectrogram plots
+        self.spectrograms_dir = self.output_dir / "spectrograms"
+        self.spectrograms_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Debug directory for data plots
+        self.debug_plots_dir = self.output_dir / "debug_plots"
+        self.debug_plots_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _plot_spectrogram_with_mask(self, data: np.ndarray, mask_indices: np.ndarray,
+                                    run_name: str, sample_id: int, 
+                                    mask_prob: float, mask_length: int,
+                                    save: bool = True) -> None:
+        """
+        Plot 245-length spectrogram data with masking overlay.
+        
+        Args:
+            data: 245-length spectrogram data array
+            mask_indices: Boolean mask array [245] indicating masked positions
+            run_name: Name of the run for file naming
+            sample_id: Sample ID for file naming
+            mask_prob: Mask probability used (from training config)
+            mask_length: Mask length used (from training config)
+            save: Whether to save the plot
+        """
+        # Ensure data is 245 length
+        if len(data) != 245:
+            if len(data) > 245:
+                data = data[:245]
+            else:
+                # Pad if shorter
+                padded = np.zeros(245)
+                padded[:len(data)] = data
+                data = padded
+        
+        # Ensure mask_indices matches data length
+        if len(mask_indices) != 245:
+            if len(mask_indices) > 245:
+                mask_indices = mask_indices[:245]
+            else:
+                # Pad if shorter
+                padded_mask = np.zeros(245, dtype=bool)
+                padded_mask[:len(mask_indices)] = mask_indices
+                mask_indices = padded_mask
+        
+        # Create masked data
+        masked_data = data.copy()
+        masked_data[mask_indices] = 0.0
+        
+        # Plot single figure with overlay
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Plot original data
+        x = np.arange(245)
+        ax.plot(x, data, 'b-', linewidth=1.5, label='Original', alpha=0.7)
+        
+        # Plot masked data (overlay)
+        ax.plot(x, masked_data, 'r--', linewidth=1.5, label='Masked', alpha=0.7)
+        
+        # Highlight masked regions with red shading
+        masked_positions = np.where(mask_indices)[0]
+        if len(masked_positions) > 0:
+            # Group consecutive masked positions
+            masked_ranges = []
+            start = masked_positions[0]
+            for i in range(1, len(masked_positions)):
+                if masked_positions[i] != masked_positions[i-1] + 1:
+                    masked_ranges.append((start, masked_positions[i-1]))
+                    start = masked_positions[i]
+            masked_ranges.append((start, masked_positions[-1]))
+            
+            # Shade masked regions
+            for start_idx, end_idx in masked_ranges:
+                ax.axvspan(start_idx, end_idx + 1, alpha=0.2, color='red', label='Masked Region' if start_idx == masked_ranges[0][0] else '')
+        
+        ax.set_xlabel('Time Step (245 length)', fontsize=12)
+        ax.set_ylabel('Amplitude', fontsize=12)
+        ax.set_title(f'Spectrogram with Mask Overlay\n'
+                    f'Run: {run_name} | Sample ID: {sample_id}\n'
+                    f'Mask Prob: {mask_prob:.2f} | Mask Length: {mask_length} | '
+                    f'Masked Positions: {mask_indices.sum()}/245',
+                    fontsize=13, fontweight='bold')
+        ax.legend(loc='best')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save:
+            run_spectrograms_dir = self.spectrograms_dir / run_name
+            run_spectrograms_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"spectrogram_sample{sample_id}_maskprob{mask_prob}_masklen{mask_length}.png"
+            plt.savefig(run_spectrograms_dir / fname, dpi=150, bbox_inches='tight')
+            plt.close()
+        else:
+            plt.show()
+        
+    def _compute_sample_statistics(self, samples: List[Dict]) -> Dict[str, float]:
+        """
+        Compute mean and std statistics from a list of samples.
+        
+        Args:
+            samples: List of sample dictionaries with 'source' key containing audio data
+            
+        Returns:
+            Dict with 'mean' and 'std' keys
+        """
+        if not samples:
+            return {"mean": 0.0, "std": 0.0}
+        
+        all_values = []
+        for sample in samples:
+            source = sample.get("source", None)
+            if source is not None:
+                if isinstance(source, torch.Tensor):
+                    source = source.cpu().numpy()
+                source = np.asarray(source).flatten()
+                all_values.extend(source.tolist())
+        
+        if not all_values:
+            return {"mean": 0.0, "std": 0.0}
+        
+        all_values = np.array(all_values)
+        return {
+            "mean": float(np.mean(all_values)),
+            "std": float(np.std(all_values))
+        }
+    
+    def _compute_dataset_statistics(self, dataset) -> Dict[str, float]:
+        """
+        Compute mean and std statistics from a fairseq dataset.
+        
+        Args:
+            dataset: Fairseq dataset object
+            
+        Returns:
+            Dict with 'mean' and 'std' keys
+        """
+        if len(dataset) == 0:
+            return {"mean": 0.0, "std": 0.0}
+        
+        # Sample up to 1000 samples for efficiency
+        sample_size = min(1000, len(dataset))
+        random.seed(42)
+        sample_indices = random.sample(range(len(dataset)), sample_size)
+        
+        all_values = []
+        for idx in sample_indices:
+            try:
+                sample = dataset[idx]
+                source = sample.get("source", None)
+                if source is not None:
+                    if isinstance(source, torch.Tensor):
+                        source = source.cpu().numpy()
+                    source = np.asarray(source).flatten()
+                    all_values.extend(source.tolist())
+            except Exception:
+                continue
+        
+        if not all_values:
+            return {"mean": 0.0, "std": 0.0}
+        
+        all_values = np.array(all_values)
+        return {
+            "mean": float(np.mean(all_values)),
+            "std": float(np.std(all_values))
+        }
+    
+    def _log_dataset_info(self, dataset_name: str, samples: List[Dict], 
+                         selected_indices: Optional[List[int]], 
+                         full_dataset=None, run_name: str = None):
+        """
+        Log detailed information about the evaluated dataset subset.
+        
+        Args:
+            dataset_name: Name of the dataset
+            samples: List of samples in the subset
+            selected_indices: List of indices that were selected
+            full_dataset: Optional full dataset object for computing full dataset stats
+            run_name: Optional run name for logging
+        """
+        print(f"\n{'='*60}")
+        print(f"DATASET INFORMATION - {dataset_name}")
+        print(f"{'='*60}")
+        print(f"Dataset name: {dataset_name}")
+        
+        if selected_indices is not None:
+            print(f"Selected indices: {selected_indices[:10]}{'...' if len(selected_indices) > 10 else ''} "
+                  f"(total: {len(selected_indices)} samples)")
+            if len(selected_indices) > 10:
+                print(f"  First 5: {selected_indices[:5]}")
+                print(f"  Last 5: {selected_indices[-5:]}")
+        else:
+            print(f"Selected indices: All samples (total: {len(samples)} samples)")
+        
+        # Compute subset statistics
+        subset_stats = self._compute_sample_statistics(samples)
+        print(f"Subset statistics:")
+        print(f"  Mean: {subset_stats['mean']:.6f}")
+        print(f"  Std:  {subset_stats['std']:.6f}")
+        
+        # Compute full dataset statistics if available
+        if full_dataset is not None:
+            full_stats = self._compute_dataset_statistics(full_dataset)
+            print(f"Full dataset statistics:")
+            print(f"  Mean: {full_stats['mean']:.6f}")
+            print(f"  Std:  {full_stats['std']:.6f}")
+            print(f"  Total samples: {len(full_dataset)}")
+        else:
+            print(f"Full dataset statistics: Not available")
+        
+        print(f"{'='*60}\n")
+    
+    def _plot_evaluated_data(self, samples: List[Dict], dataset_name: str, 
+                             run_name: str, selected_indices: Optional[List[int]] = None,
+                             max_plots: int = 10):
+        """
+        Plot evaluated data samples for debugging.
+        
+        Args:
+            samples: List of samples to plot
+            dataset_name: Name of the dataset
+            run_name: Run name for directory structure
+            selected_indices: Optional list of selected indices
+            max_plots: Maximum number of samples to plot
+        """
+        plot_dir = self.debug_plots_dir / run_name / dataset_name
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        
+        num_plots = min(max_plots, len(samples))
+        for idx in range(num_plots):
+            try:
+                sample = samples[idx]
+                source = sample.get("source", None)
+                if source is None:
+                    continue
+                
+                if isinstance(source, torch.Tensor):
+                    source = source.cpu().numpy()
+                source = np.asarray(source).flatten()
+                
+                # Create plot
+                fig, ax = plt.subplots(figsize=(12, 4))
+                ax.plot(source, linewidth=1.5)
+                ax.set_xlabel('Time Step', fontsize=12)
+                ax.set_ylabel('Amplitude', fontsize=12)
+                
+                sample_idx = selected_indices[idx] if selected_indices else idx
+                ax.set_title(f'Sample {idx} (Dataset Index: {sample_idx})\n'
+                            f'Dataset: {dataset_name} | Run: {run_name}\n'
+                            f'Mean: {np.mean(source):.6f} | Std: {np.std(source):.6f}',
+                            fontsize=11, fontweight='bold')
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                fname = f"sample_{idx}_index_{sample_idx}.png"
+                plt.savefig(plot_dir / fname, dpi=150, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                print(f"[!] Warning: Could not plot sample {idx}: {e}")
+                continue
+        
+        print(f"[+] Saved {num_plots} debug plots to: {plot_dir}")
+    
+    def analyze_similarity_outliers(self, run_name: str, dataset_name: str,
+                                    similarity_type: str = "both",
+                                    k_outliers: int = 5,
+                                    k_neighbors: int = 5,
+                                    save_plots: bool = True,
+                                    analyze_inliers: bool = True):
+        """
+        Analyze samples with lowest and highest average cosine similarity and visualize outliers/inliers.
+        
+        Finds the k_outliers samples with lowest average similarity (outliers) and optionally
+        k_outliers samples with highest average similarity (inliers) to the subset,
+        then creates visualizations showing each outlier/inlier with its k_neighbors most
+        similar and k_neighbors most different samples.
+        
+        Args:
+            run_name: Checkpoint run name
+            dataset_name: Dataset name (e.g., "valid", "single_channel_10k")
+            similarity_type: "embedding", "input", or "both"
+            k_outliers: Number of outlier/inlier samples to analyze
+            k_neighbors: Number of similar/different neighbors to show per outlier/inlier
+            save_plots: Whether to save the plots
+            analyze_inliers: If True, also analyze inliers (highest avg similarity)
+        """
+        print(f"\n[+] Analyzing similarity outliers for {run_name} on {dataset_name}...")
+        print(f"    Similarity type: {similarity_type}, Outliers: {k_outliers}, Neighbors: {k_neighbors}")
+        if analyze_inliers:
+            print(f"    Also analyzing inliers (highest avg similarity)")
+        
+        # Step 1: Load embeddings and inputs
+        embeddings = None
+        inputs = None
+        
+        if similarity_type in ["embedding", "both"]:
+            embeddings_key = f'embeddings_{run_name}_{dataset_name}'
+            if embeddings_key in self.eval_data:
+                embeddings = self.eval_data[embeddings_key]
+            else:
+                embeddings_path = self.data_dir_out / f"embeddings_{run_name}_{dataset_name}.npy"
+                if embeddings_path.exists():
+                    try:
+                        embeddings = np.load(embeddings_path)
+                    except Exception as e:
+                        print(f"[!] Could not load embeddings: {e}")
+            
+            if embeddings is None or len(embeddings) == 0:
+                print(f"[!] No embeddings found for {run_name} on {dataset_name}")
+                return
+        
+        if similarity_type in ["input", "both"]:
+            inputs_key = f'inputs_{run_name}_{dataset_name}'
+            if inputs_key in self.eval_data:
+                inputs = self.eval_data[inputs_key]
+            else:
+                inputs_path = self.data_dir_out / f"inputs_{run_name}_{dataset_name}.npy"
+                if inputs_path.exists():
+                    try:
+                        inputs = np.load(inputs_path)
+                    except Exception as e:
+                        print(f"[!] Could not load inputs: {e}")
+            
+            if inputs is None or len(inputs) == 0:
+                print(f"[!] No inputs found for {run_name} on {dataset_name}")
+                if similarity_type == "input":
+                    return
+                # If both, continue with embedding-only analysis
+                if similarity_type == "both":
+                    similarity_type = "embedding"
+        
+        # Step 2: Load samples and selected indices
+        samples = None
+        selected_indices = None
+        
+        # Determine which preloaded samples to use
+        if dataset_name == "valid":
+            samples = self._preloaded_samples_valid
+            selected_indices = self._preloaded_indices_valid
+        else:
+            # Assume it's a custom dataset
+            samples = self._preloaded_samples_custom
+            selected_indices = self._preloaded_indices_custom
+        
+        if samples is None or len(samples) == 0:
+            print(f"[!] No samples found for {dataset_name}")
+            return
+        
+        n_samples = len(samples)
+        if selected_indices is None:
+            selected_indices = list(range(n_samples))
+        
+        print(f"[+] Loaded {n_samples} samples with indices: {selected_indices[:5]}...{selected_indices[-5:]}")
+        
+        # Step 3: Recompute similarity matrices
+        sim_matrices = {}
+        
+        if similarity_type in ["embedding", "both"] and embeddings is not None:
+            from sklearn.metrics.pairwise import cosine_similarity
+            emb_sim_matrix = cosine_similarity(embeddings)
+            sim_matrices["embedding"] = emb_sim_matrix
+            print(f"[+] Computed embedding similarity matrix: {emb_sim_matrix.shape}")
+        
+        if similarity_type in ["input", "both"] and inputs is not None:
+            from sklearn.metrics.pairwise import cosine_similarity
+            input_sim_matrix = cosine_similarity(inputs)
+            sim_matrices["input"] = input_sim_matrix
+            print(f"[+] Computed input similarity matrix: {input_sim_matrix.shape}")
+        
+        # Step 4: Find outliers for each similarity type
+        similarity_types_to_analyze = []
+        if similarity_type == "both":
+            similarity_types_to_analyze = ["embedding", "input"]
+        else:
+            similarity_types_to_analyze = [similarity_type]
+        
+        for sim_type in similarity_types_to_analyze:
+            if sim_type not in sim_matrices:
+                continue
+            
+            sim_matrix = sim_matrices[sim_type]
+            
+            # Compute average similarity for each sample (excluding diagonal)
+            avg_similarities = []
+            for i in range(n_samples):
+                # Get all similarities for sample i, excluding self-similarity (diagonal = 1.0)
+                similarities = sim_matrix[i, :].copy()
+                similarities[i] = np.nan  # Exclude diagonal
+                avg_sim = np.nanmean(similarities)
+                avg_similarities.append(avg_sim)
+            
+            avg_similarities = np.array(avg_similarities)
+            
+            # Find k_outliers samples with lowest average similarity (outliers)
+            outlier_indices = np.argsort(avg_similarities)[:k_outliers]
+            print(f"\n[+] {sim_type.capitalize()} similarity outliers (lowest avg similarity):")
+            for idx in outlier_indices:
+                print(f"    Matrix Index {idx} (Dataset Index {selected_indices[idx]}): avg_sim = {avg_similarities[idx]:.4f}")
+            
+            # Find k_outliers samples with highest average similarity (inliers)
+            inlier_indices = None
+            if analyze_inliers:
+                inlier_indices = np.argsort(avg_similarities)[-k_outliers:][::-1]  # Reverse to get highest first
+                print(f"\n[+] {sim_type.capitalize()} similarity inliers (highest avg similarity):")
+                for idx in inlier_indices:
+                    print(f"    Matrix Index {idx} (Dataset Index {selected_indices[idx]}): avg_sim = {avg_similarities[idx]:.4f}")
+            
+            # Step 5: Create visualizations for each outlier
+            self._plot_outlier_analysis(
+                outlier_indices, sim_matrix, samples, selected_indices,
+                sim_type, run_name, dataset_name, k_neighbors, save_plots,
+                is_inlier=False
+            )
+            
+            # Step 6: Create visualizations for each inlier (if requested)
+            if analyze_inliers and inlier_indices is not None:
+                self._plot_outlier_analysis(
+                    inlier_indices, sim_matrix, samples, selected_indices,
+                    sim_type, run_name, dataset_name, k_neighbors, save_plots,
+                    is_inlier=True
+                )
+            
+            # Step 7: Create similarity heatmap with markers
+            self._plot_similarity_heatmap_with_markers(
+                sim_matrix, outlier_indices, inlier_indices if analyze_inliers else None,
+                sim_type, run_name, dataset_name, selected_indices, save_plots
+            )
+    
+    def _plot_outlier_analysis(self, outlier_indices: np.ndarray, sim_matrix: np.ndarray,
+                               samples: List[Dict], selected_indices: List[int],
+                               similarity_type: str, run_name: str, dataset_name: str,
+                               k_neighbors: int, save_plots: bool, is_inlier: bool = False):
+        """
+        Plot outlier/inlier analysis for each sample.
+        
+        Args:
+            outlier_indices: Array of indices of outlier/inlier samples in similarity matrix
+            sim_matrix: Similarity matrix [n_samples, n_samples]
+            samples: List of sample dictionaries
+            selected_indices: List of dataset indices corresponding to samples
+            similarity_type: Type of similarity ("embedding" or "input")
+            run_name: Checkpoint run name
+            dataset_name: Dataset name
+            k_neighbors: Number of similar/different neighbors to show
+            save_plots: Whether to save plots
+            is_inlier: If True, these are inliers (highest avg similarity), else outliers (lowest avg similarity)
+        """
+        n_samples = len(samples)
+        analysis_type = "inliers" if is_inlier else "outliers"
+        plot_dir = self.plots_dir / run_name / f"similarity_{analysis_type}_{dataset_name}_{similarity_type}"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        
+        for outlier_idx in outlier_indices:
+            try:
+                # Get similarity scores for this outlier
+                outlier_similarities = sim_matrix[outlier_idx, :].copy()
+                outlier_similarities[outlier_idx] = -np.inf  # Exclude self
+                
+                # Find most similar (highest similarity, excluding self)
+                most_similar_indices = np.argsort(outlier_similarities)[::-1][:k_neighbors]
+                most_similar_scores = outlier_similarities[most_similar_indices]
+                
+                # Find most different (lowest similarity)
+                outlier_similarities[outlier_idx] = np.inf  # Re-exclude for different search
+                most_different_indices = np.argsort(outlier_similarities)[:k_neighbors]
+                most_different_scores = outlier_similarities[most_different_indices]
+                
+                # Get outlier sample
+                outlier_sample = samples[outlier_idx]
+                outlier_source = outlier_sample.get("source", None)
+                if outlier_source is None:
+                    if "net_input" in outlier_sample and "source" in outlier_sample["net_input"]:
+                        outlier_source = outlier_sample["net_input"]["source"]
+                    else:
+                        print(f"[!] Could not find source for outlier {outlier_idx}")
+                        continue
+                
+                if isinstance(outlier_source, torch.Tensor):
+                    outlier_source = outlier_source.cpu().numpy()
+                outlier_source = np.asarray(outlier_source).flatten()
+                
+                # Create plot with 3 rows: similar samples, outlier, different samples
+                fig, axes = plt.subplots(3, k_neighbors, figsize=(3 * k_neighbors, 9))
+                if k_neighbors == 1:
+                    axes = axes.reshape(-1, 1)
+                
+                # Row 1: Most similar samples
+                for i, (sim_idx, sim_score) in enumerate(zip(most_similar_indices, most_similar_scores)):
+                    ax = axes[0, i]
+                    sim_sample = samples[sim_idx]
+                    sim_source = sim_sample.get("source", None)
+                    if sim_source is None and "net_input" in sim_sample:
+                        sim_source = sim_sample["net_input"].get("source", None)
+                    
+                    if sim_source is not None:
+                        if isinstance(sim_source, torch.Tensor):
+                            sim_source = sim_source.cpu().numpy()
+                        sim_source = np.asarray(sim_source).flatten()
+                        
+                        ax.plot(sim_source, linewidth=1.5, color='green')
+                        ax.set_title(f'Dataset: {selected_indices[sim_idx]}\n'
+                                   f'Matrix: {sim_idx} | Sim: {sim_score:.3f}',
+                                   fontsize=9, color='green')
+                    else:
+                        ax.text(0.5, 0.5, 'No data', ha='center', va='center')
+                    ax.set_xlabel('Time Step', fontsize=8)
+                    if i == 0:
+                        ax.set_ylabel('Amplitude\n(Most Similar)', fontsize=9)
+                    ax.grid(True, alpha=0.3)
+                
+                # Row 2: Outlier/Inlier sample (centered, highlighted)
+                outlier_dataset_idx = selected_indices[outlier_idx]
+                # Center the outlier/inlier in the middle row
+                center_col = k_neighbors // 2 if k_neighbors > 1 else 0
+                outlier_ax = axes[1, center_col]
+                label = "INLIER" if is_inlier else "OUTLIER"
+                color = 'green' if is_inlier else 'red'
+                outlier_ax.plot(outlier_source, linewidth=2, color=color)
+                outlier_ax.set_title(f'{label}\n'
+                                  f'Dataset: {outlier_dataset_idx} | Matrix: {outlier_idx}\n'
+                                  f'Mean: {np.mean(outlier_source):.6f} | Std: {np.std(outlier_source):.6f}',
+                                  fontsize=10, fontweight='bold', color=color)
+                outlier_ax.set_xlabel('Time Step', fontsize=9)
+                outlier_ax.set_ylabel('Amplitude', fontsize=9)
+                outlier_ax.grid(True, alpha=0.3)
+                # Add bold border
+                for spine in outlier_ax.spines.values():
+                    spine.set_edgecolor(color)
+                    spine.set_linewidth(3)
+                
+                # Hide other subplots in middle row
+                for i in range(k_neighbors):
+                    if i != center_col:
+                        ax = axes[1, i]
+                        ax.axis('off')
+                
+                # Row 3: Most different samples
+                for i, (diff_idx, diff_score) in enumerate(zip(most_different_indices, most_different_scores)):
+                    ax = axes[2, i]
+                    diff_sample = samples[diff_idx]
+                    diff_source = diff_sample.get("source", None)
+                    if diff_source is None and "net_input" in diff_sample:
+                        diff_source = diff_sample["net_input"].get("source", None)
+                    
+                    if diff_source is not None:
+                        if isinstance(diff_source, torch.Tensor):
+                            diff_source = diff_source.cpu().numpy()
+                        diff_source = np.asarray(diff_source).flatten()
+                        
+                        ax.plot(diff_source, linewidth=1.5, color='blue')
+                        ax.set_title(f'Dataset: {selected_indices[diff_idx]}\n'
+                                   f'Matrix: {diff_idx} | Sim: {diff_score:.3f}',
+                                   fontsize=9, color='blue')
+                    else:
+                        ax.text(0.5, 0.5, 'No data', ha='center', va='center')
+                    ax.set_xlabel('Time Step', fontsize=8)
+                    if i == 0:
+                        ax.set_ylabel('Amplitude\n(Most Different)', fontsize=9)
+                    ax.grid(True, alpha=0.3)
+                
+                analysis_label = "Inlier" if is_inlier else "Outlier"
+                plt.suptitle(f'Similarity {analysis_label} Analysis - {similarity_type.capitalize()} Similarity\n'
+                           f'Run: {run_name} | Dataset: {dataset_name}\n'
+                           f'{analysis_label}: Dataset Index {outlier_dataset_idx} | Matrix Index {outlier_idx}',
+                           fontsize=12, fontweight='bold')
+                plt.tight_layout()
+                
+                if save_plots:
+                    prefix = "inlier" if is_inlier else "outlier"
+                    filename = f"{prefix}_{outlier_idx}_dataset_{outlier_dataset_idx}.png"
+                    plt.savefig(plot_dir / filename, dpi=150, bbox_inches='tight')
+                    print(f"[+] Saved {analysis_label.lower()} plot: {plot_dir / filename}")
+                
+                plt.close()
+                
+            except Exception as e:
+                print(f"[!] Error plotting outlier {outlier_idx}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        analysis_type = "inlier" if is_inlier else "outlier"
+        print(f"[+] Saved {len(outlier_indices)} {analysis_type} analysis plots to: {plot_dir}")
+    
+    def _plot_similarity_heatmap_with_markers(self, sim_matrix: np.ndarray,
+                                               outlier_indices: np.ndarray,
+                                               inlier_indices: Optional[np.ndarray],
+                                               similarity_type: str, run_name: str,
+                                               dataset_name: str, selected_indices: List[int],
+                                               save_plots: bool = True):
+        """
+        Plot similarity heatmap with star markers indicating outlier and inlier locations.
+        
+        Creates a heatmap of the similarity matrix and overlays markers:
+        - Red stars (*): Outlier samples (lowest avg similarity)
+        - Green circles: Inlier samples (highest avg similarity)
+        
+        Args:
+            sim_matrix: Similarity matrix [n_samples, n_samples]
+            outlier_indices: Array of indices of outlier samples (lowest avg similarity)
+            inlier_indices: Optional array of indices of inlier samples (highest avg similarity)
+            similarity_type: Type of similarity ("embedding" or "input")
+            run_name: Checkpoint run name
+            dataset_name: Dataset name
+            selected_indices: List of dataset indices corresponding to samples
+            save_plots: Whether to save the plot
+        """
+        n_samples = sim_matrix.shape[0]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # Create heatmap
+        sns.heatmap(sim_matrix, ax=ax, cmap="viridis",
+                   xticklabels=False, yticklabels=False,
+                   vmin=0, vmax=1, cbar=True)
+        
+        # Add markers for outliers (red stars)
+        if outlier_indices is not None and len(outlier_indices) > 0:
+            # Mark both row and column positions (symmetric matrix)
+            # For each outlier, mark all positions in its row and column
+            for outlier_idx in outlier_indices:
+                # Mark row positions (all columns for this row)
+                ax.scatter(range(n_samples), [outlier_idx] * n_samples,
+                          marker='*', s=50, c='red', alpha=0.6, edgecolors='darkred', linewidths=0.5,
+                          label='Outlier (lowest avg sim)' if outlier_idx == outlier_indices[0] else '')
+                # Mark column positions (all rows for this column)
+                ax.scatter([outlier_idx] * n_samples, range(n_samples),
+                          marker='*', s=50, c='red', alpha=0.6, edgecolors='darkred', linewidths=0.5)
+        
+        # Add markers for inliers (green circles)
+        if inlier_indices is not None and len(inlier_indices) > 0:
+            # Mark both row and column positions (symmetric matrix)
+            for inlier_idx in inlier_indices:
+                # Mark row positions (all columns for this row)
+                ax.scatter(range(n_samples), [inlier_idx] * n_samples,
+                          marker='o', s=40, c='lime', alpha=0.7, edgecolors='darkgreen', linewidths=1,
+                          label='Inlier (highest avg sim)' if inlier_idx == inlier_indices[0] else '')
+                # Mark column positions (all rows for this column)
+                ax.scatter([inlier_idx] * n_samples, range(n_samples),
+                          marker='o', s=40, c='lime', alpha=0.7, edgecolors='darkgreen', linewidths=1)
+        
+        # Calculate statistics (excluding diagonal)
+        triu_indices = np.triu_indices_from(sim_matrix, k=1)
+        sim_values = sim_matrix[triu_indices]
+        sim_mean = float(np.mean(sim_values))
+        sim_std = float(np.std(sim_values))
+        
+        # Set labels and title
+        ax.set_xlabel(f'Sample Index (N={n_samples})', fontsize=12)
+        ax.set_ylabel(f'Sample Index (N={n_samples})', fontsize=12)
+        
+        # Create title
+        title = f'Similarity Heatmap with Markers - {similarity_type.capitalize()} Similarity\n'
+        title += f'Run: {run_name} | Dataset: {dataset_name}\n'
+        title += f'Mean={sim_mean:.3f}, Std={sim_std:.3f}'
+        if outlier_indices is not None and len(outlier_indices) > 0:
+            outlier_dataset_indices = [selected_indices[idx] for idx in outlier_indices]
+            title += f'\nOutliers (red *): Matrix {list(outlier_indices)}, Dataset {outlier_dataset_indices}'
+        if inlier_indices is not None and len(inlier_indices) > 0:
+            inlier_dataset_indices = [selected_indices[idx] for idx in inlier_indices]
+            title += f'\nInliers (green o): Matrix {list(inlier_indices)}, Dataset {inlier_dataset_indices}'
+        
+        ax.set_title(title, fontsize=11, fontweight='bold')
+        
+        # Add legend
+        if (outlier_indices is not None and len(outlier_indices) > 0) or \
+           (inlier_indices is not None and len(inlier_indices) > 0):
+            ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
+        
+        plt.tight_layout()
+        
+        if save_plots:
+            plot_dir = self.plots_dir / run_name
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"similarity_heatmap_with_markers_{dataset_name}_{similarity_type}.png"
+            plt.savefig(plot_dir / filename, dpi=150, bbox_inches='tight')
+            print(f"[+] Saved similarity heatmap with markers to: {plot_dir / filename}")
+        
+        plt.close()
+    
     def _prepare_model_for_eval(self, model, cfg):
         """
         Prepare model for evaluation: move to correct device.
@@ -270,13 +975,25 @@ class EvaluationRunner:
         return model, device
     
     def evaluate_checkpoint(self, checkpoint_info: CheckpointInfo, 
-                          eval_methods: List[str] = None) -> EvalResult:
+                          eval_methods: List[str] = None,
+                          custom_dataset_path: Optional[str] = None,
+                          preloaded_samples_valid: Optional[List[Dict]] = None,
+                          preloaded_samples_custom: Optional[List[Dict]] = None,
+                          eval_data_dir: Optional[str] = None,
+                          debug: bool = False,
+                          preloaded_indices_valid: Optional[List[int]] = None,
+                          preloaded_indices_custom: Optional[List[int]] = None,
+                          include_random_weights: bool = False) -> EvalResult:
         """
         Run evaluation on a single checkpoint.
         
         Args:
             checkpoint_info: Information about the checkpoint to evaluate
             eval_methods: List of evaluation methods to run
+            custom_dataset_path: Optional custom dataset path for additional evaluation
+            preloaded_samples_valid: Optional pre-loaded valid samples (for consistent evaluation across checkpoints)
+            preloaded_samples_custom: Optional pre-loaded custom samples
+            eval_data_dir: Optional evaluation data directory override. Priority: eval_data_dir > self.data_dir > cfg.task.data
             
         Returns:
             EvalResult with metrics
@@ -317,21 +1034,72 @@ class EvaluationRunner:
         # Note: model.eval() is handled by fairseq's trainer.valid_step() during validation
         model, device = self._prepare_model_for_eval(model, cfg)
         
-        # Run validation_loss first (fairseq's trainer.valid_step() will call model.eval() internally)
-        print("[+] Running validation loss evaluation...")
-        # fixme debug val_metrics = self._eval_validation_loss(model, cfg, debug=False)
-        # metrics.update(val_metrics)
+        # Run validation_loss twice: once on sanity (training) dataset and once on eval dataset
+        print("[+] Running validation loss evaluation on sanity dataset (training data)...")
+        sanity_metrics = self._eval_validation_loss(model, cfg, split="sanity", eval_data_dir=None, debug=False)
+        metrics.update({f"sanity_{k}": v for k, v in sanity_metrics.items()})
         
-        # Load samples for embedding extraction (same pattern as frozen/random)
+        print("[+] Running validation loss evaluation on eval dataset...")
+        eval_metrics = self._eval_validation_loss(model, cfg, split="valid", eval_data_dir=eval_data_dir, debug=False)
+        metrics.update({f"eval_{k}": v for k, v in eval_metrics.items()})
+        
+        # Load samples for embedding extraction
+        # Use pre-loaded samples if provided (for consistent evaluation across checkpoints)
         print("[+] Loading samples for embedding extraction...")
-        task, samples_for_embeddings, dataset = self.load_eval_dataset_fairseq(
-            cfg, split="valid", max_samples=100, verbose=False
-        )
+        selected_indices_valid = None
+        if preloaded_samples_valid is not None:
+            print(f"[+] Using pre-loaded valid samples: {len(preloaded_samples_valid)} samples")
+            samples_for_embeddings = preloaded_samples_valid
+            selected_indices_valid = preloaded_indices_valid if preloaded_indices_valid is not None else self._preloaded_indices_valid
+            # Still need to get task and dataset for compatibility, but use pre-loaded samples
+            task, _, dataset = self.load_eval_dataset_fairseq(
+                cfg, split="valid", max_samples=None, verbose=False, eval_data_dir=eval_data_dir
+            )
+        else:
+            # Load fresh samples (single checkpoint evaluation)
+            task, samples_for_embeddings, dataset = self.load_eval_dataset_fairseq(
+                cfg, split="valid", max_samples=100, verbose=False, eval_data_dir=eval_data_dir
+            )
+            # Extract indices from samples if available
+            if samples_for_embeddings:
+                selected_indices_valid = [int(s.get("id", idx)) for idx, s in enumerate(samples_for_embeddings)]
         
         if samples_for_embeddings is None or len(samples_for_embeddings) == 0:
             raise RuntimeError("Failed to load samples for embedding extraction!")
         
         print(f"[+] Loaded {len(samples_for_embeddings)} samples for embedding extraction")
+        
+        # Log dataset information
+        # Determine dataset name
+        if eval_data_dir:
+            dataset_name_valid = Path(eval_data_dir).name
+        elif hasattr(cfg.task, 'data') and cfg.task.data:
+            dataset_name_valid = Path(cfg.task.data).name
+        else:
+            dataset_name_valid = "valid"
+        
+        self._log_dataset_info(
+            dataset_name=dataset_name_valid,
+            samples=samples_for_embeddings,
+            selected_indices=selected_indices_valid,
+            full_dataset=dataset,
+            run_name=checkpoint_info.run_name
+        )
+        
+        # Plot evaluated data if debug mode is enabled
+        if debug:
+            self._plot_evaluated_data(
+                samples=samples_for_embeddings,
+                dataset_name=dataset_name_valid,
+                run_name=checkpoint_info.run_name,
+                selected_indices=selected_indices_valid
+            )
+        
+        # Store valid samples from first checkpoint for reuse in comparison plots
+        # This ensures the same samples are used in evaluation and comparison
+        if self._preloaded_samples_valid is None:
+            self._preloaded_samples_valid = samples_for_embeddings
+            print(f"[+] Stored valid samples for reuse in comparison plots: {len(samples_for_embeddings)} samples")
         
         # Extract embeddings separately (same pattern as frozen/random)
         embedding_data = self._extract_trained_model_embeddings(
@@ -353,16 +1121,116 @@ class EvaluationRunner:
             
             try:
                 if method == "embedding_similarity":
+                    # Run embedding similarity on "valid" dataset
+                    print("\n[+] Running embedding similarity on 'valid' dataset...")
                     method_metrics = self._eval_embedding_similarity(
                         checkpoint_info.path,
                         embedding_samples,
                         device,
                         checkpoint_info=checkpoint_info,
-                        best_loss=best_loss
+                        best_loss=best_loss,
+                        dataset_name="valid",
+                        include_random_weights=include_random_weights
                     )
+                    if method_metrics:
+                        # Prefix metrics with dataset name
+                        valid_metrics = {f"valid_{k}": v for k, v in method_metrics.items()}
+                        metrics.update(valid_metrics)
+                        valid_metrics_raw = method_metrics  # Keep original for summary
+                    else:
+                        valid_metrics_raw = None
+                    
+                    # Run embedding similarity on custom dataset if provided
+                    custom_metrics_raw = None
+                    if custom_dataset_path is not None:
+                        print(f"\n[+] Running embedding similarity on custom dataset: {custom_dataset_path}...")
+                        selected_indices_custom = None
+                        dataset_custom = None
+                        # Use pre-loaded samples if provided, otherwise load samples from custom dataset
+                        if preloaded_samples_custom is not None:
+                            print(f"[+] Using pre-loaded custom samples: {len(preloaded_samples_custom)} samples")
+                            samples_custom = preloaded_samples_custom
+                            selected_indices_custom = preloaded_indices_custom if preloaded_indices_custom is not None else self._preloaded_indices_custom
+                            # Load dataset for stats
+                            task_custom, _, dataset_custom = self.load_eval_dataset_fairseq(
+                                cfg, split="valid", max_samples=None, verbose=False,
+                                custom_dataset_path=custom_dataset_path, eval_data_dir=eval_data_dir
+                            )
+                        else:
+                            # Load samples from custom dataset
+                            task_custom, samples_custom, dataset_custom = self.load_eval_dataset_fairseq(
+                                cfg, split="valid", max_samples=100, verbose=True, 
+                                custom_dataset_path=custom_dataset_path, eval_data_dir=eval_data_dir
+                            )
+                            # Extract indices from samples if available
+                            if samples_custom:
+                                selected_indices_custom = [int(s.get("id", idx)) for idx, s in enumerate(samples_custom)]
+                        
+                        if samples_custom is not None and len(samples_custom) > 0:
+                            # Log dataset information for custom dataset
+                            custom_dataset_name = Path(custom_dataset_path).name
+                            self._log_dataset_info(
+                                dataset_name=custom_dataset_name,
+                                samples=samples_custom,
+                                selected_indices=selected_indices_custom,
+                                full_dataset=dataset_custom,
+                                run_name=checkpoint_info.run_name
+                            )
+                            
+                            # Plot evaluated data if debug mode is enabled
+                            if debug:
+                                self._plot_evaluated_data(
+                                    samples=samples_custom,
+                                    dataset_name=custom_dataset_name,
+                                    run_name=checkpoint_info.run_name,
+                                    selected_indices=selected_indices_custom
+                                )
+                            custom_metrics = self._eval_embedding_similarity(
+                                checkpoint_info.path,
+                                samples_custom,
+                                device,
+                                checkpoint_info=checkpoint_info,
+                                best_loss=best_loss,
+                                dataset_name=Path(custom_dataset_path).name,
+                                include_random_weights=include_random_weights
+                            )
+                            if custom_metrics:
+                                # Prefix metrics with dataset name
+                                custom_metrics_prefixed = {f"custom_{k}": v for k, v in custom_metrics.items()}
+                                metrics.update(custom_metrics_prefixed)
+                                custom_metrics_raw = custom_metrics
+                        else:
+                            print(f"[!] Warning: Failed to load samples from custom dataset")
+                    
+                    # Print embedding quality summary comparison
+                    # Call summary if we have at least one set of metrics (always call after both evaluations)
+                    if valid_metrics_raw is not None or custom_metrics_raw is not None:
+                        # Extract config info for dataset name
+                        cfg_for_summary = self._current_cfg
+                        config_info_summary = self._extract_config_info_for_title(cfg_for_summary)
+                        
+                        # Ensure we have at least valid_metrics_raw for the summary
+                        # (custom_metrics_raw can be None if no custom dataset was provided)
+                        if valid_metrics_raw is None and custom_metrics_raw is not None:
+                            # Edge case: only custom metrics exist, use them as "valid" for display
+                            valid_metrics_raw = custom_metrics_raw
+                            custom_metrics_raw = None
+                        
+                        self._print_embedding_quality_summary(
+                            valid_metrics_raw, custom_metrics_raw,
+                            dataset_trained=config_info_summary.get('dataset_trained', 'N/A'),
+                            custom_dataset_name=Path(custom_dataset_path).name if custom_dataset_path else None
+                        )
                 elif method == "signal_completion":
                     # Pass model, device, and samples from validation
-                    method_metrics = self._eval_signal_completion(model, device, embedding_samples)
+                    # Check if model has fixed mask set (for sanity testing)
+                    fixed_mask_start = getattr(model, '_fixed_mask_start', None)
+                    fixed_mask_end = getattr(model, '_fixed_mask_end', None)
+                    method_metrics = self._eval_signal_completion(
+                        model, device, embedding_samples,
+                        fixed_mask_start=fixed_mask_start,
+                        fixed_mask_end=fixed_mask_end
+                    )
                 elif method == "noise_robustness":
                     # Pass model, device, and samples from validation
                     method_metrics = self._eval_noise_robustness(model, device, embedding_samples)
@@ -411,12 +1279,141 @@ class EvaluationRunner:
         return result
     
     def evaluate_all(self, checkpoints: List[CheckpointInfo], 
-                    eval_methods: List[str] = None) -> List[EvalResult]:
-        """Evaluate multiple checkpoints."""
+                    eval_methods: List[str] = None,
+                    custom_dataset_path: Optional[str] = None,
+                    eval_data_dir: Optional[str] = None,
+                    debug: bool = False,
+                    include_random_weights: bool = False) -> List[EvalResult]:
+        """
+        Evaluate multiple checkpoints.
+        
+        For custom_dataset_path and valid datasets: samples are loaded once (randomly select 100 with fixed seed) 
+        and reused across all checkpoints for fair comparison.
+        
+        Args:
+            checkpoints: List of checkpoints to evaluate
+            eval_methods: List of evaluation methods to run
+            custom_dataset_path: Optional custom dataset path for additional evaluation
+            eval_data_dir: Optional evaluation data directory override. Priority: eval_data_dir > self.data_dir > cfg.task.data
+        """
+        if not checkpoints:
+            return []
+        
         results = []
+        
+        # Pre-load samples for custom dataset (randomly select 100 samples for fair comparison)
+        samples_custom = None
+        if custom_dataset_path:
+            print("\n[+] Pre-loading custom dataset samples (will be reused across all checkpoints)...")
+            # Load first checkpoint to get config for dataset loading
+            try:
+                model_first, model_cfg_first, checkpoint_info_first = load_fairseq_checkpoint(checkpoints[0].path)
+                cfg_first = checkpoint_info_first["cfg"]
+            except Exception as e:
+                print(f"[!] Failed to load first checkpoint for custom dataset sample loading: {e}")
+                print("[!] Will load custom dataset samples per checkpoint...")
+                samples_custom = None
+            else:
+                print(f"[+] Loading custom dataset: {custom_dataset_path}...")
+                # First, load the full dataset to get its size
+                task_custom, _, dataset_custom = self.load_eval_dataset_fairseq(
+                    cfg_first, split="valid", max_samples=None, verbose=True,
+                    custom_dataset_path=custom_dataset_path, eval_data_dir=eval_data_dir
+                )
+                
+                # Randomly select 100 samples from the full dataset with fixed seed
+                dataset_size = len(dataset_custom)
+                num_samples = min(100, dataset_size)
+                
+                if dataset_size > 0:
+                    print(f"[+] Randomly selecting {num_samples} samples from {dataset_size} total samples...")
+                    random.seed(42)  # Fixed seed for reproducibility
+                    
+                    # Randomly select indices
+                    selected_indices = random.sample(range(dataset_size), num_samples)
+                    selected_indices.sort()  # Sort for easier debugging/tracking
+                    
+                    # Load only the selected samples
+                    samples_custom = []
+                    for idx in tqdm(selected_indices, desc=f"Loading {num_samples} selected samples"):
+                        sample = dataset_custom[idx]
+                        samples_custom.append(sample)
+                    
+                    print(f"[+] Loaded {len(samples_custom)} samples (indices: {selected_indices[:5]}...{selected_indices[-5:]})")
+                    # Store indices for logging
+                    self._preloaded_indices_custom = selected_indices
+                else:
+                    print(f"[!] Custom dataset is empty!")
+                    samples_custom = None
+                    self._preloaded_indices_custom = None
+        
+        # Pre-load valid samples when evaluating multiple checkpoints (for fair comparison)
+        samples_valid = None
+        if len(checkpoints) > 1:
+            print("\n[+] Pre-loading valid samples (will be reused across all checkpoints)...")
+            # Load first checkpoint to get config for dataset loading
+            try:
+                model_first, model_cfg_first, checkpoint_info_first = load_fairseq_checkpoint(checkpoints[0].path)
+                cfg_first = checkpoint_info_first["cfg"]
+            except Exception as e:
+                print(f"[!] Failed to load first checkpoint for valid sample loading: {e}")
+                print("[!] Will load valid samples per checkpoint...")
+                samples_valid = None
+            else:
+                print(f"[+] Loading valid dataset...")
+                # Load the full dataset to get its size
+                task_valid, _, dataset_valid = self.load_eval_dataset_fairseq(
+                    cfg_first, split="valid", max_samples=None, verbose=True,
+                    eval_data_dir=eval_data_dir
+                )
+                
+                # Randomly select 100 samples with fixed seed
+                dataset_size = len(dataset_valid)
+                num_samples = min(100, dataset_size)
+                
+                if dataset_size > 0:
+                    print(f"[+] Randomly selecting {num_samples} samples from {dataset_size} total samples...")
+                    random.seed(42)  # Fixed seed for reproducibility
+                    
+                    # Randomly select indices
+                    selected_indices = random.sample(range(dataset_size), num_samples)
+                    selected_indices.sort()  # Sort for easier debugging/tracking
+                    
+                    # Load only the selected samples
+                    samples_valid = []
+                    for idx in tqdm(selected_indices, desc=f"Loading {num_samples} selected samples"):
+                        sample = dataset_valid[idx]
+                        samples_valid.append(sample)
+                    
+                    print(f"[+] Loaded {len(samples_valid)} valid samples (indices: {selected_indices[:5]}...{selected_indices[-5:]})")
+                    # Store indices for logging
+                    self._preloaded_indices_valid = selected_indices
+                else:
+                    print(f"[!] Valid dataset is empty!")
+                    samples_valid = None
+                    self._preloaded_indices_valid = None
+        
+        # Store samples in runner instance for reuse in other functions
+        self._preloaded_samples_custom = samples_custom
+        self._preloaded_samples_valid = samples_valid
+        
+        # Evaluate all checkpoints
+        print(f"\n[+] Evaluating {len(checkpoints)} checkpoints...")
         for ckpt in tqdm(checkpoints, desc="Evaluating checkpoints"):
-            result = self.evaluate_checkpoint(ckpt, eval_methods)
+            result = self.evaluate_checkpoint(
+                ckpt, 
+                eval_methods, 
+                custom_dataset_path=custom_dataset_path,
+                preloaded_samples_valid=samples_valid,  # Use pre-loaded valid samples
+                preloaded_samples_custom=samples_custom,  # Use pre-loaded custom samples
+                eval_data_dir=eval_data_dir,  # Pass eval_data_dir to evaluate_checkpoint
+                debug=debug,  # Pass debug flag
+                preloaded_indices_valid=self._preloaded_indices_valid,  # Pass indices
+                preloaded_indices_custom=self._preloaded_indices_custom,  # Pass indices
+                include_random_weights=include_random_weights  # Pass include_random_weights flag
+            )
             results.append(result)
+        
         return results
     
     def _extract_embeddings(self, model, device, max_samples: int = 100) -> Tuple[np.ndarray, np.ndarray, List[int]]:
@@ -691,7 +1688,6 @@ class EvaluationRunner:
             Embeddings array or None if failed
         """
         FROZEN_ENCODER_PATH = "/mnt5/noy/SpectralFM/checkpoints/runai/2025-12-27_00-06-01/checkpoint_best.pt"
-        # fixme FROZEN_ENCODER_PATH = "/mnt5/noy/SpectralFM/checkpoints/runai/2026-01-12_11-44-25/checkpoint_best.pt"
         
         return self._load_embeddings_from_checkpoint(
             FROZEN_ENCODER_PATH, samples, device, checkpoint_name="frozen encoder"
@@ -715,15 +1711,203 @@ class EvaluationRunner:
             RANDOM_INIT_PATH, samples, device, checkpoint_name="random init"
         )
     
+    def _eval_random_weight_embeddings(self, samples: List[Dict], device, 
+                                       resample_to_16k: bool = True,
+                                       cfg=None) -> Optional[np.ndarray]:
+        """
+        Extract embeddings from pretrained Data2VecAudio model from transformers.
+        
+        This function:
+        1. Optionally stretches samples to 16kHz length (exactly 16000 samples)
+        2. Loads pretrained Data2VecAudio model from transformers (facebook/data2vec-audio-base)
+        3. Extracts embeddings using the same samples
+        
+        Args:
+            samples: Pre-loaded samples from load_eval_dataset_fairseq() (must be from fairseq dataset)
+            device: Device to use
+            resample_to_16k: If True, stretch samples to 16000 samples before processing
+            cfg: Model config (ignored, kept for compatibility)
+        
+        Returns:
+            Embeddings array [N, embed_dim] or None if extraction failed
+        """
+        if samples is None or len(samples) == 0:
+            print("[!] Warning: No samples provided for pretrained model embeddings")
+            return None
+        
+        try:
+            print(f"[+] Extracting embeddings from transformers pretrained Data2VecAudio model ({len(samples)} samples)...")
+            
+            # Step 1: Stretch samples if requested
+            if resample_to_16k:
+                print(f"[+] Stretching samples to 16000 samples...")
+                from audio_preprocessing import stretch_samples_to_16k
+                samples = stretch_samples_to_16k(samples, target_length=16000, verbose=True)
+            
+            # Step 2: Load pretrained model from transformers
+            print(f"[+] Loading pretrained Data2VecAudio model from transformers...")
+            from transformers import Data2VecAudioModel
+            model = Data2VecAudioModel.from_pretrained("facebook/data2vec-audio-base")
+            model = model.to(device)
+            model.eval()
+            print(f"[+] Model loaded successfully on {device}")
+            
+            # Step 3: Extract embeddings using existing function
+            # Note: Transformers model's extract_features returns BaseModelOutput
+            # which has 'last_hidden_state' instead of 'x'. We need to adapt.
+            print(f"[+] Extracting embeddings from pretrained model...")
+            _, embeddings = self._extract_embeddings_from_samples_transformers(
+                model, device, samples, handle_batches=True
+            )
+            
+            if embeddings is None or len(embeddings) == 0:
+                print(f"[!] Warning: Failed to extract embeddings from pretrained model")
+                return None
+            
+            print(f"[+] Successfully extracted {len(embeddings)} embeddings from pretrained model")
+            print(f"    - Embedding shape: {embeddings.shape}")
+            
+            # Clean up model to free memory
+            del model
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+            return embeddings
+            
+        except Exception as e:
+            print(f"[!] Failed to extract pretrained model embeddings: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _extract_embeddings_from_samples_transformers(self, model, device, samples: List[Dict], 
+                                                       handle_batches: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Extract embeddings from transformers Data2VecAudio model.
+        
+        This is similar to _extract_embeddings_from_samples but adapted for transformers models,
+        which return BaseModelOutput with 'last_hidden_state' instead of dict with 'x'.
+        
+        Args:
+            model: The transformers model (already in eval mode)
+            device: The device to use
+            samples: Pre-loaded samples from fairseq dataset
+            handle_batches: If True, handles batched samples (splits them into individual samples)
+        
+        Returns:
+            Tuple of (inputs, embeddings)
+        """
+        inputs = []
+        embeddings = []
+        failed_samples = 0
+        
+        # Get model dtype for dtype matching
+        model_dtype = next(model.parameters()).dtype
+        
+        with torch.no_grad():
+            for idx, sample in enumerate(tqdm(samples, desc="Extracting embeddings (transformers)")):
+                try:
+                    # Handle different sample structures
+                    if "source" not in sample:
+                        # Try alternative keys
+                        if "net_input" in sample and "source" in sample["net_input"]:
+                            source = sample["net_input"]["source"]
+                        elif "src_tokens" in sample:
+                            source = sample["src_tokens"]
+                        else:
+                            raise KeyError(f"Sample {idx} does not have 'source' key. Available keys: {list(sample.keys()) if isinstance(sample, dict) else 'N/A'}")
+                    else:
+                        source = sample["source"]
+                    
+                    # Convert to tensor if it's not already
+                    if not isinstance(source, torch.Tensor):
+                        source = torch.tensor(source) if isinstance(source, (list, np.ndarray)) else source
+                    
+                    # Handle batched samples
+                    if handle_batches and isinstance(source, torch.Tensor) and source.dim() > 1 and source.shape[0] > 1:
+                        # Process each sample in the batch
+                        batch_size = source.shape[0]
+                        for b in range(batch_size):
+                            source_single = source[b]
+                            data = source_single.to(device)
+                            if data.dim() == 1:
+                                data = data.unsqueeze(0)  # [1, L]
+                            
+                            # Ensure dtype matches model
+                            if data.dtype != model_dtype:
+                                data = data.to(dtype=model_dtype)
+                            
+                            # Store input
+                            inputs.append(source_single.cpu().numpy())
+                            
+                            # Extract embeddings using transformers model
+                            # Transformers models expect input_values, not source
+                            output = model(input_values=data)
+                            # Transformers returns BaseModelOutput with last_hidden_state
+                            # Shape: [batch, seq_len, hidden_dim]
+                            emb = output.last_hidden_state.mean(dim=1).cpu().numpy().squeeze()  # [hidden_dim]
+                            embeddings.append(emb)
+                    else:
+                        # Single sample
+                        if isinstance(source, torch.Tensor):
+                            source_contig = source.contiguous() if not source.is_contiguous() else source
+                            data = source_contig.to(device)
+                        elif isinstance(source, np.ndarray):
+                            data = torch.from_numpy(source).to(device)
+                        else:
+                            data = torch.tensor(source).to(device)
+                        
+                        if data.dim() == 1:
+                            data = data.unsqueeze(0)  # [1, L]
+                        
+                        # Ensure dtype matches model
+                        if data.dtype != model_dtype:
+                            data = data.to(dtype=model_dtype)
+                        
+                        # Store input
+                        if isinstance(source, torch.Tensor):
+                            source_np = source.detach().cpu().contiguous().numpy()
+                        else:
+                            source_np = np.array(source)
+                        inputs.append(source_np)
+                        
+                        # Extract embeddings using transformers model
+                        # Transformers models expect input_values, not source
+                        output = model(input_values=data)
+                        # Transformers returns BaseModelOutput with last_hidden_state
+                        # Shape: [batch, seq_len, hidden_dim]
+                        emb = output.last_hidden_state.mean(dim=1).cpu().numpy().squeeze()  # [hidden_dim]
+                        embeddings.append(emb)
+                    
+                except Exception as e:
+                    failed_samples += 1
+                    if failed_samples <= 3:  # Only print first 3 errors to avoid spam
+                        print(f"[!] Error processing sample {idx}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    continue
+        
+        if failed_samples > 0:
+            print(f"[!] Warning: Failed to extract embeddings from {failed_samples}/{len(samples)} samples")
+        
+        if len(inputs) == 0:
+            print(f"[!] Error: No embeddings extracted! All {len(samples)} samples failed.")
+        
+        inputs_arr = np.stack(inputs) if inputs else np.array([])
+        embeddings_arr = np.stack(embeddings) if embeddings else np.array([])
+        
+        return inputs_arr, embeddings_arr
+    
     def _eval_embedding_similarity(self, checkpoint_path: str, samples: List[Dict], device,
                                     checkpoint_info: CheckpointInfo = None,
-                                    best_loss: Optional[float] = None) -> Dict[str, float]:
+                                    best_loss: Optional[float] = None,
+                                    dataset_name: str = "valid",
+                                    include_random_weights: bool = False) -> Dict[str, float]:
         """
         Evaluate embedding quality by comparing input-space vs embedding-space similarity.
-        Also generates a 4-way similarity matrix comparison plot.
+        Also generates a 3-way (or 4-way if include_random_weights) similarity matrix comparison plot.
         
-        All embeddings (evaluated model, frozen encoder, random init) are loaded from checkpoints
-        using the EXACT same samples to ensure fair comparison.
+        All embeddings (evaluated model, frozen encoder, optionally random weights with 16k) 
+        are loaded using the EXACT same samples to ensure fair comparison.
         
         Args:
             checkpoint_path: Path to the evaluated model checkpoint
@@ -731,6 +1915,8 @@ class EvaluationRunner:
             device: Device to use (for all models)
             checkpoint_info: Checkpoint info (for saving plots)
             best_loss: Training loss (for plot title)
+            dataset_name: Name of the dataset (for plot filename)
+            include_random_weights: If True, include random weight model (16k resampled) in comparison
             
         A good model should:
         - Preserve relative similarities (similar inputs -> similar embeddings)
@@ -777,7 +1963,6 @@ class EvaluationRunner:
         
         # Load baseline embeddings (using the EXACT same samples)
         embeddings_frozen = None
-        embeddings_random = None
         best_loss_frozen = None
         
         embeddings_frozen = self._load_frozen_encoder_embeddings(samples, device)
@@ -789,7 +1974,18 @@ class EvaluationRunner:
             if best_loss_frozen is not None:
                 print(f"[+] Frozen encoder best_loss: {best_loss_frozen:.4f}")
         
-        embeddings_random = self._load_random_init_embeddings(samples, device)
+        # Load random weight embeddings (16k resampled) if requested
+        embeddings_random_weights = None
+        if include_random_weights:
+            print(f"[+] Loading embeddings from random weight model (16k resampled)...")
+            embeddings_random_weights = self._eval_random_weight_embeddings(
+                samples, device, resample_to_16k=True, cfg=original_cfg
+            )
+            
+            if embeddings_random_weights is None:
+                print(f"[!] Error: Failed to load random weight embeddings even though include_random_weights=True!")
+            else:
+                print(f"[+] Successfully loaded {len(embeddings_random_weights)} random weight embeddings")
         
         # Validate baseline embeddings have the same count
         if embeddings_frozen is not None:
@@ -799,11 +1995,14 @@ class EvaluationRunner:
                 embeddings_frozen = None
                 best_loss_frozen = None
         
-        if embeddings_random is not None:
-            n_random = len(embeddings_random)
-            if n_random != n_samples:
-                print(f"[!] Warning: Random init embeddings has {n_random} samples, expected {n_samples}. Skipping random init comparison.")
-                embeddings_random = None
+        if embeddings_random_weights is not None:
+            n_random_weights = len(embeddings_random_weights)
+            if n_random_weights != n_samples:
+                print(f"[!] Warning: Random weight embeddings has {n_random_weights} samples, expected {n_samples}. Skipping random weight comparison.")
+                print(f"[!] This may indicate a problem with the random weight embedding extraction.")
+                embeddings_random_weights = None
+            else:
+                print(f"[+] Random weight embeddings validated: {n_random_weights} samples (matches expected {n_samples})")
         
         # Restore original cfg
         self._current_cfg = original_cfg
@@ -816,7 +2015,16 @@ class EvaluationRunner:
         input_sim_matrix = cosine_similarity(inputs)
         emb_sim_matrix = cosine_similarity(embeddings)
         emb_sim_frozen = cosine_similarity(embeddings_frozen) if embeddings_frozen is not None else None
-        emb_sim_random = cosine_similarity(embeddings_random) if embeddings_random is not None else None
+        
+        # Compute random weights similarity matrix if available
+        emb_sim_random_weights = None
+        if embeddings_random_weights is not None:
+            try:
+                emb_sim_random_weights = cosine_similarity(embeddings_random_weights)
+                print(f"[+] Computed random weights similarity matrix: shape {emb_sim_random_weights.shape}")
+            except Exception as e:
+                print(f"[!] Error computing random weights similarity matrix: {e}")
+                emb_sim_random_weights = None
         
         # Final validation: ensure all similarity matrices have the same shape
         expected_shape = (n_samples, n_samples)
@@ -824,14 +2032,43 @@ class EvaluationRunner:
         assert emb_sim_matrix.shape == expected_shape, f"Embed sim matrix shape {emb_sim_matrix.shape} != expected {expected_shape}"
         if emb_sim_frozen is not None:
             assert emb_sim_frozen.shape == expected_shape, f"Frozen sim matrix shape {emb_sim_frozen.shape} != expected {expected_shape}"
-        if emb_sim_random is not None:
-            assert emb_sim_random.shape == expected_shape, f"Random sim matrix shape {emb_sim_random.shape} != expected {expected_shape}"
+        if emb_sim_random_weights is not None:
+            assert emb_sim_random_weights.shape == expected_shape, f"Random weights sim matrix shape {emb_sim_random_weights.shape} != expected {expected_shape}"
         
         # Get upper triangle indices (excluding diagonal)
         triu_idx = np.triu_indices_from(input_sim_matrix, k=1)
         
         input_sims = input_sim_matrix[triu_idx]
         emb_sims = emb_sim_matrix[triu_idx]
+        
+        # Store embedding similarity scores and embeddings for later histogram/comparison plots
+        if checkpoint_info is not None:
+            run_name = checkpoint_info.run_name
+            if run_name not in self.eval_data:
+                self.eval_data[run_name] = {}
+            # Store scores with dataset_name as key to support multiple datasets per run
+            scores_key = f'embedding_similarity_scores_{dataset_name}'
+            self.eval_data[run_name][scores_key] = emb_sims
+            
+            # Store embeddings with dataset_name in key for side-by-side comparison plots
+            embeddings_key = f'embeddings_{run_name}_{dataset_name}'
+            self.eval_data[embeddings_key] = embeddings
+            
+            # Store inputs with dataset_name in key for outlier analysis
+            inputs_key = f'inputs_{run_name}_{dataset_name}'
+            self.eval_data[inputs_key] = inputs
+            
+            # Save to numpy file for persistence (include dataset_name in filename)
+            scores_path = self.data_dir_out / f"embedding_similarity_scores_{run_name}_{dataset_name}.npy"
+            np.save(scores_path, emb_sims)
+            
+            # Also save embeddings for later use
+            embeddings_path = self.data_dir_out / f"embeddings_{run_name}_{dataset_name}.npy"
+            np.save(embeddings_path, embeddings)
+            
+            # Save inputs for later use
+            inputs_path = self.data_dir_out / f"inputs_{run_name}_{dataset_name}.npy"
+            np.save(inputs_path, inputs)
         
         # Compute correlation between input and embedding similarities
         pearson_corr, pearson_p = pearsonr(input_sims, emb_sims)
@@ -861,12 +2098,169 @@ class EvaluationRunner:
         
         # Generate 4-way similarity matrix comparison plot
         if checkpoint_info is not None:
+            # Extract config info for plot title
+            cfg = self._current_cfg
+            config_info = self._extract_config_info_for_title(cfg)
+            
+            # Ensure random weights matrix is passed if include_random_weights was requested
+            if include_random_weights and emb_sim_random_weights is None:
+                print(f"[!] Warning: include_random_weights=True but emb_sim_random_weights is None. Plot will not include random weights model.")
+            
             self._plot_embedding_similarity_comparison(
                 checkpoint_info, input_sim_matrix, emb_sim_matrix,
-                emb_sim_frozen, emb_sim_random, best_loss, best_loss_frozen
+                emb_sim_frozen, None, best_loss, best_loss_frozen,
+                dataset_name=dataset_name, config_info=config_info,
+                emb_sim_random_weights=emb_sim_random_weights
             )
         
         return metrics
+    
+    def _print_embedding_quality_summary(self, valid_metrics: Dict[str, float],
+                                         custom_metrics: Optional[Dict[str, float]] = None,
+                                         dataset_trained: str = "N/A",
+                                         custom_dataset_name: Optional[str] = None):
+        """
+        Print a summary comparison of embedding quality metrics across different datasets.
+        
+        Args:
+            valid_metrics: Metrics from evaluating on valid dataset
+            custom_metrics: Optional metrics from evaluating on custom dataset
+            dataset_trained: Name of the dataset the model was trained on
+            custom_dataset_name: Name of the custom evaluation dataset
+        """
+        print("\n" + "="*80)
+        print("EMBEDDING QUALITY SUMMARY")
+        print("="*80)
+        
+        # Determine dataset names for display
+        valid_dataset_name = f"{dataset_trained} (valid)" if dataset_trained != 'N/A' else "valid"
+        custom_dataset_name_display = custom_dataset_name if custom_dataset_name else None
+        
+        # Key metrics to compare
+        key_metrics = [
+            ("Pearson Correlation", "pearson_corr", "Higher is better"),
+            ("Spearman Correlation", "spearman_corr", "Higher is better"),
+            ("Variance Ratio", "sim_variance_ratio", "Higher is better"),
+            ("Embedding Mean Similarity", "emb_mean_sim", "Context dependent"),
+            ("Embedding Std Similarity", "emb_std_sim", "Context dependent"),
+            ("Input Mean Similarity", "input_mean_sim", "Baseline"),
+            ("Input Std Similarity", "input_std_sim", "Baseline"),
+            ("Number of Samples", "num_samples", "Info"),
+        ]
+        
+        # Print header
+        if custom_metrics is not None:
+            print(f"\n{'Metric':<30} {'Valid Dataset':<25} {'Custom Dataset':<25} {'Note':<20}")
+            print("-" * 100)
+        else:
+            print(f"\n{'Metric':<30} {'Value':<25} {'Note':<20}")
+            print("-" * 75)
+        
+        # Print each metric
+        for metric_name, metric_key, note in key_metrics:
+            valid_value = valid_metrics.get(metric_key, None)
+            
+            if valid_value is not None:
+                if isinstance(valid_value, float):
+                    valid_str = f"{valid_value:.4f}"
+                else:
+                    valid_str = str(valid_value)
+            else:
+                valid_str = "N/A"
+            
+            if custom_metrics is not None:
+                custom_value = custom_metrics.get(metric_key, None)
+                if custom_value is not None:
+                    if isinstance(custom_value, float):
+                        custom_str = f"{custom_value:.4f}"
+                    else:
+                        custom_str = str(custom_value)
+                else:
+                    custom_str = "N/A"
+                
+                # Add comparison indicator
+                if isinstance(valid_value, (int, float)) and isinstance(custom_value, (int, float)):
+                    if metric_key in ["pearson_corr", "spearman_corr", "sim_variance_ratio"]:
+                        # Higher is better
+                        if custom_value > valid_value:
+                            indicator = "↑"
+                        elif custom_value < valid_value:
+                            indicator = "↓"
+                        else:
+                            indicator = "="
+                        custom_str += f" {indicator}"
+                    elif metric_key in ["emb_std_sim"]:
+                        # Higher variance might be better (less collapsed)
+                        if custom_value > valid_value:
+                            indicator = "↑"
+                        elif custom_value < valid_value:
+                            indicator = "↓"
+                        else:
+                            indicator = "="
+                        custom_str += f" {indicator}"
+                    else:
+                        indicator = ""
+                
+                print(f"{metric_name:<30} {valid_str:<25} {custom_str:<25} {note:<20}")
+            else:
+                print(f"{metric_name:<30} {valid_str:<25} {note:<20}")
+        
+        # Print dataset info
+        print("\n" + "-" * 80)
+        print(f"Valid Dataset: {valid_dataset_name}")
+        if custom_dataset_name_display:
+            print(f"Custom Dataset: {custom_dataset_name_display}")
+        print("="*80 + "\n")
+    
+    def _extract_config_info_for_title(self, cfg) -> Dict[str, Any]:
+        """
+        Extract relevant config information for plot title.
+        
+        Args:
+            cfg: The full config from checkpoint
+            
+        Returns:
+            Dictionary with config info
+        """
+        from omegaconf import OmegaConf
+        
+        # Convert to dict if needed
+        if hasattr(cfg, '_content'):
+            config_dict = OmegaConf.to_container(cfg, resolve=True)
+        else:
+            config_dict = OmegaConf.to_container(cfg, resolve=True) if hasattr(cfg, 'keys') else {}
+        
+        info = {}
+        
+        # Batch size
+        info['batch_size'] = config_dict.get('dataset', {}).get('batch_size', 'N/A')
+        
+        # Learning rate
+        lr = config_dict.get('optimization', {}).get('lr', [])
+        if isinstance(lr, list) and len(lr) > 0:
+            info['lr'] = lr[0] if len(lr) == 1 else lr
+        else:
+            info['lr'] = lr if lr else 'N/A'
+        
+        # LR scheduler
+        lr_scheduler = config_dict.get('optimization', {}).get('lr_scheduler', {})
+        if isinstance(lr_scheduler, dict):
+            info['lr_scheduler'] = lr_scheduler.get('_name', 'N/A')
+        else:
+            info['lr_scheduler'] = str(lr_scheduler) if lr_scheduler else 'N/A'
+        
+        # Max epochs
+        info['max_epoch'] = config_dict.get('optimization', {}).get('max_epoch', 'N/A')
+        
+        # Dataset trained on
+        data_path = config_dict.get('task', {}).get('data', 'N/A')
+        if isinstance(data_path, str):
+            # Extract dataset name from path
+            info['dataset_trained'] = Path(data_path).name if data_path != 'N/A' else 'N/A'
+        else:
+            info['dataset_trained'] = 'N/A'
+        
+        return info
     
     def _plot_embedding_similarity_comparison(self, checkpoint_info: CheckpointInfo,
                                                input_sim: np.ndarray,
@@ -874,18 +2268,24 @@ class EvaluationRunner:
                                                emb_sim_frozen: Optional[np.ndarray],
                                                emb_sim_random: Optional[np.ndarray],
                                                best_loss: Optional[float] = None,
-                                               best_loss_frozen: Optional[float] = None):
+                                               best_loss_frozen: Optional[float] = None,
+                                               dataset_name: str = "valid",
+                                               config_info: Optional[Dict[str, Any]] = None,
+                                               emb_sim_random_weights: Optional[np.ndarray] = None):
         """
-        Plot 4-way similarity matrix comparison side by side.
+        Plot 3-way (or 4-way if random weights included) similarity matrix comparison side by side.
         
         Args:
             checkpoint_info: Checkpoint info
             input_sim: Input space similarity matrix
             emb_sim_current: Current model embedding similarity matrix
             emb_sim_frozen: Frozen encoder embedding similarity matrix (optional)
-            emb_sim_random: Random init embedding similarity matrix (optional)
+            emb_sim_random: Random init embedding similarity matrix (ignored, kept for compatibility)
             best_loss: Training loss for current model title
             best_loss_frozen: Training loss for frozen encoder model title
+            dataset_name: Name of the dataset evaluated on
+            config_info: Dictionary with model config info (batch_size, lr, lr_scheduler, max_epoch, dataset_trained)
+            emb_sim_random_weights: Random weight model (16k resampled) similarity matrix (optional)
         """
         # Build matrices list
         matrices = [
@@ -893,12 +2293,13 @@ class EvaluationRunner:
             (f"Trained Model\n(loss: {best_loss:.3f})" if best_loss else "Trained Model", emb_sim_current),
         ]
         if emb_sim_frozen is not None:
-            frozen_title = "Frozen Transformer - train only FE\n"
+            frozen_title = "Frozen Transformer - train only FE"
             if best_loss_frozen is not None:
                 frozen_title += f"\n(loss: {best_loss_frozen:.3f})"
             matrices.append((frozen_title, emb_sim_frozen))
-        if emb_sim_random is not None:
-            matrices.append(("Random Init\n(no training)", emb_sim_random))
+        # Note: emb_sim_random is ignored - we removed random_init from comparisons
+        if emb_sim_random_weights is not None:
+            matrices.append(("Random Weights\n(16k resampled)", emb_sim_random_weights))
         
         n_matrices = len(matrices)
         
@@ -909,8 +2310,53 @@ class EvaluationRunner:
         if n_matrices == 1:
             axes = [axes]
         
-        fig.suptitle(f"Embedding Similarity Comparison: {checkpoint_info.run_name}", 
-                    fontsize=14, fontweight='bold')
+        # Build title with config info
+        title_parts = ["Embedding Similarity Comparison"]
+        
+        if config_info:
+            # Add model config info
+            config_lines = []
+            if config_info.get('batch_size') != 'N/A':
+                config_lines.append(f"BS={config_info['batch_size']}")
+            
+            lr = config_info.get('lr', 'N/A')
+            if lr != 'N/A':
+                if isinstance(lr, list):
+                    lr_str = f"[{','.join(map(str, lr))}]"
+                else:
+                    lr_str = f"{lr:.4f}" if isinstance(lr, (int, float)) else str(lr)
+                config_lines.append(f"LR={lr_str}")
+            
+            lr_sched = config_info.get('lr_scheduler', 'N/A')
+            if lr_sched != 'N/A':
+                config_lines.append(f"Sched={lr_sched}")
+            
+            max_epoch = config_info.get('max_epoch', 'N/A')
+            if max_epoch != 'N/A' and max_epoch != 0:
+                config_lines.append(f"Epochs={max_epoch}")
+            
+            if config_lines:
+                title_parts.append(" | ".join(config_lines))
+            
+            # Add dataset trained on
+            dataset_trained = config_info.get('dataset_trained', 'N/A')
+            if dataset_trained != 'N/A':
+                title_parts.append(f"Trained: {dataset_trained}")
+        
+        # Add dataset evaluated on
+        if dataset_name == "valid":
+            # Use the dataset name from config with "(valid)" suffix
+            eval_dataset_name = config_info.get('dataset_trained', 'N/A') if config_info else 'N/A'
+            if eval_dataset_name != 'N/A':
+                title_parts.append(f"Eval: {eval_dataset_name} (valid)")
+            else:
+                title_parts.append(f"Eval: {dataset_name}")
+        else:
+            # Use the provided dataset name (custom dataset)
+            title_parts.append(f"Eval: {dataset_name}")
+        
+        title = "\n".join(title_parts)
+        fig.suptitle(title, fontsize=12, fontweight='bold')
         
         # Determine number of samples for axis labels
         n_samples = input_sim.shape[0]
@@ -923,10 +2369,20 @@ class EvaluationRunner:
         tick_labels = [str(i) for i in tick_positions]
         
         for i, (title, sim_matrix) in enumerate(matrices):
+            # Calculate mean and std for this similarity matrix
+            # Exclude diagonal (self-similarity = 1.0) for more meaningful stats
+            triu_indices = np.triu_indices_from(sim_matrix, k=1)
+            sim_values = sim_matrix[triu_indices]
+            sim_mean = np.mean(sim_values)
+            sim_std = np.std(sim_values)
+            
+            # Add mean and std to the title
+            title_with_stats = f"{title}\n(mean={sim_mean:.3f}, std={sim_std:.3f})"
+            
             sns.heatmap(sim_matrix, ax=axes[i], cmap="viridis",
                        xticklabels=False, yticklabels=False,
                        vmin=0, vmax=1)
-            axes[i].set_title(title, fontsize=11)
+            axes[i].set_title(title_with_stats, fontsize=11)
             axes[i].set_xlabel(f"Sample Index (N={n_samples})", fontsize=10)
             
             # Add x-axis tick labels
@@ -940,21 +2396,33 @@ class EvaluationRunner:
                 axes[i].set_yticklabels(tick_labels, rotation=0, fontsize=8)
         
         plt.tight_layout()
-        plt.savefig(run_plots_dir / "embedding_similarity_comparison.png", dpi=150)
+        # Include dataset name in filename
+        filename = f"embedding_similarity_comparison_{dataset_name}.png"
+        plt.savefig(run_plots_dir / filename, dpi=150)
         plt.close()
         
-        print(f"[+] Saved 4-way embedding similarity comparison to {run_plots_dir}")
+        n_way = len(matrices)
+        print(f"[+] Saved {n_way}-way embedding similarity comparison ({dataset_name}) to {run_plots_dir}")
     
-    def load_eval_dataset_fairseq(self, cfg, split="valid", max_samples=None, verbose=True):
+    def load_eval_dataset_fairseq(self, cfg, split="valid", max_samples=None, verbose=True, 
+                                   custom_dataset_path=None, eval_data_dir=None, 
+                                   sample_indices=None):
         """
         Load evaluation data using fairseq's task.load_dataset and __getitem__.
         This ensures evaluation uses the exact same data loading as training.
         
         Args:
             cfg: The saved config from the checkpoint
-            split: Dataset split to load ("valid" or "train")
+            split: Dataset split to load. Supports:
+                - "sanity": Load the training dataset (same dataset the model trained on)
+                - "valid": Load the validation split from the dataset the model trained on
+                          If "valid" doesn't exist, falls back to "train" (same as trained)
+                - "train": Alias for "sanity" (for backward compatibility)
             max_samples: Maximum samples to load for efficiency (None = all)
             verbose: Whether to print loading messages
+            custom_dataset_path: Optional custom dataset path to override cfg.task.data
+            eval_data_dir: Optional evaluation data directory override. Priority: eval_data_dir > self.data_dir > cfg.task.data
+            sample_indices: Optional list of specific sample indices to load. If None and max_samples is set, uses random selection with fixed seed.
             
         Returns:
             task: The fairseq task
@@ -963,32 +2431,108 @@ class EvaluationRunner:
         """
         from fairseq import tasks
         
+        # Map "sanity" to "train" (the dataset the model was trained on)
+        if split == "sanity":
+            fairseq_split = "train"
+            split_display = "sanity (training dataset)"
+        elif split == "valid":
+            fairseq_split = "valid"
+            split_display = "valid"
+        elif split == "train":
+            fairseq_split = "train"
+            split_display = "train"
+        else:
+            # Default to valid for unknown splits
+            fairseq_split = "valid"
+            split_display = f"{split} (mapped to valid)"
+            if verbose:
+                print(f"[!] Warning: Unknown split '{split}', using 'valid' instead")
+        
         # Build task from config
         task = tasks.setup_task(cfg.task)
         
-        # fixme noy - change this for valid loss and for other tasks
-        # Load dataset using the same method as training
-        task.load_dataset(split, task_cfg=cfg.task)
-        dataset = task.dataset(split)
+        # Determine data path with priority: eval_data_dir > self.data_dir > cfg.task.data
+        # Only override if eval_data_dir is provided or self.data_dir is not the default
+        task_cfg = cfg.task
+        data_path_override = None
+        
+        if eval_data_dir is not None:
+            data_path_override = eval_data_dir
+        elif self.data_dir and self.data_dir != "/mnt5/noy/fairseq/data/single_channel_1m/":
+            data_path_override = self.data_dir
+        
+        # Override data path if custom_dataset_path is provided (highest priority for custom dataset)
+        if custom_dataset_path is not None:
+            # Create a copy of the task config with the custom data path
+            from omegaconf import OmegaConf
+            task_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task))
+            task_cfg.data = custom_dataset_path
+            if verbose:
+                print(f"[+] Using custom dataset path: {custom_dataset_path}")
+        elif data_path_override is not None:
+            # Create a copy of the task config with the eval data path
+            from omegaconf import OmegaConf
+            task_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task))
+            task_cfg.data = data_path_override
+            if verbose:
+                print(f"[+] Using evaluation data path: {data_path_override}")
+        
+        # Try to load dataset, fallback to "train" if "valid" doesn't exist
+        try:
+            task.load_dataset(fairseq_split, task_cfg=task_cfg)
+            dataset = task.dataset(fairseq_split)
+            
+            # Check if dataset is empty or doesn't exist
+            if len(dataset) == 0 and fairseq_split == "valid":
+                if verbose:
+                    print(f"[!] Warning: 'valid' split is empty, falling back to 'train' (same as trained dataset)")
+                fairseq_split = "train"
+                split_display = "train (valid not available)"
+                task.load_dataset(fairseq_split, task_cfg=task_cfg)
+                dataset = task.dataset(fairseq_split)
+        except (KeyError, AttributeError) as e:
+            # If "valid" split doesn't exist, fallback to "train"
+            if fairseq_split == "valid":
+                if verbose:
+                    print(f"[!] Warning: 'valid' split not found ({e}), falling back to 'train' (same as trained dataset)")
+                fairseq_split = "train"
+                split_display = "train (valid not available)"
+                task.load_dataset(fairseq_split, task_cfg=task_cfg)
+                dataset = task.dataset(fairseq_split)
+            else:
+                raise
         
         if verbose:
-            print(f"[+] Loaded {len(dataset)} samples from fairseq dataset")
+            dataset_source = f"custom dataset ({custom_dataset_path})" if custom_dataset_path else split_display
+            if data_path_override and not custom_dataset_path:
+                dataset_source = f"{split_display} (from {data_path_override})"
+            print(f"[+] Loaded {len(dataset)} samples from {dataset_source} dataset")
         
         # If max_samples specified, load individual samples
         samples = None
-        if max_samples is not None:
-            sample_size = min(max_samples, len(dataset))
-            indices = list(range(sample_size))
+        if max_samples is not None or sample_indices is not None:
+            if sample_indices is not None:
+                # Use provided sample indices
+                indices = sample_indices
+            else:
+                # Use random selection with fixed seed for reproducibility
+                random.seed(42)
+                dataset_size = len(dataset)
+                sample_size = min(max_samples, dataset_size)
+                indices = random.sample(range(dataset_size), sample_size)
+                indices.sort()  # Sort for easier debugging
             
             samples = []
-            for idx in tqdm(indices, desc=f"Loading {split} data"):
+            for idx in tqdm(indices, desc=f"Loading {split_display} data"):
                 # This calls FileAudioDataset.__getitem__()
                 sample = dataset[idx]
                 samples.append(sample)
         
         return task, samples, dataset
     
-    def _eval_validation_loss(self, model, cfg, debug: bool = False) -> Dict[str, float]:
+    def _eval_validation_loss(self, model, cfg, split: str = "valid", 
+                             eval_data_dir: Optional[str] = None, 
+                             debug: bool = False) -> Dict[str, float]:
         """
         Evaluate the model using trainer.valid_step (same as train.py's validate function).
         
@@ -999,6 +2543,8 @@ class EvaluationRunner:
         Args:
             model: The model
             cfg: The config
+            split: "sanity" (train split) or "valid" (valid split or eval_data_dir)
+            eval_data_dir: Optional override for eval dataset path (only used when split="valid")
             debug: Debug flag for verbose output (default: False)
         
         Returns:
@@ -1007,11 +2553,27 @@ class EvaluationRunner:
         from fairseq.trainer import Trainer
         from fairseq.logging import metrics as fairseq_metrics
         
-        print("[+] Evaluating validation loss...")
+        # Map split to fairseq split
+        if split == "sanity":
+            fairseq_split = "train"
+            split_display = "sanity (training dataset)"
+        else:  # "valid"
+            fairseq_split = "valid"
+            split_display = "valid"
+        
+        print(f"[+] Evaluating validation loss on {split_display}...")
         
         try:
-            # Load dataset using fairseq infrastructure
-            task, _, dataset = self.load_eval_dataset_fairseq(cfg, split="valid", max_samples=None, verbose=False)
+            # Load dataset - use eval_data_dir only for "valid" split
+            task, _, dataset = self.load_eval_dataset_fairseq(
+                cfg, split=fairseq_split, max_samples=None, verbose=False,
+                eval_data_dir=eval_data_dir if split == "valid" else None
+            )
+            
+            # Use the fairseq_split that was requested (already loaded by load_eval_dataset_fairseq)
+            # load_eval_dataset_fairseq handles fallback internally, so we use fairseq_split directly
+            validation_split = fairseq_split
+            
             criterion = task.build_criterion(cfg.criterion)
 
             # Ensure model is on the correct device
@@ -1032,8 +2594,19 @@ class EvaluationRunner:
                     pass
             
             # Create trainer and get iterator
+            # Use the split that was loaded
             trainer = Trainer(cfg, task, model, criterion)
-            itr = trainer.get_valid_iterator("valid").next_epoch_itr(shuffle=False)
+            # Try the requested split, fallback to train if it fails (only for "valid" split)
+            try:
+                itr = trainer.get_valid_iterator(validation_split).next_epoch_itr(shuffle=False)
+            except (KeyError, AttributeError) as e:
+                if validation_split == "valid":
+                    # Fallback to train if valid fails
+                    print(f"[!] Warning: Could not get 'valid' iterator, using 'train': {e}")
+                    validation_split = "train"
+                    itr = trainer.get_valid_iterator(validation_split).next_epoch_itr(shuffle=False)
+                else:
+                    raise
             
             all_losses = []
             num_batches = 0
@@ -1129,24 +2702,28 @@ class EvaluationRunner:
             traceback.print_exc()
             return None
     
-    def _eval_signal_completion(self, model, device, samples: List[Dict]) -> Dict[str, float]:
+    def _eval_signal_completion(self, model, device, samples: List[Dict], 
+                                 fixed_mask_start: Optional[int] = None,
+                                 fixed_mask_end: Optional[int] = None) -> Dict[str, float]:
         """
         Evaluate signal completion/reconstruction capability.
         
         Tests how well the model can predict masked portions of signals by:
         1. Getting embeddings for full (unmasked) signals as ground truth
-        2. Masking portions of signals (second half for causal, random spans)
+        2. Masking portions of signals (second half for causal, random spans, or fixed range)
         3. Comparing model's contextualized representations at masked positions
         
         Args:
             model: The model (already in eval mode)
             device: The device to use
             samples: Pre-loaded samples from fairseq dataset
+            fixed_mask_start: If provided, use fixed mask starting at this index (for sanity testing)
+            fixed_mask_end: If provided, use fixed mask ending at this index (for sanity testing)
         
         Key metrics:
         - Cosine similarity between predicted and target embeddings at masked positions
         - MSE loss at masked positions
-        - Comparison across different masking strategies (causal vs random)
+        - Comparison across different masking strategies (causal vs random vs fixed)
         """
         from scipy.stats import pearsonr, spearmanr
         
@@ -1156,12 +2733,26 @@ class EvaluationRunner:
         # Results storage
         completion_results = []
         
-        masking_strategies = {
-            "causal_50": {"type": "causal", "ratio": 0.5},  # Mask second half
-            "causal_25": {"type": "causal", "ratio": 0.25},  # Mask last quarter
-            "random_30": {"type": "random", "ratio": 0.3},   # Random 30% masking
-            "random_50": {"type": "random", "ratio": 0.5},   # Random 50% masking
-        }
+        # Check if using fixed mask
+        use_fixed_mask = fixed_mask_start is not None and fixed_mask_end is not None
+        if use_fixed_mask:
+            print(f"[+] Using fixed mask: indexes {fixed_mask_start}-{fixed_mask_end}")
+            # Import fixed mask function
+            from test_utils import create_fixed_mask_indices
+        else:
+            # Get masking parameters from model config (same as training)
+            mask_prob = getattr(model.cfg, 'mask_prob', 0.65)
+            mask_length = getattr(model.cfg, 'mask_length', 10)
+            mask_selection = getattr(model.cfg, 'mask_selection', 'static')
+            mask_other = getattr(model.cfg, 'mask_other', 0.0)
+            no_mask_overlap = getattr(model.cfg, 'no_mask_overlap', False)
+            mask_min_space = getattr(model.cfg, 'mask_min_space', 1)
+            
+            print(f"[+] Using training masking config: mask_prob={mask_prob}, mask_length={mask_length}, "
+                  f"mask_selection={mask_selection}")
+            
+            # Import fairseq's compute_mask_indices to use same masking as training
+            from fairseq.data.data_utils import compute_mask_indices
         
         with torch.no_grad():
             for idx, sample in enumerate(tqdm(samples, desc="Signal completion eval")):
@@ -1179,68 +2770,107 @@ class EvaluationRunner:
                     gt_result = model.extract_features(data, padding_mask=None, mask=False)
                     gt_embeddings = gt_result["x"]  # [1, T, embed_dim]
                     
+                    T = gt_embeddings.shape[1]  # Sequence length after feature extraction
+                    
+                    # Create mask indices
+                    if use_fixed_mask:
+                        # Use fixed mask for sanity testing
+                        mask_indices_np = create_fixed_mask_indices(
+                            1, T, fixed_mask_start, fixed_mask_end
+                        )
+                    else:
+                        # Use same masking as training (fairseq's compute_mask_indices)
+                        mask_indices_np = compute_mask_indices(
+                            (1, T),  # (batch_size, sequence_length)
+                            None,  # padding_mask
+                            mask_prob,
+                            mask_length,
+                            mask_selection,
+                            mask_other,
+                            min_masks=1,
+                            no_overlap=no_mask_overlap,
+                            min_space=mask_min_space,
+                        )
+                    mask_indices = torch.from_numpy(mask_indices_np).to(device)  # [1, T]
+                    
+                    # Get masked embeddings using the same masking as training
+                    masked_result = model.forward(
+                        data, 
+                        padding_mask=None, 
+                        mask=True,
+                        features_only=True,
+                        mask_indices=mask_indices_np
+                    )
+                    masked_embeddings = masked_result["x"]  # [1, T, embed_dim]
+                    
+                    # Compute metrics at masked positions
+                    gt_masked = gt_embeddings[mask_indices]  # [num_masked, embed_dim]
+                    pred_masked = masked_embeddings[mask_indices]  # [num_masked, embed_dim]
+                    
                     sample_result = {
                         "index": idx,
                         "sample_id": int(sample_id),
-                        "seq_len": gt_embeddings.shape[1],
+                        "seq_len": T,
+                        "num_masked": mask_indices.sum().item(),
                     }
                     
-                    # Test each masking strategy
-                    for strategy_name, strategy_config in masking_strategies.items():
-                        mask_type = strategy_config["type"]
-                        mask_ratio = strategy_config["ratio"]
+                    if gt_masked.numel() > 0:
+                        # Cosine similarity at masked positions
+                        cos_sim = torch.nn.functional.cosine_similarity(
+                            gt_masked, pred_masked, dim=-1
+                        ).mean().item()
                         
-                        T = gt_embeddings.shape[1]  # Sequence length after feature extraction
+                        # MSE at masked positions
+                        mse = torch.nn.functional.mse_loss(
+                            pred_masked, gt_masked
+                        ).item()
                         
-                        # Create mask indices
-                        if mask_type == "causal":
-                            # Mask the last portion (simulate completion task)
-                            mask_start = int(T * (1 - mask_ratio))
-                            mask_indices = torch.zeros(1, T, dtype=torch.bool, device=device)
-                            mask_indices[0, mask_start:] = True
-                        else:  # random
-                            # Random masking
-                            num_masked = int(T * mask_ratio)
-                            perm = torch.randperm(T, device=device)[:num_masked]
-                            mask_indices = torch.zeros(1, T, dtype=torch.bool, device=device)
-                            mask_indices[0, perm] = True
+                        # L1 distance
+                        l1 = torch.nn.functional.l1_loss(
+                            pred_masked, gt_masked
+                        ).item()
                         
-                        # Get masked embeddings
-                        # The model applies masking internally, so we use mask=True
-                        # But we need custom mask_indices to control what's masked
-                        masked_result = model.forward(
-                            data, 
-                            padding_mask=None, 
-                            mask=True,
-                            features_only=True,
-                            mask_indices=mask_indices.cpu().numpy()
-                        )
-                        masked_embeddings = masked_result["x"]  # [1, T, embed_dim]
-                        
-                        # Compute metrics at masked positions
-                        gt_masked = gt_embeddings[mask_indices]  # [num_masked, embed_dim]
-                        pred_masked = masked_embeddings[mask_indices]  # [num_masked, embed_dim]
-                        
-                        if gt_masked.numel() > 0:
-                            # Cosine similarity at masked positions
-                            cos_sim = torch.nn.functional.cosine_similarity(
-                                gt_masked, pred_masked, dim=-1
-                            ).mean().item()
+                        sample_result["cos_sim"] = cos_sim
+                        sample_result["mse"] = mse
+                        sample_result["l1"] = l1
+                    
+                    # Plot spectrograms for first few samples
+                    if idx < 5:
+                        try:
+                            # Get 245-length data (source is the raw audio/spectrogram)
+                            source_np = source.cpu().numpy() if isinstance(source, torch.Tensor) else source
                             
-                            # MSE at masked positions
-                            mse = torch.nn.functional.mse_loss(
-                                pred_masked, gt_masked
-                            ).item()
-                            
-                            # L1 distance
-                            l1 = torch.nn.functional.l1_loss(
-                                pred_masked, gt_masked
-                            ).item()
-                            
-                            sample_result[f"{strategy_name}_cos_sim"] = cos_sim
-                            sample_result[f"{strategy_name}_mse"] = mse
-                            sample_result[f"{strategy_name}_l1"] = l1
-                            sample_result[f"{strategy_name}_num_masked"] = mask_indices.sum().item()
+                            # Map mask from feature level (T) to input level (245)
+                            # The mask is at feature level, but we want to visualize at input level
+                            # For simplicity, we'll create a mask at input level using the same pattern
+                            # by computing mask for input length
+                            input_len = len(source_np) if source_np.ndim == 1 else source_np.shape[-1]
+                            if input_len == 245:
+                                # Compute mask for 245-length input
+                                mask_indices_input_np = compute_mask_indices(
+                                    (1, input_len),
+                                    None,
+                                    mask_prob,
+                                    mask_length,
+                                    mask_selection,
+                                    mask_other,
+                                    min_masks=1,
+                                    no_overlap=no_mask_overlap,
+                                    min_space=mask_min_space,
+                                )
+                                mask_indices_input = mask_indices_input_np[0]  # [245]
+                                
+                                self._plot_spectrogram_with_mask(
+                                    source_np if source_np.ndim == 1 else source_np.squeeze(),
+                                    mask_indices_input,
+                                    self._current_run_name, int(sample_id),
+                                    mask_prob, mask_length,
+                                    save=True
+                                )
+                        except Exception as e:
+                            print(f"[!] Warning: Could not plot spectrogram for sample {idx}: {e}")
+                            import traceback
+                            traceback.print_exc()
                     
                     completion_results.append(sample_result)
                     
@@ -1262,43 +2892,29 @@ class EvaluationRunner:
         # Store for visualization
         self.eval_data[f"completion_df_{self._current_run_name}"] = completion_df
         
-        # Aggregate metrics
+        # Aggregate metrics (using training masking config)
         metrics = {}
-        for strategy_name in masking_strategies.keys():
-            cos_sim_col = f"{strategy_name}_cos_sim"
-            mse_col = f"{strategy_name}_mse"
-            l1_col = f"{strategy_name}_l1"
+        if "cos_sim" in completion_df.columns:
+            cos_sims = completion_df["cos_sim"].dropna().values
+            mse_vals = completion_df["mse"].dropna().values
+            l1_vals = completion_df["l1"].dropna().values
             
-            if cos_sim_col in completion_df.columns:
-                cos_sims = completion_df[cos_sim_col].dropna().values
-                mse_vals = completion_df[mse_col].dropna().values
-                l1_vals = completion_df[l1_col].dropna().values
+            if len(cos_sims) > 0:
+                metrics["completion_cos_sim_mean"] = float(np.mean(cos_sims))
+                metrics["completion_cos_sim_std"] = float(np.std(cos_sims))
+                metrics["completion_mse_mean"] = float(np.mean(mse_vals))
+                metrics["completion_mse_std"] = float(np.std(mse_vals))
+                metrics["completion_l1_mean"] = float(np.mean(l1_vals))
+                metrics["completion_l1_std"] = float(np.std(l1_vals))
                 
-                if len(cos_sims) > 0:
-                    metrics[f"completion_{strategy_name}_cos_sim_mean"] = float(np.mean(cos_sims))
-                    metrics[f"completion_{strategy_name}_cos_sim_std"] = float(np.std(cos_sims))
-                    metrics[f"completion_{strategy_name}_mse_mean"] = float(np.mean(mse_vals))
-                    metrics[f"completion_{strategy_name}_mse_std"] = float(np.std(mse_vals))
-                    metrics[f"completion_{strategy_name}_l1_mean"] = float(np.mean(l1_vals))
+                # Overall completion score (cos sim ranges from -1 to 1)
+                metrics["completion_score"] = float((np.mean(cos_sims) + 1) * 50)
         
-        # Overall completion score (average cosine similarity across strategies)
-        all_cos_sims = []
-        for strategy_name in masking_strategies.keys():
-            key = f"completion_{strategy_name}_cos_sim_mean"
-            if key in metrics:
-                all_cos_sims.append(metrics[key])
-        
-        if all_cos_sims:
-            metrics["completion_overall_cos_sim"] = float(np.mean(all_cos_sims))
-            # Convert to 0-100 score (cos sim ranges from -1 to 1)
-            metrics["completion_score"] = float((np.mean(all_cos_sims) + 1) * 50)
-        
-        print(f"\n[+] Signal Completion Analysis:")
-        for strategy_name in masking_strategies.keys():
-            key = f"completion_{strategy_name}_cos_sim_mean"
-            if key in metrics:
-                print(f"    {strategy_name}: cos_sim={metrics[key]:.4f}, "
-                      f"mse={metrics[f'completion_{strategy_name}_mse_mean']:.4f}")
+        print(f"\n[+] Signal Completion Analysis (mask_prob={mask_prob}, mask_length={mask_length}):")
+        if "completion_cos_sim_mean" in metrics:
+            print(f"    Cosine Similarity: {metrics['completion_cos_sim_mean']:.4f} ± {metrics['completion_cos_sim_std']:.4f}")
+            print(f"    MSE: {metrics['completion_mse_mean']:.4f} ± {metrics['completion_mse_std']:.4f}")
+            print(f"    L1: {metrics['completion_l1_mean']:.4f} ± {metrics['completion_l1_std']:.4f}")
         if "completion_score" in metrics:
             print(f"    Overall completion score: {metrics['completion_score']:.1f}/100")
         
@@ -1737,6 +3353,220 @@ class EvaluationRunner:
         if save_plots:
             plt.savefig(self.plots_dir / "stack_similarity_comparison.png", dpi=150)
             print(f"[+] Saved stack similarity plot to {self.plots_dir}")
+        
+        plt.close()
+    
+    def plot_embedding_similarity_histogram_comparison(self, results: List[EvalResult],
+                                                       dataset_name: str = "valid",
+                                                       save_plots: bool = True):
+        """
+        Plot histogram comparison of embedding similarity scores across checkpoints.
+        
+        Creates side-by-side histograms showing the distribution of pairwise cosine
+        similarity scores for each checkpoint, allowing comparison of similarity patterns.
+        
+        Args:
+            results: List of EvalResult objects from multiple checkpoints
+            dataset_name: Name of the dataset used for evaluation (e.g., "valid", "single_channel_10k")
+            save_plots: Whether to save the plot
+        """
+        if not results:
+            print("[!] No results provided for histogram comparison")
+            return
+        
+        # Collect similarity scores for each result
+        similarity_scores_list = []
+        run_names = []
+        best_losses = []
+        
+        for r in results:
+            run_name = r.run_name
+            
+            # Try to load similarity scores from eval_data or numpy file
+            emb_sims = None
+            
+            # First try eval_data (in-memory) with dataset_name
+            scores_key = f'embedding_similarity_scores_{dataset_name}'
+            if run_name in self.eval_data and scores_key in self.eval_data[run_name]:
+                emb_sims = self.eval_data[run_name][scores_key]
+            else:
+                # Try loading from numpy file (include dataset_name in filename)
+                scores_path = self.data_dir_out / f"embedding_similarity_scores_{run_name}_{dataset_name}.npy"
+                if scores_path.exists():
+                    try:
+                        emb_sims = np.load(scores_path)
+                    except Exception as e:
+                        print(f"[!] Warning: Could not load similarity scores for {run_name}: {e}")
+            
+            if emb_sims is not None and len(emb_sims) > 0:
+                similarity_scores_list.append(emb_sims)
+                run_names.append(run_name)
+                best_loss = r.metrics.get("best_loss")
+                best_losses.append(best_loss)
+            else:
+                print(f"[!] Warning: No similarity scores found for {run_name} on dataset {dataset_name}, skipping histogram")
+        
+        if not similarity_scores_list:
+            print("[!] No similarity scores available for histogram comparison")
+            return
+        
+        # Determine subplot layout (1 row, N columns)
+        n_checkpoints = len(similarity_scores_list)
+        fig, axes = plt.subplots(1, n_checkpoints, figsize=(5 * n_checkpoints, 5))
+        if n_checkpoints == 1:
+            axes = [axes]
+        
+        # Determine consistent bins across all histograms for fair comparison
+        all_scores = np.concatenate(similarity_scores_list)
+        bins = np.linspace(0, 1, 31)  # 30 bins from 0 to 1
+        
+        # Create histogram for each checkpoint
+        for i, (emb_sims, run_name, best_loss) in enumerate(zip(similarity_scores_list, run_names, best_losses)):
+            # Calculate statistics
+            mean_sim = float(np.mean(emb_sims))
+            std_sim = float(np.std(emb_sims))
+            median_sim = float(np.median(emb_sims))
+            
+            # Create histogram
+            axes[i].hist(emb_sims, bins=bins, alpha=0.7, edgecolor='black', linewidth=0.5)
+            
+            # Add vertical lines for mean and median
+            axes[i].axvline(mean_sim, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_sim:.3f}')
+            axes[i].axvline(median_sim, color='blue', linestyle='--', linewidth=2, label=f'Median: {median_sim:.3f}')
+            
+            # Set labels and title
+            axes[i].set_xlabel('Cosine Similarity', fontsize=11)
+            if i == 0:
+                axes[i].set_ylabel('Frequency', fontsize=11)
+            
+            # Create title with run name and loss
+            title = run_name
+            if best_loss is not None:
+                title += f"\n(loss: {best_loss:.3f})"
+            title += f"\nmean={mean_sim:.3f}, std={std_sim:.3f}"
+            axes[i].set_title(title, fontsize=10, fontweight='bold')
+            
+            axes[i].set_xlim(0, 1)
+            axes[i].grid(alpha=0.3, axis='y')
+            axes[i].legend(fontsize=8)
+        
+        plt.suptitle(f'Embedding Similarity Score Distribution Comparison\nDataset: {dataset_name}', 
+                     fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        
+        if save_plots:
+            filename = f"embedding_similarity_histogram_comparison_{dataset_name}.png"
+            plt.savefig(self.plots_dir / filename, dpi=150, bbox_inches='tight')
+            print(f"[+] Saved embedding similarity histogram comparison ({dataset_name}) to {self.plots_dir}")
+        
+        plt.close()
+    
+    def plot_embedding_similarity_matrix_comparison(self, results: List[EvalResult],
+                                                    dataset_name: str = "valid",
+                                                    save_plots: bool = True):
+        """
+        Plot side-by-side comparison of embedding similarity matrices across checkpoints.
+        
+        Creates side-by-side similarity matrix heatmaps for each checkpoint, allowing
+        visual comparison of similarity patterns across models.
+        
+        Args:
+            results: List of EvalResult objects from multiple checkpoints
+            dataset_name: Name of the dataset used for evaluation (e.g., "valid", "single_channel_10k")
+            save_plots: Whether to save the plot
+        """
+        if not results:
+            print("[!] No results provided for similarity matrix comparison")
+            return
+        
+        # Collect similarity matrices for each result
+        similarity_matrices_list = []
+        run_names = []
+        best_losses = []
+        
+        for r in results:
+            run_name = r.run_name
+            
+            # Try to get embeddings from eval_data to recompute similarity matrix
+            # Embeddings are stored with key 'embeddings_{run_name}_{dataset_name}' in eval_data
+            embeddings_key = f'embeddings_{run_name}_{dataset_name}'
+            sim_matrix = None
+            
+            if embeddings_key in self.eval_data:
+                embeddings = self.eval_data[embeddings_key]
+                from sklearn.metrics.pairwise import cosine_similarity
+                sim_matrix = cosine_similarity(embeddings)
+                print(f"[+] Using stored embeddings for {run_name} on {dataset_name}: {embeddings.shape}")
+            else:
+                # Try loading from numpy file
+                embeddings_path = self.data_dir_out / f"embeddings_{run_name}_{dataset_name}.npy"
+                if embeddings_path.exists():
+                    try:
+                        embeddings = np.load(embeddings_path)
+                        from sklearn.metrics.pairwise import cosine_similarity
+                        sim_matrix = cosine_similarity(embeddings)
+                        print(f"[+] Loaded embeddings from file for {run_name} on {dataset_name}: {embeddings.shape}")
+                    except Exception as e:
+                        print(f"[!] Warning: Could not load embeddings for {run_name}: {e}")
+                else:
+                    # Try recomputing from similarity scores (less ideal but works)
+                    scores_key = f'embedding_similarity_scores_{dataset_name}'
+                    if run_name in self.eval_data and scores_key in self.eval_data[run_name]:
+                        # We have similarity scores but need to reconstruct the matrix
+                        # This is approximate - we'd need the original sample count
+                        print(f"[!] Warning: Cannot reconstruct similarity matrix from scores for {run_name}. Need embeddings.")
+            
+            if sim_matrix is not None and sim_matrix.shape[0] > 0:
+                similarity_matrices_list.append(sim_matrix)
+                run_names.append(run_name)
+                best_loss = r.metrics.get("best_loss")
+                best_losses.append(best_loss)
+            else:
+                print(f"[!] Warning: No similarity matrix found for {run_name} on dataset {dataset_name}, skipping")
+        
+        if not similarity_matrices_list:
+            print("[!] No similarity matrices available for comparison")
+            return
+        
+        # Determine subplot layout (1 row, N columns)
+        n_checkpoints = len(similarity_matrices_list)
+        fig, axes = plt.subplots(1, n_checkpoints, figsize=(5 * n_checkpoints, 5))
+        if n_checkpoints == 1:
+            axes = [axes]
+        
+        # Create similarity matrix heatmap for each checkpoint
+        for i, (sim_matrix, run_name, best_loss) in enumerate(zip(similarity_matrices_list, run_names, best_losses)):
+            # Calculate statistics (excluding diagonal)
+            triu_indices = np.triu_indices_from(sim_matrix, k=1)
+            sim_values = sim_matrix[triu_indices]
+            sim_mean = float(np.mean(sim_values))
+            sim_std = float(np.std(sim_values))
+            
+            # Create heatmap
+            sns.heatmap(sim_matrix, ax=axes[i], cmap="viridis",
+                       xticklabels=False, yticklabels=False,
+                       vmin=0, vmax=1, cbar=True)
+            
+            # Set labels and title
+            axes[i].set_xlabel(f'Sample Index (N={sim_matrix.shape[0]})', fontsize=10)
+            if i == 0:
+                axes[i].set_ylabel(f'Sample Index (N={sim_matrix.shape[0]})', fontsize=10)
+            
+            # Create title with run name and loss
+            title = run_name
+            if best_loss is not None:
+                title += f"\n(loss: {best_loss:.3f})"
+            title += f"\nmean={sim_mean:.3f}, std={sim_std:.3f}"
+            axes[i].set_title(title, fontsize=10, fontweight='bold')
+        
+        plt.suptitle(f'Embedding Similarity Matrix Comparison\nDataset: {dataset_name}', 
+                     fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        
+        if save_plots:
+            filename = f"embedding_similarity_matrix_comparison_{dataset_name}.png"
+            plt.savefig(self.plots_dir / filename, dpi=150, bbox_inches='tight')
+            print(f"[+] Saved embedding similarity matrix comparison ({dataset_name}) to {self.plots_dir}")
         
         plt.close()
     
@@ -2405,6 +4235,25 @@ class EvaluationRunner:
             md_lines.append("## Comparison Visualizations")
             md_lines.append("")
             
+            # Check for histogram comparison plots (may have dataset name in filename)
+            embedding_hist_files = list(self.plots_dir.glob("embedding_similarity_histogram_comparison*.png"))
+            if embedding_hist_files:
+                for hist_file in embedding_hist_files:
+                    dataset_suffix = hist_file.stem.replace("embedding_similarity_histogram_comparison_", "")
+                    dataset_name_display = dataset_suffix if dataset_suffix else "valid"
+                    md_lines.append(f"### Embedding Similarity Histogram Comparison ({dataset_name_display})")
+                    md_lines.append("")
+                    md_lines.append("Distribution of pairwise cosine similarity scores across checkpoints:")
+                    md_lines.append("")
+                    md_lines.append(f"![Embedding Similarity Histogram](plots/{hist_file.name})")
+                    md_lines.append("")
+                md_lines.append("### Embedding Similarity Histogram Comparison")
+                md_lines.append("")
+                md_lines.append("Distribution of pairwise cosine similarity scores across checkpoints:")
+                md_lines.append("")
+                md_lines.append("![Embedding Similarity Histogram](plots/embedding_similarity_histogram_comparison.png)")
+                md_lines.append("")
+            
             noise_comparison = self.plots_dir / "noise_robustness_comparison.png"
             if noise_comparison.exists():
                 md_lines.append("### Noise Robustness Comparison")
@@ -2592,16 +4441,16 @@ class ReportGenerator:
         
         print(f"\nTotal runs evaluated: {len(df)}")
         
-        if metric_cols:
-            print("\nMetrics Overview:")
-            for col in metric_cols:
-                metric_name = col.replace("metric_", "")
-                values = df[col].dropna()
-                if len(values) > 0 and values.dtype in ['float64', 'int64']:
-                    print(f"  {metric_name}:")
-                    print(f"    Mean: {values.mean():.4f}")
-                    print(f"    Std:  {values.std():.4f}")
-                    print(f"    Best: {values.max():.4f} (run: {df.loc[values.idxmax(), 'run_name']})")
+        # if metric_cols: # fixme
+        #     print("\nMetrics Overview:")
+        #     for col in metric_cols:
+        #         metric_name = col.replace("metric_", "")
+        #         values = df[col].dropna()
+        #         if len(values) > 0 and values.dtype in ['float64', 'int64']:
+        #             print(f"  {metric_name}:")
+        #             print(f"    Mean: {values.mean():.4f}")
+        #             print(f"    Std:  {values.std():.4f}")
+        #             print(f"    Best: {values.max():.4f} (run: {df.loc[values.idxmax(), 'run_name']})")
         
         print("="*80 + "\n")
 
@@ -2619,7 +4468,9 @@ def main():
                        help="Directory to save evaluation results")
     parser.add_argument("--data_dir", type=str,
                        default="/mnt5/noy/fairseq/data/single_channel_1m/",
-                       help="Directory containing evaluation data")
+                       help="Directory containing evaluation data (stored but currently unused - use --eval_data_dir instead)")
+    parser.add_argument("--eval_data_dir", type=str, default=None,
+                       help="Evaluation data directory override. Priority: --eval_data_dir > --data_dir > checkpoint's cfg.task.data")
     parser.add_argument("--eval_methods", type=str, nargs="+",
                        default=["embedding_similarity"],
                        help="Evaluation methods to run: embedding_similarity, noise_robustness, stack_similarity, signal_completion, validation_loss")
@@ -2627,17 +4478,48 @@ def main():
                        help="Only evaluate checkpoint_best.pt files")
     parser.add_argument("--latest_only", action="store_true",
                        help="Only evaluate the most recent checkpoint")
+    parser.add_argument("--run_names", type=str, nargs="+", default=None,
+                       help="Specific run names to evaluate (e.g., 2026-01-07_21-50-07). Only these checkpoints will be evaluated.")
     parser.add_argument("--report_name", type=str, default=None,
                        help="Custom name for the report")
     parser.add_argument("--plot_matrices", action="store_true",
                        help="Generate similarity matrix visualizations")
     parser.add_argument("--all_methods", action="store_true",
                        help="Run all available evaluation methods")
+    parser.add_argument("--custom_dataset_path", type=str, default=None,
+                       help="Path to custom dataset for evaluation (will run 4-way comparison on both 'valid' and this dataset)")
+    parser.add_argument("--debug", action="store_true",
+                       help="Enable debug mode: save plots of evaluated data samples to debug_plots directory")
+    parser.add_argument("--include_random_weights", action="store_true",
+                       help="Include pretrained transformers model (16k stretched) in embedding similarity comparison (5-way instead of 4-way)")
+    parser.add_argument("--analyze_outliers", action="store_true",
+                       help="Enable outlier analysis: find samples with lowest average similarity and visualize them")
+    parser.add_argument("--outlier_run_name", type=str, default=None,
+                       help="Specific run_name to analyze for outliers (required if --analyze_outliers). If not specified, uses all evaluated checkpoints.")
+    parser.add_argument("--outlier_dataset", type=str, default=None,
+                       help="Dataset name for outlier analysis (default: use custom_dataset_path name or 'valid')")
+    parser.add_argument("--outlier_similarity_type", type=str, default="both",
+                       choices=["embedding", "input", "both"],
+                       help="Type of similarity for outlier analysis: 'embedding', 'input', or 'both' (default: 'both')")
+    parser.add_argument("--analyze_inliers", action="store_true", default=True,
+                       help="Also analyze inliers (highest avg similarity) in addition to outliers (default: True)")
+    parser.add_argument("--no_analyze_inliers", dest="analyze_inliers", action="store_false",
+                       help="Disable inlier analysis (only analyze outliers)")
     
     args = parser.parse_args()
     
+    # Create timestamped subdirectory for this evaluation run
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamped_output_dir = Path(args.output_dir) / timestamp
+    timestamped_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"[+] Creating timestamped output directory: {timestamped_output_dir}")
+    
+    # Update output_dir to use timestamped subdirectory
+    args.output_dir = str(timestamped_output_dir)
+    
     if args.report_name is None:
-        args.report_name = f"eval_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        args.report_name = f"eval_report_{timestamp}"
     
     # If --all_methods, use all available eval methods
     if args.all_methods:
@@ -2662,6 +4544,17 @@ def main():
             checkpoints = discovery.find_best_checkpoints()
         else:
             checkpoints = discovery.find_all_checkpoints()
+        
+        # Filter by specific run names if provided
+        if args.run_names:
+            run_names_set = set(args.run_names)
+            original_count = len(checkpoints)
+            checkpoints = [c for c in checkpoints if c.run_name in run_names_set]
+            print(f"[+] Filtered checkpoints: {len(checkpoints)}/{original_count} match the specified run names")
+            if len(checkpoints) < len(run_names_set):
+                found_names = {c.run_name for c in checkpoints}
+                missing_names = run_names_set - found_names
+                print(f"[!] Warning: Some specified run names were not found: {missing_names}")
     
     if not checkpoints:
         print("[!] No checkpoints found!")
@@ -2675,7 +4568,11 @@ def main():
     
     # Run evaluations
     runner = EvaluationRunner(args.output_dir, args.data_dir)
-    results = runner.evaluate_all(checkpoints, args.eval_methods)
+    results = runner.evaluate_all(checkpoints, args.eval_methods, 
+                                  custom_dataset_path=args.custom_dataset_path,
+                                  eval_data_dir=args.eval_data_dir,
+                                  debug=args.debug,
+                                  include_random_weights=args.include_random_weights)
     
     # Create lookup for best_loss by run_name
     loss_lookup = {r.run_name: r.metrics.get("best_loss") for r in results}
@@ -2716,12 +4613,82 @@ def main():
     # Generate comparison plots for multi-checkpoint evaluations
     if len(results) > 1:
         print("\n[+] Generating comparison plots...")
+        if "embedding_similarity" in args.eval_methods:
+            # Determine dataset name for comparison plots
+            # If custom_dataset_path is provided, use that dataset; otherwise use "valid"
+            comparison_dataset_name = "valid"
+            if args.custom_dataset_path:
+                comparison_dataset_name = Path(args.custom_dataset_path).name
+            
+            # Histogram comparison
+            runner.plot_embedding_similarity_histogram_comparison(results, dataset_name=comparison_dataset_name, save_plots=True)
+            
+            # Similarity matrix comparison (side-by-side heatmaps)
+            runner.plot_embedding_similarity_matrix_comparison(results, dataset_name=comparison_dataset_name, save_plots=True)
+            
+            # Side-by-side embedding similarity comparison plots (from compare_checkpoints.py)
+            try:
+                from compare_checkpoints import create_side_by_side_plots
+                checkpoints_for_comparison = [CheckpointInfo(
+                    path=r.checkpoint_path,
+                    run_dir=str(Path(r.checkpoint_path).parent.parent) if Path(r.checkpoint_path).parent.parent.exists() else str(Path(r.checkpoint_path).parent),
+                    date=r.run_name.split("_")[0] if "_" in r.run_name else r.run_name.split("-")[0],
+                    time=r.run_name.split("_", 1)[1].replace("-", ":") if "_" in r.run_name else r.run_name,
+                    checkpoint_type="best"
+                ) for r in results]
+                create_side_by_side_plots(checkpoints_for_comparison, runner, Path(args.output_dir), 
+                                         custom_dataset_path=args.custom_dataset_path)
+            except ImportError as e:
+                print(f"[!] Warning: Could not import create_side_by_side_plots: {e}")
+            except Exception as e:
+                print(f"[!] Warning: Could not create side-by-side comparison plots: {e}")
+                import traceback
+                traceback.print_exc()
         if "noise_robustness" in args.eval_methods:
             runner.plot_noise_robustness_comparison(results, save_plots=True)
         if "stack_similarity" in args.eval_methods:
             runner.plot_stack_similarity_comparison(results, save_plots=True)
         if "signal_completion" in args.eval_methods:
             runner.plot_signal_completion_comparison(results, save_plots=True)
+    
+    # Run outlier analysis if requested
+    if args.analyze_outliers and "embedding_similarity" in args.eval_methods:
+        print("\n[+] Running similarity outlier analysis...")
+        
+        # Determine dataset name for outlier analysis
+        outlier_dataset_name = args.outlier_dataset
+        if outlier_dataset_name is None:
+            if args.custom_dataset_path:
+                outlier_dataset_name = Path(args.custom_dataset_path).name
+            else:
+                outlier_dataset_name = "valid"
+        
+        # Determine which checkpoints to analyze
+        checkpoints_to_analyze = results
+        if args.outlier_run_name:
+            checkpoints_to_analyze = [r for r in results if r.run_name == args.outlier_run_name]
+            if not checkpoints_to_analyze:
+                print(f"[!] Warning: No checkpoint found with run_name '{args.outlier_run_name}'")
+                print(f"[!] Available run names: {[r.run_name for r in results]}")
+        
+        if checkpoints_to_analyze:
+            for result in checkpoints_to_analyze:
+                try:
+                    runner.analyze_similarity_outliers(
+                        run_name=result.run_name,
+                        dataset_name=outlier_dataset_name,
+                        similarity_type=args.outlier_similarity_type,
+                        k_outliers=5,
+                        k_neighbors=5,
+                        save_plots=True,
+                        analyze_inliers=args.analyze_inliers
+                    )
+                except Exception as e:
+                    print(f"[!] Error analyzing outliers for {result.run_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        else:
+            print("[!] No checkpoints available for outlier analysis")
     
     # Generate report
     reporter = ReportGenerator(args.output_dir)
@@ -2734,7 +4701,7 @@ def main():
     runner.generate_comparison_report_with_images(results, args.report_name + "_comparison")
     
     print(f"\n[+] Evaluation complete!")
-    print(f"[+] Results saved to: {args.output_dir}")
+    print(f"[+] All results saved to timestamped directory: {timestamped_output_dir}")
     print(f"[+] Plots saved to: {runner.plots_dir}")
     print(f"[+] Data saved to: {runner.data_dir_out}")
     print(f"[+] Summary: {args.output_dir}/{args.report_name}_summary.txt")

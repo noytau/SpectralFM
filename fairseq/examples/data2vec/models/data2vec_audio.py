@@ -157,6 +157,10 @@ class Data2VecAudioModel(BaseFairseqModel):
         self.final_proj = nn.Linear(self.embed, self.embed)
 
         self.num_updates = 0
+        
+        # For sanity testing: fixed mask indices range
+        self._fixed_mask_start = None
+        self._fixed_mask_end = None
 
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
@@ -294,20 +298,55 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         if self.mask_prob > 0:
             if mask_indices is None:
-                mask_indices = compute_mask_indices(
-                    (B, T),
-                    padding_mask,
-                    self.mask_prob,
-                    self.mask_length,
-                    self.mask_selection,
-                    self.mask_other,
-                    min_masks=1,
-                    no_overlap=self.no_mask_overlap,
-                    min_space=self.mask_min_space,
-                    require_same_masks=self.cfg.require_same_masks,
-                    mask_dropout=self.cfg.mask_dropout,
-                )
-                mask_indices = torch.from_numpy(mask_indices).to(x.device)
+                # Check if fixed_mask_indices is set (for sanity testing)
+                if hasattr(self, '_fixed_mask_start') and hasattr(self, '_fixed_mask_end'):
+                    # Use fixed mask range to create mask indices
+                    # Import here to avoid circular dependencies
+                    import sys
+                    import os
+                    # Path from fairseq/examples/data2vec/models/ to code/
+                    # Go up: models -> data2vec -> examples -> fairseq -> SpectralFM -> code
+                    base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+                    code_path = os.path.join(base_path, "code")
+                    if code_path not in sys.path and os.path.exists(code_path):
+                        sys.path.insert(0, code_path)
+                    try:
+                        from test_utils import create_fixed_mask_indices
+                        fixed_mask = create_fixed_mask_indices(
+                            B, T, self._fixed_mask_start, self._fixed_mask_end
+                        )
+                        mask_indices = torch.from_numpy(fixed_mask).to(x.device)
+                    except ImportError:
+                        # Fallback: create mask directly if import fails
+                        import numpy as np
+                        mask_start = self._fixed_mask_start
+                        mask_end = self._fixed_mask_end
+                        if T <= mask_start:
+                            fixed_mask = np.zeros((B, T), dtype=bool)
+                        else:
+                            actual_mask_end = min(mask_end, T - 1)
+                            if actual_mask_end < mask_start:
+                                fixed_mask = np.zeros((B, T), dtype=bool)
+                            else:
+                                fixed_mask = np.zeros((B, T), dtype=bool)
+                                fixed_mask[:, mask_start:actual_mask_end + 1] = True
+                        mask_indices = torch.from_numpy(fixed_mask).to(x.device)
+                else:
+                    # Normal random masking
+                    mask_indices = compute_mask_indices(
+                        (B, T),
+                        padding_mask,
+                        self.mask_prob,
+                        self.mask_length,
+                        self.mask_selection,
+                        self.mask_other,
+                        min_masks=1,
+                        no_overlap=self.no_mask_overlap,
+                        min_space=self.mask_min_space,
+                        require_same_masks=self.cfg.require_same_masks,
+                        mask_dropout=self.cfg.mask_dropout,
+                    )
+                    mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x = index_put(x, mask_indices, self.mask_emb)
         else:
             mask_indices = None

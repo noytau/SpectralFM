@@ -483,7 +483,18 @@ def compute_mask_indices(
         else:
             raise ValueError()
 
-        if mask_type == "static":
+        if mask_type == "fixed":
+            # Fixed masking: mask specific index ranges
+            # Ranges: 10-20, 115-140, 205-220, 230-240
+            fixed_ranges = [(10, 20), (115, 140), (205, 220), (230, 240)]
+            mask_idc = []
+            for start, end in fixed_ranges:
+                # end is inclusive, so range should be start to end+1
+                mask_idc.extend(range(start, end + 1))
+            mask_idc = np.asarray(mask_idc)
+            # Filter out indices that are beyond the sequence length
+            mask_idc = mask_idc[mask_idc < sz]
+        elif mask_type == "static":
             lengths = np.full(num_mask, mask_length)
         elif mask_type == "uniform":
             lengths = rng.randint(mask_other, mask_length * 2 + 1, size=num_mask)
@@ -496,59 +507,60 @@ def compute_mask_indices(
         else:
             raise Exception("unknown mask selection " + mask_type)
 
-        if sum(lengths) == 0:
-            if mask_type == "static":
-                raise ValueError(f"this should never happens")
+        if mask_type != "fixed":
+            if sum(lengths) == 0:
+                if mask_type == "static":
+                    raise ValueError(f"this should never happens")
+                else:
+                    lengths = [min(mask_length, sz - 1)]
+
+            if no_overlap:
+                mask_idc = []
+
+                def arrange(s, e, length, keep_length):
+                    span_start = rng.randint(s, e - length)
+                    mask_idc.extend(span_start + i for i in range(length))
+
+                    new_parts = []
+                    if span_start - s - min_space >= keep_length:
+                        new_parts.append((s, span_start - min_space + 1))
+                    if e - span_start - length - min_space > keep_length:
+                        new_parts.append((span_start + length + min_space, e))
+                    return new_parts
+
+                parts = [(0, sz)]
+                min_length = min(lengths)
+                for length in sorted(lengths, reverse=True):
+                    lens = np.fromiter(
+                        (e - s if e - s >= length + min_space else 0 for s, e in parts),
+                        np.int,
+                    )
+                    l_sum = np.sum(lens)
+                    if l_sum == 0:
+                        break
+                    probs = lens / np.sum(lens)
+                    c = rng.choice(len(parts), p=probs)
+                    s, e = parts.pop(c)
+                    parts.extend(arrange(s, e, length, min_length))
+                mask_idc = np.asarray(mask_idc)
             else:
-                lengths = [min(mask_length, sz - 1)]
+                if idc_select_ver == 1:
+                    min_len = min(lengths)
+                    if sz - min_len <= num_mask:
+                        min_len = sz - num_mask - 1
+                    mask_idc = rng.choice(sz - min_len, num_mask, replace=False)
+                elif idc_select_ver == 2:
+                    mask_idc = rng.choice(sz, num_mask, replace=False)
+                else:
+                    raise ValueError()
 
-        if no_overlap:
-            mask_idc = []
-
-            def arrange(s, e, length, keep_length):
-                span_start = rng.randint(s, e - length)
-                mask_idc.extend(span_start + i for i in range(length))
-
-                new_parts = []
-                if span_start - s - min_space >= keep_length:
-                    new_parts.append((s, span_start - min_space + 1))
-                if e - span_start - length - min_space > keep_length:
-                    new_parts.append((span_start + length + min_space, e))
-                return new_parts
-
-            parts = [(0, sz)]
-            min_length = min(lengths)
-            for length in sorted(lengths, reverse=True):
-                lens = np.fromiter(
-                    (e - s if e - s >= length + min_space else 0 for s, e in parts),
-                    np.int,
+                mask_idc = np.asarray(
+                    [
+                        mask_idc[j] + offset
+                        for j in range(len(mask_idc))
+                        for offset in range(lengths[j])
+                    ]
                 )
-                l_sum = np.sum(lens)
-                if l_sum == 0:
-                    break
-                probs = lens / np.sum(lens)
-                c = rng.choice(len(parts), p=probs)
-                s, e = parts.pop(c)
-                parts.extend(arrange(s, e, length, min_length))
-            mask_idc = np.asarray(mask_idc)
-        else:
-            if idc_select_ver == 1:
-                min_len = min(lengths)
-                if sz - min_len <= num_mask:
-                    min_len = sz - num_mask - 1
-                mask_idc = rng.choice(sz - min_len, num_mask, replace=False)
-            elif idc_select_ver == 2:
-                mask_idc = rng.choice(sz, num_mask, replace=False)
-            else:
-                raise ValueError()
-
-            mask_idc = np.asarray(
-                [
-                    mask_idc[j] + offset
-                    for j in range(len(mask_idc))
-                    for offset in range(lengths[j])
-                ]
-            )
 
         mask_idc = np.unique(mask_idc[mask_idc < sz])
         if len(mask_idc) >= sz:
