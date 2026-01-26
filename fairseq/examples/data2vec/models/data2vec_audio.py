@@ -33,6 +33,174 @@ from fairseq.utils import index_put
 
 logger = logging.getLogger(__name__)
 
+# Debug plotting configuration
+_DEBUG_PLOT_DIR = None
+_DEBUG_INPUT_COUNTER = 0
+_DEBUG_PRED_COUNTER = 0
+_DEBUG_INPUT_MAX_SAMPLES = 20
+
+
+def _get_debug_plot_dir():
+    """Get or create the debug plot directory with datetime."""
+    global _DEBUG_PLOT_DIR
+    if _DEBUG_PLOT_DIR is None:
+        import os
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        _DEBUG_PLOT_DIR = f'/mnt5/noy/SpectralFM/code/eval_results/runai_{timestamp}/debug_plots'
+        os.makedirs(_DEBUG_PLOT_DIR, exist_ok=True)
+        print(f"Debug plots will be saved to: {_DEBUG_PLOT_DIR}")
+    return _DEBUG_PLOT_DIR
+
+
+def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after_mask):
+    """
+    Plot input space and masking visualization (4 subplots) for all samples in batch.
+    
+    Args:
+        source: Raw input spectrogram [B, T_raw] or [B, C, T_raw]
+        features_before_mask: Features before masking [B, T, C]
+        mask_indices: Boolean mask [B, T]
+        x_after_mask: Features after masking applied [B, T, C]
+    
+    Runs on first 20 samples total (across all batches).
+    """
+    global _DEBUG_INPUT_COUNTER
+    
+    if _DEBUG_INPUT_COUNTER >= _DEBUG_INPUT_MAX_SAMPLES:
+        return
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    save_dir = _get_debug_plot_dir()
+    input_dir = os.path.join(save_dir, 'input_masking')
+    os.makedirs(input_dir, exist_ok=True)
+    
+    batch_size = source.shape[0]
+    
+    # Loop over all samples in the batch
+    for i in range(batch_size):
+        if _DEBUG_INPUT_COUNTER >= _DEBUG_INPUT_MAX_SAMPLES:
+            return
+        
+        _DEBUG_INPUT_COUNTER += 1
+        sample_id = f'{_DEBUG_INPUT_COUNTER:03d}'
+        
+        # Extract sample i from batch
+        src_np = source[i].detach().cpu().float().numpy()  # [T_raw] or [C, T_raw]
+        feat_before_np = features_before_mask[i].detach().cpu().float().numpy()  # [T, C]
+        feat_after_np = x_after_mask[i].detach().cpu().float().numpy()  # [T, C]
+        m = mask_indices[i].cpu().numpy()  # [T]
+        
+        n_masked = int(m.sum())
+        n_total = len(m)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        
+        # 1. Input spectrogram (1D waveform plot)
+        ax1 = axes[0, 0]
+        if src_np.ndim == 1:
+            ax1.plot(src_np, linewidth=0.5)
+            ax1.set_title(f'Input waveform - length: {len(src_np)}')
+        else:
+            # If 2D, plot as heatmap
+            ax1.imshow(src_np, aspect='auto', cmap='viridis')
+            ax1.set_title(f'Input spectrogram - shape: {src_np.shape}')
+        ax1.set_xlabel('Time')
+        ax1.set_ylabel('Amplitude' if src_np.ndim == 1 else 'Channel')
+        
+        # 2. Features before masking (2D heatmap)
+        ax2 = axes[0, 1]
+        im2 = ax2.imshow(feat_before_np.T, aspect='auto', cmap='viridis')
+        ax2.set_title(f'Features BEFORE mask - shape: {feat_before_np.shape}')
+        ax2.set_xlabel('Time')
+        ax2.set_ylabel('Feature dim')
+        plt.colorbar(im2, ax=ax2)
+        
+        # 3. Mask indicator
+        ax3 = axes[1, 0]
+        ax3.imshow(m.reshape(1, -1), aspect='auto', cmap='Reds', interpolation='nearest')
+        ax3.set_title(f'MASK: {n_masked}/{n_total} positions masked ({100*n_masked/n_total:.1f}%)')
+        ax3.set_yticks([])
+        ax3.set_xlabel('Time')
+        
+        # 4. Features after masking (2D heatmap)
+        ax4 = axes[1, 1]
+        im4 = ax4.imshow(feat_after_np.T, aspect='auto', cmap='viridis')
+        ax4.set_title(f'Features AFTER mask - shape: {feat_after_np.shape}')
+        ax4.set_xlabel('Time')
+        ax4.set_ylabel('Feature dim')
+        plt.colorbar(im4, ax=ax4)
+        
+        plt.tight_layout()
+        save_path = os.path.join(input_dir, f'sample_{sample_id}.png')
+        plt.savefig(save_path, dpi=150)
+        plt.close(fig)
+        
+        print(f"[Input {_DEBUG_INPUT_COUNTER}/{_DEBUG_INPUT_MAX_SAMPLES}] Masked: {n_masked}/{n_total} | saved to {save_path}")
+
+
+def debug_plot_predictions(x_pred, y_target):
+    """
+    Plot prediction comparison (3 subplots: x_pred, y_target, diff).
+    
+    Args:
+        x_pred: Prediction after final_proj [N_masked, C]
+        y_target: EMA target [N_masked, C]
+    
+    Runs on ALL batches (no limit).
+    """
+    global _DEBUG_PRED_COUNTER
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    save_dir = _get_debug_plot_dir()
+    pred_dir = os.path.join(save_dir, 'predictions')
+    os.makedirs(pred_dir, exist_ok=True)
+    
+    _DEBUG_PRED_COUNTER += 1
+    batch_id = f'{_DEBUG_PRED_COUNTER:03d}'
+    
+    # Convert to numpy
+    x_np = x_pred.detach().cpu().float().numpy()  # [N_masked, C]
+    y_np = y_target.detach().cpu().float().numpy()  # [N_masked, C]
+    diff_np = x_np - y_np
+    mse = (diff_np**2).mean()
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # 1. x_pred
+    im1 = axes[0].imshow(x_np.T, aspect='auto', cmap='viridis')
+    axes[0].set_title(f'x_pred - shape: {x_np.shape}')
+    axes[0].set_xlabel('Masked position idx')
+    axes[0].set_ylabel('Feature dim')
+    plt.colorbar(im1, ax=axes[0])
+    
+    # 2. y_target
+    im2 = axes[1].imshow(y_np.T, aspect='auto', cmap='viridis')
+    axes[1].set_title(f'y_target (EMA) - shape: {y_np.shape}')
+    axes[1].set_xlabel('Masked position idx')
+    axes[1].set_ylabel('Feature dim')
+    plt.colorbar(im2, ax=axes[1])
+    
+    # 3. diff
+    im3 = axes[2].imshow(diff_np.T, aspect='auto', cmap='RdBu_r')
+    axes[2].set_title(f'x_pred - y_target | MSE: {mse:.6f}')
+    axes[2].set_xlabel('Masked position idx')
+    axes[2].set_ylabel('Feature dim')
+    plt.colorbar(im3, ax=axes[2])
+    
+    plt.tight_layout()
+    save_path = os.path.join(pred_dir, f'batch_{batch_id}.png')
+    plt.savefig(save_path, dpi=150)
+    plt.close(fig)
+    
+    print(f"[Pred batch {batch_id}] MSE: {mse:.6f} | saved to {save_path}")
+
 
 @dataclass
 class Data2VecAudioConfig(Wav2Vec2Config):
@@ -86,6 +254,22 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=0.01,
         metadata={"help": "stop training if prediction var falls below this"},
     )
+    
+    # Mask saving for loss validation
+    mask_save_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory to save mask indices during training for loss validation"},
+    )
+    
+    # Deterministic masking seed
+    mask_seed: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Base seed for deterministic masking. When set, masks are computed as "
+                    "hash(seed, num_updates, sample_id) ensuring reproducibility across "
+                    "training and evaluation. If None, random masking is used."
+        },
+    )
 
     model_path: Optional[str] = field(default=None)
     skip_pretrained_weights: bool = field(
@@ -133,6 +317,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         self.mask_length = cfg.mask_length
         self.no_mask_overlap = cfg.no_mask_overlap
         self.mask_min_space = cfg.mask_min_space
+        self.mask_seed = cfg.mask_seed  # For deterministic masking
 
         self.mask_channel_prob = cfg.mask_channel_prob
         self.mask_channel_before = cfg.mask_channel_before
@@ -161,6 +346,13 @@ class Data2VecAudioModel(BaseFairseqModel):
         # For sanity testing: fixed mask indices range
         self._fixed_mask_start = None
         self._fixed_mask_end = None
+        
+        # For loss validation: save masks during training
+        self._mask_save_dir = getattr(cfg, 'mask_save_dir', None)
+        if self._mask_save_dir:
+            import os
+            os.makedirs(self._mask_save_dir, exist_ok=True)
+            print(f"[+] Mask saving enabled. Saving to: {self._mask_save_dir}")
 
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
@@ -201,6 +393,9 @@ class Data2VecAudioModel(BaseFairseqModel):
 
     def set_num_updates(self, num_updates):
         super().set_num_updates(num_updates)
+        # #region agent log
+        import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H3-set-num-updates", "location": "data2vec_audio.py:set_num_updates", "message": "set_num_updates called", "data": {"num_updates": num_updates, "ema_was_none": self.ema is None, "final_proj_exists": self.final_proj is not None, "training": self.training}, "timestamp": __import__('time').time()}) + '\n')
+        # #endregion
 
         if self.ema is None and self.final_proj is not None:
             logger.info(f"making ema teacher")
@@ -231,11 +426,17 @@ class Data2VecAudioModel(BaseFairseqModel):
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # #region agent log
+        import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H1-ema-load", "location": "data2vec_audio.py:_load_from_state_dict", "message": "EMA load check", "data": {"ema_exists": self.ema is not None, "ema_key_in_state": (prefix + "_ema") in state_dict}, "timestamp": __import__('time').time()}) + '\n')
+        # #endregion
         if self.ema is not None:
             k = prefix + "_ema"
             assert k in state_dict
             self.ema.restore(state_dict[k], True)
             del state_dict[k]
+            # #region agent log
+            import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H1-ema-load", "location": "data2vec_audio.py:_load_from_state_dict", "message": "EMA restored from checkpoint", "data": {"restored": True}, "timestamp": __import__('time').time()}) + '\n')
+            # #endregion
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @classmethod
@@ -274,8 +475,36 @@ class Data2VecAudioModel(BaseFairseqModel):
         padding_mask,
         mask_indices=None,
         mask_channel_indices=None,
+        sample_indices=None,
     ):
+        """
+        Apply masking to features.
+        
+        Args:
+            x: features tensor of shape (B, T, C)
+            padding_mask: padding mask
+            mask_indices: precomputed mask indices (optional)
+            mask_channel_indices: precomputed channel mask indices (optional)
+            sample_indices: tensor of sample IDs for deterministic masking (optional).
+                           When mask_seed is set and sample_indices is provided,
+                           masks are computed deterministically as hash(seed, num_updates, sample_id).
+        """
         B, T, C = x.shape
+
+        # Prepare deterministic masking parameters if configured
+        seed = None
+        epoch = None
+        indices = None
+        if self.mask_seed is not None and sample_indices is not None:
+            seed = self.mask_seed
+            epoch = self.num_updates
+            indices = sample_indices
+
+        # #region agent log
+        import json
+        is_deterministic = seed is not None
+        open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H1-det-mask", "location": "data2vec_audio.py:apply_mask", "message": "Masking mode", "data": {"is_deterministic": is_deterministic, "mask_seed": self.mask_seed, "sample_indices_provided": sample_indices is not None, "num_updates": self.num_updates, "B": B, "T": T}, "timestamp": __import__('time').time()}) + '\n')
+        # #endregion
 
         if self.mask_channel_prob > 0 and self.mask_channel_before:
             mask_channel_indices = compute_mask_indices(
@@ -287,6 +516,9 @@ class Data2VecAudioModel(BaseFairseqModel):
                 self.mask_channel_other,
                 no_overlap=self.no_mask_channel_overlap,
                 min_space=self.mask_channel_min_space,
+                seed=seed,
+                epoch=epoch,
+                indices=indices,
             )
             mask_channel_indices = (
                 torch.from_numpy(mask_channel_indices)
@@ -298,55 +530,41 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         if self.mask_prob > 0:
             if mask_indices is None:
-                # Check if fixed_mask_indices is set (for sanity testing)
-                if hasattr(self, '_fixed_mask_start') and hasattr(self, '_fixed_mask_end'):
-                    # Use fixed mask range to create mask indices
-                    # Import here to avoid circular dependencies
-                    import sys
+                # Deterministic masking when mask_seed is set, otherwise random
+                mask_indices = compute_mask_indices(
+                    (B, T),
+                    padding_mask,
+                    self.mask_prob,
+                    self.mask_length,
+                    self.mask_selection,
+                    self.mask_other,
+                    min_masks=1,
+                    no_overlap=self.no_mask_overlap,
+                    min_space=self.mask_min_space,
+                    require_same_masks=self.cfg.require_same_masks,
+                    mask_dropout=self.cfg.mask_dropout,
+                    seed=seed,
+                    epoch=epoch,
+                    indices=indices,
+                )
+                mask_indices = torch.from_numpy(mask_indices).to(x.device)
+                
+                # #region agent log
+                mask_sum = mask_indices.sum().item()
+                mask_total = mask_indices.numel()
+                open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H2-mask-stats", "location": "data2vec_audio.py:apply_mask", "message": "Computed mask stats", "data": {"mask_sum": mask_sum, "mask_total": mask_total, "mask_ratio": mask_sum/mask_total if mask_total > 0 else 0, "sample_indices": indices.tolist() if indices is not None else None}, "timestamp": __import__('time').time()}) + '\n')
+                # #endregion
+                
+                # Save masks if mask_save_dir is set (for loss validation)
+                if hasattr(self, '_mask_save_dir') and self._mask_save_dir is not None:
+                    import numpy as np
                     import os
-                    # Path from fairseq/examples/data2vec/models/ to code/
-                    # Go up: models -> data2vec -> examples -> fairseq -> SpectralFM -> code
-                    base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
-                    code_path = os.path.join(base_path, "code")
-                    if code_path not in sys.path and os.path.exists(code_path):
-                        sys.path.insert(0, code_path)
-                    try:
-                        from test_utils import create_fixed_mask_indices
-                        fixed_mask = create_fixed_mask_indices(
-                            B, T, self._fixed_mask_start, self._fixed_mask_end
-                        )
-                        mask_indices = torch.from_numpy(fixed_mask).to(x.device)
-                    except ImportError:
-                        # Fallback: create mask directly if import fails
-                        import numpy as np
-                        mask_start = self._fixed_mask_start
-                        mask_end = self._fixed_mask_end
-                        if T <= mask_start:
-                            fixed_mask = np.zeros((B, T), dtype=bool)
-                        else:
-                            actual_mask_end = min(mask_end, T - 1)
-                            if actual_mask_end < mask_start:
-                                fixed_mask = np.zeros((B, T), dtype=bool)
-                            else:
-                                fixed_mask = np.zeros((B, T), dtype=bool)
-                                fixed_mask[:, mask_start:actual_mask_end + 1] = True
-                        mask_indices = torch.from_numpy(fixed_mask).to(x.device)
-                else:
-                    # Normal random masking
-                    mask_indices = compute_mask_indices(
-                        (B, T),
-                        padding_mask,
-                        self.mask_prob,
-                        self.mask_length,
-                        self.mask_selection,
-                        self.mask_other,
-                        min_masks=1,
-                        no_overlap=self.no_mask_overlap,
-                        min_space=self.mask_min_space,
-                        require_same_masks=self.cfg.require_same_masks,
-                        mask_dropout=self.cfg.mask_dropout,
-                    )
-                    mask_indices = torch.from_numpy(mask_indices).to(x.device)
+                    if not hasattr(self, '_mask_batch_counter'):
+                        self._mask_batch_counter = 0
+                    mask_path = os.path.join(self._mask_save_dir, f"mask_batch_{self._mask_batch_counter:06d}.npy")
+                    np.save(mask_path, mask_indices.cpu().numpy())
+                    self._mask_batch_counter += 1
+            
             x = index_put(x, mask_indices, self.mask_emb)
         else:
             mask_indices = None
@@ -362,6 +580,9 @@ class Data2VecAudioModel(BaseFairseqModel):
                     self.mask_channel_other,
                     no_overlap=self.no_mask_channel_overlap,
                     min_space=self.mask_channel_min_space,
+                    seed=seed,
+                    epoch=epoch,
+                    indices=indices,
                 )
                 mask_channel_indices = (
                     torch.from_numpy(mask_channel_indices)
@@ -400,6 +621,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         mask_indices=None,
         mask_channel_indices=None,
         padding_count=None,
+        sample_indices=None,
     ):
         features = source
 
@@ -448,12 +670,15 @@ class Data2VecAudioModel(BaseFairseqModel):
         features = self.dropout_input(features)
 
         if mask:
+            features_before_mask = features.clone()  # Store for debug plotting
             x, mask_indices = self.apply_mask(
                 features,
                 padding_mask,
                 mask_indices=mask_indices,
                 mask_channel_indices=mask_channel_indices,
+                sample_indices=sample_indices,
             )
+            debug_plot_input_masking(source, features_before_mask, mask_indices, x)
         else:
             x = features
             mask_indices = None
@@ -480,6 +705,9 @@ class Data2VecAudioModel(BaseFairseqModel):
         # However, if optimizer_history is missing or num_updates is not available,
         # EMA might not be initialized. This fallback handles those cases.
         if self.ema is None: 
+            # #region agent log
+            import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H2-ema-fallback", "location": "data2vec_audio.py:forward", "message": "EMA is None in forward - using FALLBACK (fresh EMA)", "data": {"num_updates": self.num_updates, "training": self.training}, "timestamp": __import__('time').time()}) + '\n')
+            # #endregion
             if self.final_proj is None:
                 # Model has been converted for fine-tuning (remove_pretraining_modules called)
                 # EMA is not needed in this case, but forward() should not be called with mask=True
@@ -500,6 +728,12 @@ class Data2VecAudioModel(BaseFairseqModel):
             else:
                 self.ema.model.load_state_dict(self.state_dict())
 
+        # #region agent log
+        import json
+        mask_sum = mask_indices.sum().item() if mask_indices is not None else 0
+        mask_total = mask_indices.numel() if mask_indices is not None else 0
+        open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H5-ema-state", "location": "data2vec_audio.py:forward", "message": "EMA state before computing targets", "data": {"ema_decay": float(self.ema.get_decay()), "model_training": self.training, "num_updates": self.num_updates, "mask_sum": mask_sum, "mask_total": mask_total, "mask_ratio": mask_sum/mask_total if mask_total > 0 else 0}, "timestamp": __import__('time').time()}) + '\n')
+        # #endregion
         with torch.no_grad():
             self.ema.model.eval()
 
@@ -580,11 +814,20 @@ class Data2VecAudioModel(BaseFairseqModel):
             y = y[mask_indices]
 
         x = x[mask_indices]
-        x = self.final_proj(x)
+        x = self.final_proj(x) 
 
         sz = x.size(-1)
 
-        if self.loss_beta == 0:
+        # #region agent log
+        import json
+        x_mean, x_std = float(x.mean().item()), float(x.std().item())
+        y_mean, y_std = float(y.mean().item()), float(y.std().item())
+        open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H8-xy-stats", "location": "data2vec_audio.py:forward", "message": "x and y statistics", "data": {"x_mean": x_mean, "x_std": x_std, "y_mean": y_mean, "y_std": y_std, "x_shape": list(x.shape), "y_shape": list(y.shape)}, "timestamp": __import__('time').time()}) + '\n')
+        # #endregion
+
+        debug_plot_predictions(x, y)
+
+        if self.loss_beta == 0: # fixme noy debug 
             loss = F.mse_loss(x.float(), y.float(), reduction="none").sum(dim=-1)
         else:
             loss = F.smooth_l1_loss(
@@ -597,6 +840,9 @@ class Data2VecAudioModel(BaseFairseqModel):
             scale = 1 / math.sqrt(sz)
 
         result["losses"]["regression"] = loss.sum() * scale
+        # #region agent log
+        import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H4-loss-calc", "location": "data2vec_audio.py:forward", "message": "Loss calculation", "data": {"loss_sum": float(loss.sum().item()), "scale": float(scale), "scaled_loss": float((loss.sum() * scale).item()), "sample_size": int(loss.numel()), "final_loss_per_sample": float((loss.sum() * scale / loss.numel()).item()), "training": self.training}, "timestamp": __import__('time').time()}) + '\n')
+        # #endregion
 
         if "sample_size" not in result:
             result["sample_size"] = loss.numel()
