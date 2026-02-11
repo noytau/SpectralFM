@@ -1104,12 +1104,41 @@ class TransformerEncoder(nn.Module):
             # pos_conv is a Sequential, so we need to handle it carefully
             x_input = x.transpose(1, 2)
             
+            # Find the actual Conv1d layer inside the Sequential (might be wrapped in weight_norm)
+            def find_conv1d(module):
+                if isinstance(module, nn.Conv1d):
+                    return module
+                elif isinstance(module, nn.Sequential):
+                    for submodule in module:
+                        result = find_conv1d(submodule)
+                        if result is not None:
+                            return result
+                elif isinstance(module, nn.BatchNorm1d):
+                    # Skip BatchNorm, continue searching
+                    return None
+                # Check if this is a weight_norm-wrapped Conv1d (weight_norm modifies in place)
+                # A Conv1d with weight_norm will have weight_g and weight_v attributes
+                elif hasattr(module, 'weight_g') and hasattr(module, 'bias') and hasattr(module, 'in_channels'):
+                    # This is likely a weight_norm-wrapped Conv1d, treat it as Conv1d
+                    return module
+                return None
+            
+            conv1d_layer = find_conv1d(self.pos_conv)
+            
             # Get the dtype of pos_conv parameters
-            try:
-                pos_conv_dtype = next(self.pos_conv.parameters()).dtype
-            except StopIteration:
-                # No parameters, use input dtype
-                pos_conv_dtype = x_input.dtype
+            if conv1d_layer is not None:
+                # Get dtype from the actual Conv1d layer
+                if conv1d_layer.bias is not None:
+                    pos_conv_dtype = conv1d_layer.bias.dtype
+                else:
+                    pos_conv_dtype = conv1d_layer.weight.dtype
+            else:
+                # Fallback: try to get dtype from any parameter
+                try:
+                    pos_conv_dtype = next(self.pos_conv.parameters()).dtype
+                except StopIteration:
+                    # No parameters, use input dtype
+                    pos_conv_dtype = x_input.dtype
             
             # For EMA model: keep everything in float32
             if is_ema_model:
@@ -1118,7 +1147,7 @@ class TransformerEncoder(nn.Module):
                 # This will handle the Sequential properly
                 x_conv = self.pos_conv(x_input)
             else:
-                # Standard path: match dtypes
+                # Standard path: match dtypes - ensure input matches the Conv1d's dtype
                 if x_input.dtype != pos_conv_dtype:
                     x_input = x_input.to(dtype=pos_conv_dtype)
                 x_conv = self.pos_conv(x_input)
