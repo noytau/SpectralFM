@@ -807,7 +807,7 @@ class Trainer(object):
                 mask_memory_path = getattr(self.model.cfg, 'mask_memory_save_path', None)
                 # Auto-generate path if not provided
                 if not mask_memory_path:
-                    checkpoint_dir = getattr(self.model.cfg.checkpoint, 'save_dir', None)
+                    checkpoint_dir = getattr(self.cfg.checkpoint, 'save_dir', None)
                     if checkpoint_dir:
                         import os
                         mask_memory_path = os.path.join(checkpoint_dir, 'mask_memory.pt')

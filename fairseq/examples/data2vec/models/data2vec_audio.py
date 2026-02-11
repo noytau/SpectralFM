@@ -320,6 +320,12 @@ class Data2VecAudioConfig(Wav2Vec2Config):
                     "across training and evaluation. If None, random masking is used."
         },
     )
+    
+    # Debug plotting
+    debug_plot_masking: bool = field(
+        default=False,
+        metadata={"help": "If True, enable debug plotting of input masking visualizations. Plots are saved to eval_results/debug_*/input_masking/"},
+    )
 
     model_path: Optional[str] = field(default=None)
     skip_pretrained_weights: bool = field(
@@ -810,7 +816,9 @@ class Data2VecAudioModel(BaseFairseqModel):
                 mask_channel_indices=mask_channel_indices,
                 sample_indices=sample_indices,
             )
-            debug_plot_input_masking(source, features_before_mask, mask_indices, x, sample_indices=sample_indices)  # Enabled for debug
+            # Debug plotting (controlled by config flag)
+            if getattr(self.cfg, 'debug_plot_masking', False):
+                debug_plot_input_masking(source, features_before_mask, mask_indices, x, sample_indices=sample_indices)
         else:
             x = features
             mask_indices = None
