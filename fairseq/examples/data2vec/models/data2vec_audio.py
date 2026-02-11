@@ -578,17 +578,18 @@ class Data2VecAudioModel(BaseFairseqModel):
             padding_mask: padding mask
             mask_indices: precomputed mask indices (optional)
             mask_channel_indices: precomputed channel mask indices (optional)
-            sample_indices: tensor of sample IDs for deterministic masking (optional).
-                           When mask_seed is set and sample_indices is provided,
-                           masks are computed deterministically as hash(seed, 0, sample_id),
-                           ensuring each sample always gets the same mask across train/eval.
+            sample_indices: tensor of sample IDs (optional).
+                           - If mask memory is enabled: used to load/store masks from memory
+                           - If mask_seed is set: used for deterministic masking (and saved to memory if enabled)
+                           - Otherwise: used for mask memory storage if enabled
         """
         B, T, C = x.shape
 
         # Prepare deterministic masking parameters if configured
         # When mask_seed is set, use epoch=0 (fixed) so that each sample always gets
-        # the same mask regardless of when it's processed during training.
+        # the same mask regardless of when it's processed.
         # This ensures: mask = hash(seed, 0, sample_id) is consistent across train/eval.
+        # If mask memory is also enabled, these deterministic masks will be saved to memory.
         seed = None
         epoch = None
         indices = None
@@ -646,7 +647,7 @@ class Data2VecAudioModel(BaseFairseqModel):
                                 logger.warning(
                                     f"Sequence length mismatch for sample {sample_id}: "
                                     f"stored={stored_mask.shape[0]}, current={T}. "
-                                    f"Falling back to seed-based generation."
+                                    f"Falling back to random generation."
                                 )
                                 all_masks_found = False
                                 break
@@ -663,7 +664,8 @@ class Data2VecAudioModel(BaseFairseqModel):
                         use_memory_masks = False
                 
                 if not use_memory_masks:
-                    # Generate masks normally (seed-based or random)
+                    # Generate masks: use seed-based if mask_seed is set, otherwise use random masking
+                    # Note: seed/epoch/indices are already set above based on mask_seed
                     mask_indices = compute_mask_indices(
                         (B, T),
                         padding_mask,
@@ -676,13 +678,14 @@ class Data2VecAudioModel(BaseFairseqModel):
                         min_space=self.mask_min_space,
                         require_same_masks=self.cfg.require_same_masks,
                         mask_dropout=self.cfg.mask_dropout,
-                        seed=seed,
-                        epoch=epoch,
-                        indices=indices,
+                        seed=seed,  # None if mask_seed not set, otherwise uses deterministic masking
+                        epoch=epoch,  # None if mask_seed not set, otherwise uses deterministic masking
+                        indices=indices,  # None if mask_seed not set, otherwise uses deterministic masking
                     )
                     mask_indices = torch.from_numpy(mask_indices).to(x.device)
                     
                     # Store masks in memory if memory is enabled and we're in eval mode
+                    # This saves both deterministic (if mask_seed set) and random masks
                     if (
                         self._use_mask_memory 
                         and sample_indices is not None 
@@ -691,7 +694,11 @@ class Data2VecAudioModel(BaseFairseqModel):
                         for i in range(B):
                             sample_id = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
                             # Store mask on CPU to save memory
+                            # If mask_seed was set, this stores deterministic masks; otherwise random masks
                             self._mask_memory[sample_id] = mask_indices[i].cpu().clone()
+                        # Debug: log first few masks being stored
+                        if len(self._mask_memory) <= 5 or len(self._mask_memory) % 100 == 0:
+                            logger.info(f"[DEBUG] Stored {len(self._mask_memory)} masks in memory (latest: sample_id={sample_id})")
                 
                 # Save masks if mask_save_dir is set (for loss validation)
                 if hasattr(self, '_mask_save_dir') and self._mask_save_dir is not None:
