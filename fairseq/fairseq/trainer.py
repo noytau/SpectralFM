@@ -787,8 +787,36 @@ class Trainer(object):
     def begin_valid_epoch(self, epoch):
         """Called at the beginning of each validation epoch."""
 
+        # Enable mask memory if model supports it and save_mask_memory flag is set
+        # This allows storing masks during validation for later reuse in evaluation
+        if hasattr(self.model, 'enable_mask_memory') and hasattr(self.model, 'cfg'):
+            save_mask_memory = getattr(self.model.cfg, 'save_mask_memory', False)
+            if save_mask_memory:
+                self.model.enable_mask_memory()
+                logger.info("[+] Mask memory enabled for validation epoch")
+
         # task specific setup per validation epoch
         self.task.begin_valid_epoch(epoch, self.get_model())
+    
+    def end_valid_epoch(self):
+        """Called at the end of validation epoch."""
+        # Save mask memory if model supports it and save_mask_memory flag is enabled
+        if hasattr(self.model, 'save_mask_memory') and hasattr(self.model, 'cfg'):
+            save_mask_memory = getattr(self.model.cfg, 'save_mask_memory', False)
+            if save_mask_memory:
+                mask_memory_path = getattr(self.model.cfg, 'mask_memory_save_path', None)
+                # Auto-generate path if not provided
+                if not mask_memory_path:
+                    checkpoint_dir = getattr(self.model.cfg.checkpoint, 'save_dir', None)
+                    if checkpoint_dir:
+                        import os
+                        mask_memory_path = os.path.join(checkpoint_dir, 'mask_memory.pt')
+                    else:
+                        logger.warning("[!] save_mask_memory=True but no mask_memory_save_path or checkpoint.save_dir found")
+                        return
+                
+                self.model.save_mask_memory(mask_memory_path)
+                logger.info(f"[+] Mask memory saved to {mask_memory_path}")
 
     def reset_dummy_batch(self, batch):
         self._dummy_batch = batch

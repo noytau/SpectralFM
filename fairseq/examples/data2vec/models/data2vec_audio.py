@@ -6,7 +6,7 @@
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict
 
 from omegaconf import II
 
@@ -35,25 +35,52 @@ logger = logging.getLogger(__name__)
 
 # Debug plotting configuration
 _DEBUG_PLOT_DIR = None
+_DEBUG_PLOT_MODE = None  # 'train' or 'eval'
 _DEBUG_INPUT_COUNTER = 0
 _DEBUG_PRED_COUNTER = 0
 _DEBUG_INPUT_MAX_SAMPLES = 20
 
 
+def set_debug_plot_mode(mode: str, output_dir: str = None):
+    """Set the debug plotting mode and optionally custom output directory.
+    
+    Args:
+        mode: 'train' or 'eval' - this creates a subdirectory
+        output_dir: Optional custom base directory. If None, uses default.
+    """
+    global _DEBUG_PLOT_DIR, _DEBUG_PLOT_MODE, _DEBUG_INPUT_COUNTER, _DEBUG_PRED_COUNTER
+    import os
+    from datetime import datetime
+    
+    _DEBUG_PLOT_MODE = mode
+    _DEBUG_INPUT_COUNTER = 0
+    _DEBUG_PRED_COUNTER = 0
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if output_dir:
+        _DEBUG_PLOT_DIR = os.path.join(output_dir, f'debug_plots_{mode}_{timestamp}')
+    else:
+        _DEBUG_PLOT_DIR = f'/mnt5/noy/SpectralFM/code/eval_results/debug_{mode}_{timestamp}'
+    
+    os.makedirs(_DEBUG_PLOT_DIR, exist_ok=True)
+    print(f"Debug plots ({mode}) will be saved to: {_DEBUG_PLOT_DIR}")
+
+
 def _get_debug_plot_dir():
     """Get or create the debug plot directory with datetime."""
-    global _DEBUG_PLOT_DIR
+    global _DEBUG_PLOT_DIR, _DEBUG_PLOT_MODE
     if _DEBUG_PLOT_DIR is None:
         import os
         from datetime import datetime
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        _DEBUG_PLOT_DIR = f'/mnt5/noy/SpectralFM/code/eval_results/runai_{timestamp}/debug_plots'
+        mode = _DEBUG_PLOT_MODE or 'unknown'
+        _DEBUG_PLOT_DIR = f'/mnt5/noy/SpectralFM/code/eval_results/debug_{mode}_{timestamp}'
         os.makedirs(_DEBUG_PLOT_DIR, exist_ok=True)
         print(f"Debug plots will be saved to: {_DEBUG_PLOT_DIR}")
     return _DEBUG_PLOT_DIR
 
 
-def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after_mask):
+def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after_mask, sample_indices=None):
     """
     Plot input space and masking visualization (4 subplots) for all samples in batch.
     
@@ -62,6 +89,7 @@ def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after
         features_before_mask: Features before masking [B, T, C]
         mask_indices: Boolean mask [B, T]
         x_after_mask: Features after masking applied [B, T, C]
+        sample_indices: Optional tensor of dataset sample indices [B]
     
     Runs on first 20 samples total (across all batches).
     """
@@ -86,7 +114,12 @@ def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after
             return
         
         _DEBUG_INPUT_COUNTER += 1
-        sample_id = f'{_DEBUG_INPUT_COUNTER:03d}'
+        # Use actual sample index from dataset if available, otherwise use counter
+        if sample_indices is not None:
+            dataset_idx = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
+            sample_id = f'idx{dataset_idx:04d}'
+        else:
+            sample_id = f'seq{_DEBUG_INPUT_COUNTER:03d}'
         
         # Extract sample i from batch
         src_np = source[i].detach().cpu().float().numpy()  # [T_raw] or [C, T_raw]
@@ -134,12 +167,18 @@ def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after
         ax4.set_ylabel('Feature dim')
         plt.colorbar(im4, ax=ax4)
         
+        # Add title with sample index
+        if sample_indices is not None:
+            dataset_idx = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
+            fig.suptitle(f'Sample: Dataset Index {dataset_idx}', fontsize=14, fontweight='bold')
+        
         plt.tight_layout()
         save_path = os.path.join(input_dir, f'sample_{sample_id}.png')
         plt.savefig(save_path, dpi=150)
         plt.close(fig)
         
-        print(f"[Input {_DEBUG_INPUT_COUNTER}/{_DEBUG_INPUT_MAX_SAMPLES}] Masked: {n_masked}/{n_total} | saved to {save_path}")
+        idx_info = f" (dataset_idx={dataset_idx})" if sample_indices is not None else ""
+        print(f"[Input {_DEBUG_INPUT_COUNTER}/{_DEBUG_INPUT_MAX_SAMPLES}] Masked: {n_masked}/{n_total}{idx_info} | saved to {save_path}")
 
 
 def debug_plot_predictions(x_pred, y_target):
@@ -261,13 +300,24 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         metadata={"help": "Directory to save mask indices during training for loss validation"},
     )
     
+    # Mask memory saving (for fixed masking experiments)
+    save_mask_memory: bool = field(
+        default=False,
+        metadata={"help": "If True, enable mask memory saving during validation. Masks will be stored and saved for later reuse in evaluation."},
+    )
+    
+    mask_memory_save_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to save mask memory after validation. If save_mask_memory=True and this is None, will auto-generate path based on checkpoint.save_dir."},
+    )
+    
     # Deterministic masking seed
     mask_seed: Optional[int] = field(
         default=None,
         metadata={
             "help": "Base seed for deterministic masking. When set, masks are computed as "
-                    "hash(seed, num_updates, sample_id) ensuring reproducibility across "
-                    "training and evaluation. If None, random masking is used."
+                    "hash(seed, 0, sample_id), ensuring each sample always gets the same mask "
+                    "across training and evaluation. If None, random masking is used."
         },
     )
 
@@ -353,6 +403,10 @@ class Data2VecAudioModel(BaseFairseqModel):
             import os
             os.makedirs(self._mask_save_dir, exist_ok=True)
             print(f"[+] Mask saving enabled. Saving to: {self._mask_save_dir}")
+        
+        # For fixed masking memory: store masks keyed by sample ID
+        self._mask_memory: Dict[int, torch.Tensor] = {}
+        self._use_mask_memory: bool = False
 
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
@@ -367,6 +421,48 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         print("[INFO] ONLY feature extractor is trainable")
         logger.info("[INFO] ONLY feature extractor is trainable")
+
+    def enable_mask_memory(self):
+        """Enable mask memory mode - masks will be stored and reused."""
+        self._use_mask_memory = True
+        logger.info("[+] Mask memory enabled")
+
+    def disable_mask_memory(self):
+        """Disable mask memory mode - masks will be generated normally."""
+        self._use_mask_memory = False
+        logger.info("[+] Mask memory disabled")
+
+    def clear_mask_memory(self):
+        """Clear all stored masks from memory."""
+        self._mask_memory.clear()
+        logger.info("[+] Mask memory cleared")
+
+    def save_mask_memory(self, path: str):
+        """Save mask memory to disk."""
+        import os
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        # Convert tensors to CPU and numpy for serialization
+        mask_memory_np = {
+            sample_id: mask.cpu().numpy() 
+            for sample_id, mask in self._mask_memory.items()
+        }
+        torch.save(mask_memory_np, path)
+        logger.info(f"[+] Saved {len(self._mask_memory)} masks to {path}")
+
+    def load_mask_memory(self, path: str):
+        """Load mask memory from disk."""
+        import os
+        if not os.path.exists(path):
+            logger.warning(f"[!] Mask memory file not found: {path}")
+            return False
+        mask_memory_np = torch.load(path, map_location='cpu')
+        # Convert numpy arrays back to tensors
+        self._mask_memory = {
+            sample_id: torch.from_numpy(mask) 
+            for sample_id, mask in mask_memory_np.items()
+        }
+        logger.info(f"[+] Loaded {len(self._mask_memory)} masks from {path}")
+        return True
 
     def load_model_weights(self, state, model, cfg):
         if "_ema" in state["model"]:
@@ -393,9 +489,6 @@ class Data2VecAudioModel(BaseFairseqModel):
 
     def set_num_updates(self, num_updates):
         super().set_num_updates(num_updates)
-        # #region agent log
-        import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H3-set-num-updates", "location": "data2vec_audio.py:set_num_updates", "message": "set_num_updates called", "data": {"num_updates": num_updates, "ema_was_none": self.ema is None, "final_proj_exists": self.final_proj is not None, "training": self.training}, "timestamp": __import__('time').time()}) + '\n')
-        # #endregion
 
         if self.ema is None and self.final_proj is not None:
             logger.info(f"making ema teacher")
@@ -426,17 +519,11 @@ class Data2VecAudioModel(BaseFairseqModel):
         return state
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        # #region agent log
-        import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H1-ema-load", "location": "data2vec_audio.py:_load_from_state_dict", "message": "EMA load check", "data": {"ema_exists": self.ema is not None, "ema_key_in_state": (prefix + "_ema") in state_dict}, "timestamp": __import__('time').time()}) + '\n')
-        # #endregion
         if self.ema is not None:
             k = prefix + "_ema"
             assert k in state_dict
             self.ema.restore(state_dict[k], True)
             del state_dict[k]
-            # #region agent log
-            import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H1-ema-load", "location": "data2vec_audio.py:_load_from_state_dict", "message": "EMA restored from checkpoint", "data": {"restored": True}, "timestamp": __import__('time').time()}) + '\n')
-            # #endregion
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @classmethod
@@ -487,24 +574,22 @@ class Data2VecAudioModel(BaseFairseqModel):
             mask_channel_indices: precomputed channel mask indices (optional)
             sample_indices: tensor of sample IDs for deterministic masking (optional).
                            When mask_seed is set and sample_indices is provided,
-                           masks are computed deterministically as hash(seed, num_updates, sample_id).
+                           masks are computed deterministically as hash(seed, 0, sample_id),
+                           ensuring each sample always gets the same mask across train/eval.
         """
         B, T, C = x.shape
 
         # Prepare deterministic masking parameters if configured
+        # When mask_seed is set, use epoch=0 (fixed) so that each sample always gets
+        # the same mask regardless of when it's processed during training.
+        # This ensures: mask = hash(seed, 0, sample_id) is consistent across train/eval.
         seed = None
         epoch = None
         indices = None
         if self.mask_seed is not None and sample_indices is not None:
             seed = self.mask_seed
-            epoch = self.num_updates
+            epoch = 0  # Fixed epoch ensures same sample always gets same mask
             indices = sample_indices
-
-        # #region agent log
-        import json
-        is_deterministic = seed is not None
-        open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H1-det-mask", "location": "data2vec_audio.py:apply_mask", "message": "Masking mode", "data": {"is_deterministic": is_deterministic, "mask_seed": self.mask_seed, "sample_indices_provided": sample_indices is not None, "num_updates": self.num_updates, "B": B, "T": T}, "timestamp": __import__('time').time()}) + '\n')
-        # #endregion
 
         if self.mask_channel_prob > 0 and self.mask_channel_before:
             mask_channel_indices = compute_mask_indices(
@@ -530,30 +615,77 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         if self.mask_prob > 0:
             if mask_indices is None:
-                # Deterministic masking when mask_seed is set, otherwise random
-                mask_indices = compute_mask_indices(
-                    (B, T),
-                    padding_mask,
-                    self.mask_prob,
-                    self.mask_length,
-                    self.mask_selection,
-                    self.mask_other,
-                    min_masks=1,
-                    no_overlap=self.no_mask_overlap,
-                    min_space=self.mask_min_space,
-                    require_same_masks=self.cfg.require_same_masks,
-                    mask_dropout=self.cfg.mask_dropout,
-                    seed=seed,
-                    epoch=epoch,
-                    indices=indices,
+                # Check mask memory first if enabled and sample_indices are provided
+                use_memory_masks = (
+                    self._use_mask_memory 
+                    and sample_indices is not None 
+                    and not self.training  # Only use memory in eval mode
                 )
-                mask_indices = torch.from_numpy(mask_indices).to(x.device)
                 
-                # #region agent log
-                mask_sum = mask_indices.sum().item()
-                mask_total = mask_indices.numel()
-                open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H2-mask-stats", "location": "data2vec_audio.py:apply_mask", "message": "Computed mask stats", "data": {"mask_sum": mask_sum, "mask_total": mask_total, "mask_ratio": mask_sum/mask_total if mask_total > 0 else 0, "sample_indices": indices.tolist() if indices is not None else None}, "timestamp": __import__('time').time()}) + '\n')
-                # #endregion
+                if use_memory_masks:
+                    # Try to load masks from memory
+                    mask_indices_list = []
+                    all_masks_found = True
+                    
+                    for i in range(B):
+                        sample_id = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
+                        
+                        if sample_id in self._mask_memory:
+                            stored_mask = self._mask_memory[sample_id]
+                            # Handle sequence length differences
+                            if stored_mask.shape[0] == T:
+                                mask_indices_list.append(stored_mask)
+                            else:
+                                # Sequence length mismatch - fall back to generation
+                                logger.warning(
+                                    f"Sequence length mismatch for sample {sample_id}: "
+                                    f"stored={stored_mask.shape[0]}, current={T}. "
+                                    f"Falling back to seed-based generation."
+                                )
+                                all_masks_found = False
+                                break
+                        else:
+                            # Mask not found in memory - fall back to generation
+                            all_masks_found = False
+                            break
+                    
+                    if all_masks_found and len(mask_indices_list) == B:
+                        # All masks found in memory - stack them
+                        mask_indices = torch.stack(mask_indices_list).to(x.device)
+                    else:
+                        # Fall back to normal generation
+                        use_memory_masks = False
+                
+                if not use_memory_masks:
+                    # Generate masks normally (seed-based or random)
+                    mask_indices = compute_mask_indices(
+                        (B, T),
+                        padding_mask,
+                        self.mask_prob,
+                        self.mask_length,
+                        self.mask_selection,
+                        self.mask_other,
+                        min_masks=1,
+                        no_overlap=self.no_mask_overlap,
+                        min_space=self.mask_min_space,
+                        require_same_masks=self.cfg.require_same_masks,
+                        mask_dropout=self.cfg.mask_dropout,
+                        seed=seed,
+                        epoch=epoch,
+                        indices=indices,
+                    )
+                    mask_indices = torch.from_numpy(mask_indices).to(x.device)
+                    
+                    # Store masks in memory if memory is enabled and we're in eval mode
+                    if (
+                        self._use_mask_memory 
+                        and sample_indices is not None 
+                        and not self.training
+                    ):
+                        for i in range(B):
+                            sample_id = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
+                            # Store mask on CPU to save memory
+                            self._mask_memory[sample_id] = mask_indices[i].cpu().clone()
                 
                 # Save masks if mask_save_dir is set (for loss validation)
                 if hasattr(self, '_mask_save_dir') and self._mask_save_dir is not None:
@@ -678,7 +810,7 @@ class Data2VecAudioModel(BaseFairseqModel):
                 mask_channel_indices=mask_channel_indices,
                 sample_indices=sample_indices,
             )
-            debug_plot_input_masking(source, features_before_mask, mask_indices, x)
+            debug_plot_input_masking(source, features_before_mask, mask_indices, x, sample_indices=sample_indices)  # Enabled for debug
         else:
             x = features
             mask_indices = None
@@ -705,9 +837,6 @@ class Data2VecAudioModel(BaseFairseqModel):
         # However, if optimizer_history is missing or num_updates is not available,
         # EMA might not be initialized. This fallback handles those cases.
         if self.ema is None: 
-            # #region agent log
-            import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H2-ema-fallback", "location": "data2vec_audio.py:forward", "message": "EMA is None in forward - using FALLBACK (fresh EMA)", "data": {"num_updates": self.num_updates, "training": self.training}, "timestamp": __import__('time').time()}) + '\n')
-            # #endregion
             if self.final_proj is None:
                 # Model has been converted for fine-tuning (remove_pretraining_modules called)
                 # EMA is not needed in this case, but forward() should not be called with mask=True
@@ -728,12 +857,6 @@ class Data2VecAudioModel(BaseFairseqModel):
             else:
                 self.ema.model.load_state_dict(self.state_dict())
 
-        # #region agent log
-        import json
-        mask_sum = mask_indices.sum().item() if mask_indices is not None else 0
-        mask_total = mask_indices.numel() if mask_indices is not None else 0
-        open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H5-ema-state", "location": "data2vec_audio.py:forward", "message": "EMA state before computing targets", "data": {"ema_decay": float(self.ema.get_decay()), "model_training": self.training, "num_updates": self.num_updates, "mask_sum": mask_sum, "mask_total": mask_total, "mask_ratio": mask_sum/mask_total if mask_total > 0 else 0}, "timestamp": __import__('time').time()}) + '\n')
-        # #endregion
         with torch.no_grad():
             self.ema.model.eval()
 
@@ -814,18 +937,11 @@ class Data2VecAudioModel(BaseFairseqModel):
             y = y[mask_indices]
 
         x = x[mask_indices]
-        x = self.final_proj(x) 
+        x = self.final_proj(x)
 
         sz = x.size(-1)
 
-        # #region agent log
-        import json
-        x_mean, x_std = float(x.mean().item()), float(x.std().item())
-        y_mean, y_std = float(y.mean().item()), float(y.std().item())
-        open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H8-xy-stats", "location": "data2vec_audio.py:forward", "message": "x and y statistics", "data": {"x_mean": x_mean, "x_std": x_std, "y_mean": y_mean, "y_std": y_std, "x_shape": list(x.shape), "y_shape": list(y.shape)}, "timestamp": __import__('time').time()}) + '\n')
-        # #endregion
-
-        debug_plot_predictions(x, y)
+        debug_plot_predictions(x, y)  # Enabled for debug
 
         if self.loss_beta == 0: # fixme noy debug 
             loss = F.mse_loss(x.float(), y.float(), reduction="none").sum(dim=-1)
@@ -840,9 +956,6 @@ class Data2VecAudioModel(BaseFairseqModel):
             scale = 1 / math.sqrt(sz)
 
         result["losses"]["regression"] = loss.sum() * scale
-        # #region agent log
-        import json; open('/mnt5/noy/SpectralFM/.cursor/debug.log', 'a').write(json.dumps({"hypothesisId": "H4-loss-calc", "location": "data2vec_audio.py:forward", "message": "Loss calculation", "data": {"loss_sum": float(loss.sum().item()), "scale": float(scale), "scaled_loss": float((loss.sum() * scale).item()), "sample_size": int(loss.numel()), "final_loss_per_sample": float((loss.sum() * scale / loss.numel()).item()), "training": self.training}, "timestamp": __import__('time').time()}) + '\n')
-        # #endregion
 
         if "sample_size" not in result:
             result["sample_size"] = loss.numel()

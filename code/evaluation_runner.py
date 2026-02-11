@@ -32,6 +32,8 @@ import logging
 # Suppress torchaudio/torio FFmpeg extension loading warnings
 # These are non-critical - torchaudio will fall back to available FFmpeg versions
 logging.getLogger("torio._extension.utils").setLevel(logging.ERROR)
+logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
+logging.getLogger("fairseq.trainer").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", message=".*FFmpeg.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*libavutil.*", category=UserWarning)
 
@@ -1034,14 +1036,17 @@ class EvaluationRunner:
         # Note: model.eval() is handled by fairseq's trainer.valid_step() during validation
         model, device = self._prepare_model_for_eval(model, cfg)
         
-        # Run validation_loss twice: once on sanity (training) dataset and once on eval dataset
-        print("[+] Running validation loss evaluation on sanity dataset (training data)...")
-        sanity_metrics = self._eval_validation_loss(model, cfg, split="sanity", eval_data_dir=None, debug=False)
-        metrics.update({f"sanity_{k}": v for k, v in sanity_metrics.items()})
-        
-        print("[+] Running validation loss evaluation on eval dataset...")
-        eval_metrics = self._eval_validation_loss(model, cfg, split="valid", eval_data_dir=eval_data_dir, debug=False)
-        metrics.update({f"eval_{k}": v for k, v in eval_metrics.items()})
+        # Run validation_loss only if it's in eval_methods
+        if "validation_loss" in eval_methods:
+            print("[+] Running validation loss evaluation on sanity dataset (training data)...")
+            sanity_metrics = self._eval_validation_loss(model, cfg, split="sanity", eval_data_dir=None, debug=False, checkpoint_path=checkpoint_info.path)
+            metrics.update({f"sanity_{k}": v for k, v in sanity_metrics.items()})
+            
+            print("[+] Running validation loss evaluation on eval dataset...")
+            eval_metrics = self._eval_validation_loss(model, cfg, split="valid", eval_data_dir=eval_data_dir, debug=False, checkpoint_path=checkpoint_info.path)
+            metrics.update({f"eval_{k}": v for k, v in eval_metrics.items()})
+        else:
+            print("[+] Skipping validation loss evaluation (not in eval_methods)")
         
         # Load samples for embedding extraction
         # Use pre-loaded samples if provided (for consistent evaluation across checkpoints)
@@ -2050,6 +2055,10 @@ class EvaluationRunner:
             scores_key = f'embedding_similarity_scores_{dataset_name}'
             self.eval_data[run_name][scores_key] = emb_sims
             
+            # Store input similarity scores for later histogram comparison
+            input_scores_key = f'input_similarity_scores_{dataset_name}'
+            self.eval_data[run_name][input_scores_key] = input_sims
+            
             # Store embeddings with dataset_name in key for side-by-side comparison plots
             embeddings_key = f'embeddings_{run_name}_{dataset_name}'
             self.eval_data[embeddings_key] = embeddings
@@ -2061,6 +2070,10 @@ class EvaluationRunner:
             # Save to numpy file for persistence (include dataset_name in filename)
             scores_path = self.data_dir_out / f"embedding_similarity_scores_{run_name}_{dataset_name}.npy"
             np.save(scores_path, emb_sims)
+            
+            # Save input similarity scores to numpy file
+            input_scores_path = self.data_dir_out / f"input_similarity_scores_{run_name}_{dataset_name}.npy"
+            np.save(input_scores_path, input_sims)
             
             # Also save embeddings for later use
             embeddings_path = self.data_dir_out / f"embeddings_{run_name}_{dataset_name}.npy"
@@ -2532,7 +2545,8 @@ class EvaluationRunner:
     
     def _eval_validation_loss(self, model, cfg, split: str = "valid", 
                              eval_data_dir: Optional[str] = None, 
-                             debug: bool = False) -> Dict[str, float]:
+                             debug: bool = False,
+                             checkpoint_path: Optional[str] = None) -> Dict[str, float]:
         """
         Evaluate the model using trainer.valid_step (same as train.py's validate function).
         
@@ -2546,6 +2560,7 @@ class EvaluationRunner:
             split: "sanity" (train split) or "valid" (valid split or eval_data_dir)
             eval_data_dir: Optional override for eval dataset path (only used when split="valid")
             debug: Debug flag for verbose output (default: False)
+            checkpoint_path: Optional path to checkpoint file (used to resolve mask_memory_save_path)
         
         Returns:
             Dict with validation loss metrics
@@ -2563,6 +2578,29 @@ class EvaluationRunner:
         
         print(f"[+] Evaluating validation loss on {split_display}...")
         
+        # Load mask memory if validating sanity loss (for fixed masking experiments)
+        if split == "sanity" and hasattr(model, 'load_mask_memory') and hasattr(cfg.model, 'mask_memory_save_path'):
+            mask_memory_path = cfg.model.mask_memory_save_path
+            if mask_memory_path:
+                mask_memory_path_str = str(mask_memory_path)
+                # Try to find mask memory file relative to checkpoint directory
+                if checkpoint_path:
+                    checkpoint_dir = Path(checkpoint_path).parent
+                    # Try absolute path first, then relative to checkpoint dir
+                    if not os.path.exists(mask_memory_path_str):
+                        mask_memory_path_str = str(checkpoint_dir.parent / Path(mask_memory_path_str).name)
+                
+                if os.path.exists(mask_memory_path_str):
+                    success = model.load_mask_memory(mask_memory_path_str)
+                    if success:
+                        model.enable_mask_memory()
+                        print(f"[+] Loaded mask memory for sanity validation from {mask_memory_path_str} ({len(model._mask_memory)} masks)")
+                    else:
+                        print(f"[!] Failed to load mask memory from {mask_memory_path_str}")
+                else:
+                    print(f"[!] Mask memory file not found: {mask_memory_path_str}")
+                    print(f"[!] Will use seed-based masking instead")
+        
         try:
             # Load dataset - use eval_data_dir only for "valid" split
             task, _, dataset = self.load_eval_dataset_fairseq(
@@ -2574,7 +2612,7 @@ class EvaluationRunner:
             # load_eval_dataset_fairseq handles fallback internally, so we use fairseq_split directly
             validation_split = fairseq_split
             
-            criterion = task.build_criterion(cfg.criterion)
+            criterion = task.build_criterion(cfg.criterion) # fixme do I need this if calling already to criterion? 
 
             # Ensure model is on the correct device
             use_cuda = torch.cuda.is_available() and not getattr(cfg.common, 'cpu', False)
@@ -3360,10 +3398,11 @@ class EvaluationRunner:
                                                        dataset_name: str = "valid",
                                                        save_plots: bool = True):
         """
-        Plot histogram comparison of embedding similarity scores across checkpoints.
+        Plot histogram comparison of embedding and input similarity scores across checkpoints.
         
         Creates side-by-side histograms showing the distribution of pairwise cosine
-        similarity scores for each checkpoint, allowing comparison of similarity patterns.
+        similarity scores for both input space and embedding space for each checkpoint,
+        allowing comparison of similarity patterns.
         
         Args:
             results: List of EvalResult objects from multiple checkpoints
@@ -3375,20 +3414,24 @@ class EvaluationRunner:
             return
         
         # Collect similarity scores for each result
-        similarity_scores_list = []
+        emb_similarity_scores_list = []
+        input_similarity_scores_list = []
         run_names = []
         best_losses = []
         
         for r in results:
             run_name = r.run_name
             
-            # Try to load similarity scores from eval_data or numpy file
+            # Try to load embedding similarity scores from eval_data or numpy file
             emb_sims = None
+            input_sims = None
             
             # First try eval_data (in-memory) with dataset_name
-            scores_key = f'embedding_similarity_scores_{dataset_name}'
-            if run_name in self.eval_data and scores_key in self.eval_data[run_name]:
-                emb_sims = self.eval_data[run_name][scores_key]
+            emb_scores_key = f'embedding_similarity_scores_{dataset_name}'
+            input_scores_key = f'input_similarity_scores_{dataset_name}'
+            
+            if run_name in self.eval_data and emb_scores_key in self.eval_data[run_name]:
+                emb_sims = self.eval_data[run_name][emb_scores_key]
             else:
                 # Try loading from numpy file (include dataset_name in filename)
                 scores_path = self.data_dir_out / f"embedding_similarity_scores_{run_name}_{dataset_name}.npy"
@@ -3396,43 +3439,64 @@ class EvaluationRunner:
                     try:
                         emb_sims = np.load(scores_path)
                     except Exception as e:
-                        print(f"[!] Warning: Could not load similarity scores for {run_name}: {e}")
+                        print(f"[!] Warning: Could not load embedding similarity scores for {run_name}: {e}")
+            
+            # Try to load input similarity scores
+            if run_name in self.eval_data and input_scores_key in self.eval_data[run_name]:
+                input_sims = self.eval_data[run_name][input_scores_key]
+            else:
+                # Try loading from numpy file
+                input_scores_path = self.data_dir_out / f"input_similarity_scores_{run_name}_{dataset_name}.npy"
+                if input_scores_path.exists():
+                    try:
+                        input_sims = np.load(input_scores_path)
+                    except Exception as e:
+                        print(f"[!] Warning: Could not load input similarity scores for {run_name}: {e}")
             
             if emb_sims is not None and len(emb_sims) > 0:
-                similarity_scores_list.append(emb_sims)
+                emb_similarity_scores_list.append(emb_sims)
+                input_similarity_scores_list.append(input_sims)  # May be None
                 run_names.append(run_name)
                 best_loss = r.metrics.get("best_loss")
                 best_losses.append(best_loss)
             else:
-                print(f"[!] Warning: No similarity scores found for {run_name} on dataset {dataset_name}, skipping histogram")
+                print(f"[!] Warning: No embedding similarity scores found for {run_name} on dataset {dataset_name}, skipping histogram")
         
-        if not similarity_scores_list:
+        if not emb_similarity_scores_list:
             print("[!] No similarity scores available for histogram comparison")
             return
         
         # Determine subplot layout (1 row, N columns)
-        n_checkpoints = len(similarity_scores_list)
-        fig, axes = plt.subplots(1, n_checkpoints, figsize=(5 * n_checkpoints, 5))
+        n_checkpoints = len(emb_similarity_scores_list)
+        fig, axes = plt.subplots(1, n_checkpoints, figsize=(5 * n_checkpoints, 6))
         if n_checkpoints == 1:
             axes = [axes]
         
         # Determine consistent bins across all histograms for fair comparison
-        all_scores = np.concatenate(similarity_scores_list)
         bins = np.linspace(0, 1, 31)  # 30 bins from 0 to 1
         
         # Create histogram for each checkpoint
-        for i, (emb_sims, run_name, best_loss) in enumerate(zip(similarity_scores_list, run_names, best_losses)):
-            # Calculate statistics
-            mean_sim = float(np.mean(emb_sims))
-            std_sim = float(np.std(emb_sims))
-            median_sim = float(np.median(emb_sims))
+        for i, (emb_sims, input_sims, run_name, best_loss) in enumerate(
+            zip(emb_similarity_scores_list, input_similarity_scores_list, run_names, best_losses)):
             
-            # Create histogram
-            axes[i].hist(emb_sims, bins=bins, alpha=0.7, edgecolor='black', linewidth=0.5)
+            # Calculate embedding statistics
+            emb_mean = float(np.mean(emb_sims))
+            emb_std = float(np.std(emb_sims))
             
-            # Add vertical lines for mean and median
-            axes[i].axvline(mean_sim, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_sim:.3f}')
-            axes[i].axvline(median_sim, color='blue', linestyle='--', linewidth=2, label=f'Median: {median_sim:.3f}')
+            # Plot input histogram first (if available) so embedding is on top
+            if input_sims is not None and len(input_sims) > 0:
+                input_mean = float(np.mean(input_sims))
+                input_std = float(np.std(input_sims))
+                axes[i].hist(input_sims, bins=bins, alpha=0.5, color='orange', 
+                           edgecolor='darkorange', linewidth=0.5,
+                           label=f'Input (μ={input_mean:.3f}, σ={input_std:.3f})')
+                axes[i].axvline(input_mean, color='darkorange', linestyle=':', linewidth=2)
+            
+            # Plot embedding histogram
+            axes[i].hist(emb_sims, bins=bins, alpha=0.6, color='steelblue',
+                        edgecolor='darkblue', linewidth=0.5,
+                        label=f'Embedding (μ={emb_mean:.3f}, σ={emb_std:.3f})')
+            axes[i].axvline(emb_mean, color='darkblue', linestyle='--', linewidth=2)
             
             # Set labels and title
             axes[i].set_xlabel('Cosine Similarity', fontsize=11)
@@ -3443,14 +3507,13 @@ class EvaluationRunner:
             title = run_name
             if best_loss is not None:
                 title += f"\n(loss: {best_loss:.3f})"
-            title += f"\nmean={mean_sim:.3f}, std={std_sim:.3f}"
             axes[i].set_title(title, fontsize=10, fontweight='bold')
             
             axes[i].set_xlim(0, 1)
             axes[i].grid(alpha=0.3, axis='y')
-            axes[i].legend(fontsize=8)
+            axes[i].legend(fontsize=8, loc='upper left')
         
-        plt.suptitle(f'Embedding Similarity Score Distribution Comparison\nDataset: {dataset_name}', 
+        plt.suptitle(f'Input vs Embedding Similarity Score Distribution\nDataset: {dataset_name}', 
                      fontsize=14, fontweight='bold', y=1.02)
         plt.tight_layout()
         

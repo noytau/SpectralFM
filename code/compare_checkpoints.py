@@ -721,11 +721,21 @@ def main():
     create_side_by_side_plots(checkpoint_infos, runner, output_dir, 
                               custom_dataset_path=args.custom_dataset_path)
     
-    # Validation loss comparison table
-    print("\n[+] Calculating validation losses on all datasets...")
-    val_loss_df = calculate_validation_losses(checkpoint_infos, runner, 
-                                               custom_dataset_path=args.custom_dataset_path)
-    print_validation_loss_table(val_loss_df, output_dir)
+    # Histogram comparison plots (input + embedding similarity distributions)
+    print("\n[+] Creating embedding similarity comparison plots...")
+    runner.plot_embedding_similarity_histogram_comparison(results, dataset_name="valid")
+    if args.custom_dataset_path:
+        custom_name = Path(args.custom_dataset_path).name
+        runner.plot_embedding_similarity_histogram_comparison(results, dataset_name=custom_name)
+    
+    # Validation loss comparison table (only if validation_loss in eval_methods)
+    if "validation_loss" in args.eval_methods:
+        print("\n[+] Calculating validation losses on all datasets...")
+        val_loss_df = calculate_validation_losses(checkpoint_infos, runner, 
+                                                   custom_dataset_path=args.custom_dataset_path)
+        print_validation_loss_table(val_loss_df, output_dir)
+    else:
+        print("\n[+] Skipping validation loss calculation (not in eval_methods)")
     
     # Save results summary
     summary_path = output_dir / "comparison_summary.txt"
