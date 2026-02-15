@@ -15,7 +15,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from fairseq import checkpoint_utils
 from fairseq.modules import EMAModule, EMAModuleConfig
 from fairseq.data.data_utils import compute_mask_indices
 from fairseq.models import BaseFairseqModel, register_model
@@ -73,13 +72,6 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=True,
         metadata={"help": "whether to momentum update only the transformer layers"},
     )
-    train_only_fe: bool = field(
-        default=False, metadata={"help": "only train feature extractor"}
-    )
-
-    train_only_fe: bool = field(
-                    default=True, metadata={"help": "Train only feature-extractor, freeze other parts"}
-                        )
 
     max_update: int = II("optimization.max_update")
 
@@ -105,12 +97,8 @@ class Data2VecAudioModel(BaseFairseqModel):
         self.cfg = cfg
 
         feature_enc_layers = eval(cfg.conv_feature_layers)
-        print(f"NOY DEBUG feature_enc_layers = {feature_enc_layers}") # fixme
         self.extractor_embed = feature_enc_layers[-1][0]
 
-        # fixme model_path: Optional[str] = field(default=None)
-        self.model_path = "/mnt5/noy/fairseq/base_libri.pt" # fixme
-        print(f"model_path = { self.model_path }")
         self.ema = None
         self.embed = cfg.encoder_embed_dim
 
@@ -157,31 +145,6 @@ class Data2VecAudioModel(BaseFairseqModel):
         self.final_proj = nn.Linear(self.embed, self.embed)
 
         self.num_updates = 0
-
-<<<<<<< HEAD
-        if cfg.train_only_fe:
-            self.freeze_all_except_feature_extractor()
-        else:
-            print("[+] Training the entire model (not only Feature-Extractor)")
-            logger.info("[+] Training the entire model (not only Feature-Extractor)")
-=======
-        if self.cfg.train_only_fe:
-            self.freeze_all_except_feature_extractor()
->>>>>>> c6c8058758972f130ab130391c932aaf9beb768e
-
-    def freeze_all_except_feature_extractor(self):
-        for name, p in self.named_parameters():
-            if "feature_extractor" not in name:
-                p.requires_grad = False
-
-        print("[INFO] ONLY feature extractor is trainable")
-        logger.info("[INFO] ONLY feature extractor is trainable")
-
-    def load_model_weights(self, state, model, cfg):
-        if "_ema" in state["model"]:
-            del state["model"]["_ema"]
-        model.load_state_dict(state["model"], strict=True)
-        print("Loaded model weights")
 
     def make_ema_teacher(self):
         ema_config = EMAModuleConfig(
@@ -242,34 +205,8 @@ class Data2VecAudioModel(BaseFairseqModel):
     @classmethod
     def build_model(cls, cfg: Data2VecAudioConfig, task=None):
         """Build a new model instance."""
-        model = cls(cfg)
-        # fixme noy: review this code and understand which weights to load
-        model_path = "/mnt5/noy/fairseq/base_libri.pt"
-        if not cfg.skip_pretrained_weights:
-            if model_path:
-                logger.info(f"Loading pretrained checkpoint from {model_path}")
-                print(f"Loading pretrained checkpoint from {model_path}")
-                state = checkpoint_utils.load_checkpoint_to_cpu(model_path, {})
-                ckpt_model = state.get("model", state)
 
-                missing, unexpected = model.load_state_dict(ckpt_model, strict=False)
-                logger.info(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
-                print(f"Missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
-                try:
-                    # Example for checking a core transformer layer
-                    layer_name = "encoder.layers.0.self_attn.k_proj.weight"
-                    if layer_name in model.state_dict():
-                        weights = model.state_dict()[layer_name]
-                        print(f"\n✅ VERIFICATION: Loaded Weights Check for {layer_name}")
-                        print(f"  Mean: {weights.float().mean().item():.6f}")
-                        print(f"  Std Dev: {weights.float().std().item():.6f}")
-                        print(f"  Slice: {weights.flatten()[:5].tolist()}")
-                except Exception as e:
-                    print(f"Could not inspect weights: {e}")
-
-        return model
-
-        # return cls(cfg)
+        return cls(cfg)
 
     def apply_mask(
         self,
@@ -447,8 +384,11 @@ class Data2VecAudioModel(BaseFairseqModel):
             self.ema.model.eval()
 
             if self.cfg.ema_transformer_only:
+                # Get the dtype of the EMA model's parameters to match input dtype
+                ema_param_dtype = next(self.ema.model.parameters()).dtype
+                pre_encoder_features_typed = pre_encoder_features.to(dtype=ema_param_dtype)
                 y, layer_results = self.ema.model.extract_features(
-                    pre_encoder_features,
+                    pre_encoder_features_typed,
                     padding_mask=padding_mask,
                     min_layer=self.cfg.encoder_layers - self.average_top_k_layers,
                 )
