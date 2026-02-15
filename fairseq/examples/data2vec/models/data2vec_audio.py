@@ -237,8 +237,6 @@ def debug_plot_predictions(x_pred, y_target):
     save_path = os.path.join(pred_dir, f'batch_{batch_id}.png')
     plt.savefig(save_path, dpi=150)
     plt.close(fig)
-    
-    print(f"[Pred batch {batch_id}] MSE: {mse:.6f} | saved to {save_path}")
 
 
 @dataclass
@@ -858,14 +856,18 @@ class Data2VecAudioModel(BaseFairseqModel):
         with torch.no_grad():
             self.ema.model.eval()
 
-            # EMA model is in fp32 (ema_fp32=True), so convert inputs to float32
-            # to avoid dtype mismatch errors when main model is in fp16
+            # Get the dtype of the EMA model to match inputs
+            # This handles cases where EMA model might be in fp16 or fp32
+            ema_dtype = next(self.ema.model.parameters()).dtype
+            
             if self.cfg.ema_transformer_only:
-                # Get the dtype of the EMA model's parameters to match input dtype
-                ema_param_dtype = next(self.ema.model.parameters()).dtype
-                pre_encoder_features_typed = pre_encoder_features.to(dtype=ema_param_dtype)
+                # Convert pre_encoder_features to match EMA model dtype
+                if pre_encoder_features.dtype != ema_dtype:
+                    pre_encoder_features_ema = pre_encoder_features.to(dtype=ema_dtype)
+                else:
+                    pre_encoder_features_ema = pre_encoder_features
                 y, layer_results = self.ema.model.extract_features(
-                    pre_encoder_features_typed,
+                    pre_encoder_features_ema,
                     padding_mask=padding_mask,
                     min_layer=self.cfg.encoder_layers - self.average_top_k_layers,
                 )
@@ -875,10 +877,13 @@ class Data2VecAudioModel(BaseFairseqModel):
                     "layer_results": layer_results,
                 }
             else:
-                # Convert source to float32 for EMA model
-                source_fp32 = source.float() if source.dtype != torch.float32 else source
+                # Convert source to match EMA model dtype
+                if source.dtype != ema_dtype:
+                    source_ema = source.to(dtype=ema_dtype)
+                else:
+                    source_ema = source
                 y = self.ema.model.extract_features(
-                    source=source_fp32,
+                    source=source_ema,
                     padding_mask=orig_padding_mask,
                     mask=False,
                 )
