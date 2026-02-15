@@ -545,6 +545,11 @@ def validate(
         progress.print(stats, tag=subset, step=trainer.get_num_updates())
 
         valid_losses.append(stats[cfg.checkpoint.best_checkpoint_metric])
+    
+    # Save mask memory after validation completes (if enabled)
+    if hasattr(trainer, 'end_valid_epoch'):
+        trainer.end_valid_epoch()
+    
     return valid_losses
 
 

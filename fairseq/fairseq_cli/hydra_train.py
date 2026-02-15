@@ -6,14 +6,21 @@
 
 import logging
 import os
-import mlflow
+import sys
 
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    
 import hydra
 import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
-from fairseq import distributed_utils, metrics
+from fairseq import metrics
+import fairseq.distributed.utils as distributed_utils
 from fairseq.dataclass.configs import FairseqConfig
 from fairseq.dataclass.initialize import add_defaults, hydra_init
 from fairseq.dataclass.utils import omegaconf_no_object_check
@@ -21,7 +28,6 @@ from fairseq.utils import reset_logging
 from fairseq_cli.train import main as pre_main
 
 logger = logging.getLogger("fairseq_cli.hydra_train")
-
 
 @hydra.main(config_path=os.path.join("..", "fairseq", "config"), config_name="config")
 def hydra_main(cfg: FairseqConfig) -> float:
@@ -47,23 +53,26 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
             OmegaConf.to_container(cfg, resolve=True, enum_to_str=True)
         )
     OmegaConf.set_struct(cfg, True)
-    # --- Initialize MLflow run ---
-    mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
-    mlflow.set_experiment("SpectralFM")
+    
+    # --- Initialize MLflow run (if available) ---
+    if MLFLOW_AVAILABLE:
+        mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
+        mlflow.set_experiment("SpectralFM")
 
-    mlflow.start_run(run_name=f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}")
+        run_name = getattr(cfg.common, "wandb_run_name", None)
+        if run_name is None or run_name == "":
+            run_name = f"{cfg.model._name}_{cfg.task.data.split('/')[-1]}"
 
-    # Log key config parameters
-    mlflow.log_params({
-        "model": cfg.model._name,
-        "task": cfg.task._name,
-        "mask_prob": getattr(cfg.model, "mask_prob", None),
-        "batch_size": cfg.dataset.batch_size,
-        "learning_rate": cfg.optimization.lr[0],
-    })
+        mlflow.start_run(run_name=run_name)
 
-
-
+        # Log key config parameters
+        mlflow.log_params({
+            "model": cfg.model._name,
+            "task": cfg.task._name,
+            "mask_prob": getattr(cfg.model, "mask_prob", None),
+            "batch_size": cfg.dataset.batch_size,
+            "learning_rate": cfg.optimization.lr[0],
+        })
 
     try:
         if cfg.common.profile:
@@ -86,7 +95,7 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
     except:
         best_val = None
 
-    if mlflow.active_run():
+    if MLFLOW_AVAILABLE and mlflow.active_run():
         try:
             # Optionally log the best validation metric
             if "best_val" in locals() and best_val is not None:

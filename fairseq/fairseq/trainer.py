@@ -786,9 +786,92 @@ class Trainer(object):
 
     def begin_valid_epoch(self, epoch):
         """Called at the beginning of each validation epoch."""
+        logger.info(f"[DEBUG] begin_valid_epoch called for epoch {epoch}")
+        
+        # Enable mask memory if model supports it and save_mask_memory flag is set
+        # This allows storing masks during validation for later reuse in evaluation
+        if hasattr(self.model, 'enable_mask_memory') and hasattr(self.model, 'cfg'):
+            save_mask_memory = getattr(self.model.cfg, 'save_mask_memory', False)
+            logger.info(f"[DEBUG] save_mask_memory flag in begin_valid_epoch: {save_mask_memory}")
+            if save_mask_memory:
+                self.model.enable_mask_memory()
+                logger.info("[+] Mask memory enabled for validation epoch")
+            else:
+                logger.info("[DEBUG] save_mask_memory is False, not enabling mask memory")
+        else:
+            logger.warning("[DEBUG] Model does not support enable_mask_memory or missing cfg")
 
         # task specific setup per validation epoch
         self.task.begin_valid_epoch(epoch, self.get_model())
+    
+    def end_valid_epoch(self):
+        """Called at the end of validation epoch."""
+        logger.info("[DEBUG] end_valid_epoch called")
+        # Save mask memory if model supports it and save_mask_memory flag is enabled
+        if not hasattr(self.model, 'save_mask_memory'):
+            logger.warning("[DEBUG] Model does not have save_mask_memory method")
+            return
+        if not hasattr(self.model, 'cfg'):
+            logger.warning("[DEBUG] Model does not have cfg attribute")
+            return
+            
+        save_mask_memory = getattr(self.model.cfg, 'save_mask_memory', False)
+        logger.info(f"[DEBUG] save_mask_memory flag: {save_mask_memory}")
+        
+        if save_mask_memory:
+            # Check if masks were collected
+            if hasattr(self.model, '_mask_memory'):
+                num_masks = len(self.model._mask_memory)
+                logger.info(f"[DEBUG] Number of masks in memory: {num_masks}")
+                if num_masks == 0:
+                    logger.warning("[!] save_mask_memory=True but no masks were collected in memory")
+            
+            mask_memory_path = getattr(self.model.cfg, 'mask_memory_save_path', None)
+            logger.info(f"[DEBUG] mask_memory_save_path from config: {mask_memory_path}")
+            
+            # Auto-generate path if not provided
+            if not mask_memory_path:
+                checkpoint_dir = getattr(self.cfg.checkpoint, 'save_dir', None)
+                logger.info(f"[DEBUG] checkpoint.save_dir (raw): {checkpoint_dir}")
+                if checkpoint_dir:
+                    import os
+                    # Resolve to absolute path to avoid issues with relative paths
+                    if not os.path.isabs(checkpoint_dir):
+                        # If relative, resolve relative to current working directory
+                        checkpoint_dir = os.path.abspath(checkpoint_dir)
+                    logger.info(f"[DEBUG] checkpoint.save_dir (resolved): {checkpoint_dir}")
+                    mask_memory_path = os.path.join(checkpoint_dir, 'mask_memory.pt')
+                    logger.info(f"[DEBUG] Auto-generated path (absolute): {mask_memory_path}")
+                    logger.info(f"[DEBUG] Current working directory: {os.getcwd()}")
+                else:
+                    logger.warning("[!] save_mask_memory=True but no mask_memory_save_path or checkpoint.save_dir found")
+                    return
+            
+            try:
+                import os
+                # Ensure directory exists
+                mask_memory_dir = os.path.dirname(mask_memory_path)
+                if mask_memory_dir:
+                    os.makedirs(mask_memory_dir, exist_ok=True)
+                    logger.info(f"[DEBUG] Created/verified directory: {mask_memory_dir}")
+                
+                self.model.save_mask_memory(mask_memory_path)
+                logger.info(f"[+] Mask memory saved to {mask_memory_path}")
+                
+                # Verify file was created
+                if os.path.exists(mask_memory_path):
+                    file_size = os.path.getsize(mask_memory_path)
+                    abs_path = os.path.abspath(mask_memory_path)
+                    logger.info(f"[DEBUG] Verified: mask memory file exists")
+                    logger.info(f"[DEBUG]   Absolute path: {abs_path}")
+                    logger.info(f"[DEBUG]   File size: {file_size} bytes")
+                else:
+                    abs_path = os.path.abspath(mask_memory_path)
+                    logger.error(f"[!] ERROR: mask memory file was not created")
+                    logger.error(f"[!]   Expected path: {abs_path}")
+                    logger.error(f"[!]   Current working directory: {os.getcwd()}")
+            except Exception as e:
+                logger.error(f"[!] ERROR saving mask memory: {e}", exc_info=True)
 
     def reset_dummy_batch(self, batch):
         self._dummy_batch = batch

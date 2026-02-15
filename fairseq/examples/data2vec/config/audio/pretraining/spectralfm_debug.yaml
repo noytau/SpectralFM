@@ -1,12 +1,13 @@
-# data2vec_optimized_245.yaml
 # @package _group_
+# data2vec_optimized_245.yaml
+
 
 common:
   fp16: true
   log_format: json
   log_interval: 100
   tensorboard_logdir: tb
-  user_dir: /mnt5/noy/fairseq/examples/data2vec
+  user_dir: /mnt5/noy/SpectralFM/fairseq/examples/data2vec
   wandb_project: "spectralfm_fairseq_feature_extractor_only_5_layers"
   wandb_run_name: "5m_data_bs32_uf2"
     #wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}  

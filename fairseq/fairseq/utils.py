@@ -486,12 +486,8 @@ def import_user_module(args):
             import_user_module.memo.add(module_path)
 
             module_parent, module_name = os.path.split(module_path)
-            print(f"DEBUG: Resolved module_parent: {module_parent}")
-            print(f"DEBUG: Resolved module_name: {module_name}")
             if module_name not in sys.modules:
-                print(f"DEBUG: sys.path BEFORE insert: {sys.path}")
                 sys.path.insert(0, module_parent)
-                print(f"DEBUG: sys.path AFTER insert: {sys.path}")
                 importlib.import_module(module_name)
 
                 tasks_path = os.path.join(module_path, "tasks")

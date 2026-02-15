@@ -1,7 +1,12 @@
 from transformers import Data2VecAudioModel, AutoFeatureExtractor
 import torch
 import sys
-sys.path.append("/mnt5/noy/fairseq") # fixme change to your fairseq path
+import os
+
+# Add fairseq to path using relative path from this file's location
+_FAIRSEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fairseq")
+if _FAIRSEQ_PATH not in sys.path:
+    sys.path.insert(0, _FAIRSEQ_PATH)
 
 from fairseq import checkpoint_utils
 #from examples.data2vec.models import Data2VecAudioModel
@@ -74,27 +79,83 @@ def load_custom_data2vec_audio_model(args, model_name="facebook/data2vec-audio-b
     args.model = model.to(args.device) # fixme what am I doing here
     return model.to(args.device), model.feature_extractor, args.optimizer, args.device
 
-def load_fairseq_data2vec_model(args, model_path="/mnt5/noy/fairseq/base_libri_960h.pt"): # fixme change to return model, not eval
-    from fairseq.data.dictionary import Dictionary
+def load_fairseq_checkpoint(checkpoint_path, device=None):
+    """
+    Load a fairseq data2vec checkpoint from the outputs directory.
+    Uses fairseq's built-in load_model_ensemble_and_task for proper loading.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file (e.g., checkpoint_best.pt)
+        device: Device to load model on (default: auto-detect GPU/CPU)
+    
+    Returns:
+        model: The loaded Data2VecAudioModel
+        cfg: The model configuration
+        checkpoint_info: Dict with training info (step, epoch, etc.)
+    """
+    from fairseq import checkpoint_utils
+    from omegaconf import open_dict
+    
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print(f"[+] Loading fairseq checkpoint from: {checkpoint_path}")
+    
+    # Use fairseq's built-in method to load model, config, and task
+    # This handles all the proper initialization (EMA, set_num_updates, etc.)
+    models, cfg, task = checkpoint_utils.load_model_ensemble_and_task(
+        [checkpoint_path],
+        arg_overrides={},
+        strict=False,  # Allow missing/unexpected keys for backward compatibility
+    )
+    
+    # Extract the first model from ensemble (usually just one model)
+    model = models[0]
+    model_cfg = cfg.model
+    
+    # Handle missing config keys for older checkpoints
+    default_keys = {
+        "model_path": None,
+        "skip_pretrained_weights": True,
+        "train_only_fe": False,
+    }
+    
+    with open_dict(model_cfg):
+        for key, default_val in default_keys.items():
+            if key not in model_cfg:
+                model_cfg[key] = default_val
+                print(f"[+] Added missing config key: {key}={default_val}")
+    
+    # Load checkpoint state separately to extract checkpoint info
+    state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
+    
+    # Move model to device
+    # Note: model.eval() is NOT called here - it's handled by fairseq's trainer.valid_step()
+    # This keeps the flow consistent with fairseq's validation implementation
+    model = model.to(device)
+    
+    checkpoint_info = {
+        "num_updates": state.get("optimizer_history", [{}])[-1].get("num_updates", 0) if state.get("optimizer_history") else 0,
+        "epoch": state.get("epoch", 0),
+        "best_loss": state.get("best", None),
+        "cfg": cfg,
+    }
+    
+    print(f"[+] Model loaded successfully!")
+    print(f"    - Epoch: {checkpoint_info['epoch']}")
+    print(f"    - Updates: {checkpoint_info['num_updates']}")
+    
+    return model, model_cfg, checkpoint_info
 
-    # Load pretrained checkpoint
-    #state = torch.load(model_path, map_location=torch.device('cpu')) # fixme change to gpu if available
-    #model = Data2VecAudioModel.build_model(state['cfg']['model'])
-    #model.load_state_dict(state['model'], strict=False)
 
-    #model, cfg, task = torch.hub.load(
-    #    'facebookresearch/fairseq',
-    #    'data2vec_audio_base',
-    #    source='github'  # optional
-    #)
-
-    torch.serialization.add_safe_globals([Dictionary])
-
-    state = torch.load(model_path,  map_location="cpu")
-    # Build and load model
-    cfg = state["cfg"]["model"]
-    model = Data2VecAudioModel.build_model(cfg)
-    return model.to(args.device), model.feature_extractor, args.optimizer, args.device
+def load_fairseq_data2vec_model(args, model_path="/mnt5/noy/SpectralFM/fairseq/base_libri.pt"):
+    """Legacy function - loads fairseq checkpoint with args compatibility."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    model, cfg, checkpoint_info = load_fairseq_checkpoint(model_path, device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=getattr(args, 'learning_rate', 1e-4))
+    
+    return model, model.feature_extractor, optimizer, device
 
 def load_original_data2vec_audio_model(model_name="facebook/data2vec-audio-base"):
     model = Data2VecAudioModel.from_pretrained(model_name)
