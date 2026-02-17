@@ -701,7 +701,7 @@ class Data2VecAudioModel(BaseFairseqModel):
                             self._mask_memory_counter += 1
                         # Debug: log first few masks being stored
                         if len(self._mask_memory) <= 5 or len(self._mask_memory) % 100 == 0:
-                            logger.info(f"[DEBUG] Stored {len(self._mask_memory)} masks in memory (latest: sample_id={sample_id})")
+                            logger.info(f"[DEBUG] Stored {len(self._mask_memory)} masks in memory (latest key: {self._mask_memory_counter - 1})")
                 
                 # Save masks if mask_save_dir is set (for loss validation)
                 if hasattr(self, '_mask_save_dir') and self._mask_save_dir is not None:
