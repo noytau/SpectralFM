@@ -684,9 +684,9 @@ class Data2VecAudioModel(BaseFairseqModel):
                     
                     # Store masks in memory if memory is enabled and we're in eval mode
                     # This saves both deterministic (if mask_seed set) and random masks
+                    # Note: We don't require sample_indices for storage since we use a global counter
                     if (
                         self._use_mask_memory 
-                        and sample_indices is not None 
                         and not self.training
                     ):
                         # mask_indices shape is (B_mask, T) where B_mask is the batch size of the embeddings
