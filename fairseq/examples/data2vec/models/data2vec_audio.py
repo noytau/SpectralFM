@@ -408,9 +408,11 @@ class Data2VecAudioModel(BaseFairseqModel):
             os.makedirs(self._mask_save_dir, exist_ok=True)
             print(f"[+] Mask saving enabled. Saving to: {self._mask_save_dir}")
         
-        # For fixed masking memory: store masks keyed by sample ID
+        # For fixed masking memory: store masks keyed by batch index
+        # Note: masks are computed on embeddings per batch, so we use batch index as key
         self._mask_memory: Dict[int, torch.Tensor] = {}
         self._use_mask_memory: bool = False
+        self._mask_memory_counter: int = 0  # Global counter for unique keys across batches
 
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
@@ -439,6 +441,7 @@ class Data2VecAudioModel(BaseFairseqModel):
     def clear_mask_memory(self):
         """Clear all stored masks from memory."""
         self._mask_memory.clear()
+        self._mask_memory_counter = 0
         logger.info("[+] Mask memory cleared")
 
     def save_mask_memory(self, path: str):
@@ -612,21 +615,30 @@ class Data2VecAudioModel(BaseFairseqModel):
                 
                 if use_memory_masks:
                     # Try to load masks from memory
+                    # Note: mask_memory stores masks keyed by global counter (0, 1, 2, ...)
+                    # Masks are computed on embeddings per batch, stored sequentially
+                    # During evaluation, we need to reset the counter and load sequentially
                     mask_indices_list = []
                     all_masks_found = True
+                    num_samples = len(sample_indices)
                     
-                    for i in range(B):
-                        sample_id = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
-                        
-                        if sample_id in self._mask_memory:
-                            stored_mask = self._mask_memory[sample_id]
+                    # Reset counter at start of evaluation if needed
+                    if not hasattr(self, '_mask_memory_eval_counter'):
+                        self._mask_memory_eval_counter = 0
+                    
+                    for i in range(num_samples):
+                        # Use global counter to look up mask sequentially
+                        key = self._mask_memory_eval_counter
+                        if key in self._mask_memory:
+                            stored_mask = self._mask_memory[key]
                             # Handle sequence length differences
                             if stored_mask.shape[0] == T:
                                 mask_indices_list.append(stored_mask)
+                                self._mask_memory_eval_counter += 1
                             else:
                                 # Sequence length mismatch - fall back to generation
                                 logger.warning(
-                                    f"Sequence length mismatch for sample {sample_id}: "
+                                    f"Sequence length mismatch for mask key {key}: "
                                     f"stored={stored_mask.shape[0]}, current={T}. "
                                     f"Falling back to random generation."
                                 )
@@ -634,10 +646,15 @@ class Data2VecAudioModel(BaseFairseqModel):
                                 break
                         else:
                             # Mask not found in memory - fall back to generation
+                            logger.debug(
+                                f"Mask key {key} not found in mask_memory. "
+                                f"Available keys: {sorted(list(self._mask_memory.keys()))[:10]}. "
+                                f"Falling back to random generation."
+                            )
                             all_masks_found = False
                             break
                     
-                    if all_masks_found and len(mask_indices_list) == B:
+                    if all_masks_found and len(mask_indices_list) == num_samples:
                         # All masks found in memory - stack them
                         mask_indices = torch.stack(mask_indices_list).to(x.device)
                     else:
@@ -672,11 +689,16 @@ class Data2VecAudioModel(BaseFairseqModel):
                         and sample_indices is not None 
                         and not self.training
                     ):
-                        for i in range(B):
-                            sample_id = int(sample_indices[i].item()) if hasattr(sample_indices[i], 'item') else int(sample_indices[i])
-                            # Store mask on CPU to save memory
+                        # mask_indices shape is (B_mask, T) where B_mask is the batch size of the embeddings
+                        # Use the actual batch dimension from mask_indices, not the input batch size B,
+                        # since masks are computed on embeddings which may have different batch structure
+                        # Store masks keyed by global counter to ensure unique keys across batches
+                        B_mask = mask_indices.shape[0]
+                        for i in range(B_mask):
+                            # Store mask on CPU to save memory, keyed by global counter
                             # If mask_seed was set, this stores deterministic masks; otherwise random masks
-                            self._mask_memory[sample_id] = mask_indices[i].cpu().clone()
+                            self._mask_memory[self._mask_memory_counter] = mask_indices[i].cpu().clone()
+                            self._mask_memory_counter += 1
                         # Debug: log first few masks being stored
                         if len(self._mask_memory) <= 5 or len(self._mask_memory) % 100 == 0:
                             logger.info(f"[DEBUG] Stored {len(self._mask_memory)} masks in memory (latest: sample_id={sample_id})")

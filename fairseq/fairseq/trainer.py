@@ -849,11 +849,20 @@ class Trainer(object):
             
             try:
                 import os
+                # Fix: If path is a directory or doesn't end with .pt, append mask_memory.pt
+                if mask_memory_path and os.path.exists(mask_memory_path) and os.path.isdir(mask_memory_path):
+                    logger.warning(f"[!] mask_memory_save_path is a directory, appending mask_memory.pt")
+                    mask_memory_path = os.path.join(mask_memory_path, 'mask_memory.pt')
+                elif mask_memory_path and not mask_memory_path.endswith('.pt'):
+                    logger.warning(f"[!] mask_memory_save_path doesn't end with .pt, appending .pt")
+                    mask_memory_path = mask_memory_path + '.pt'
+                
                 # Ensure directory exists
                 mask_memory_dir = os.path.dirname(mask_memory_path)
                 if mask_memory_dir:
                     os.makedirs(mask_memory_dir, exist_ok=True)
                     logger.info(f"[DEBUG] Created/verified directory: {mask_memory_dir}")
+                logger.info(f"[DEBUG] Final mask_memory_path: {mask_memory_path}")
                 
                 self.model.save_mask_memory(mask_memory_path)
                 logger.info(f"[+] Mask memory saved to {mask_memory_path}")
