@@ -42,7 +42,43 @@ _FAIRSEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
 if _FAIRSEQ_PATH not in sys.path:
     sys.path.insert(0, _FAIRSEQ_PATH)
 
-from model_loader import load_fairseq_checkpoint
+try:
+    from model_loader import load_fairseq_checkpoint
+except ImportError:
+    load_fairseq_checkpoint = None  # Optional import
+
+# Fallback function if model_loader is not available
+def _load_fairseq_checkpoint_fallback(checkpoint_path: str):
+    """
+    Fallback checkpoint loader using fairseq's checkpoint_utils.
+    Returns (model, model_cfg, checkpoint_info_dict) to match model_loader interface.
+    """
+    from fairseq import checkpoint_utils, tasks, utils
+    from omegaconf import open_dict
+    import os
+    
+    # Import user module if USER_DIR is set (for custom models like data2vec_audio)
+    if 'USER_DIR' in os.environ:
+        user_dir = os.environ['USER_DIR']
+        if user_dir:
+            utils.import_user_module({'user_dir': user_dir})
+    
+    # Load checkpoint
+    overrides = {}
+    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task(
+        [checkpoint_path],
+        arg_overrides=overrides,
+    )
+    model = models[0]
+    
+    # Return in the same format as model_loader
+    checkpoint_info = {
+        "cfg": saved_cfg,
+        "task": task,
+    }
+    
+    return model, saved_cfg.model, checkpoint_info
+
 from omegaconf import OmegaConf
 
 
@@ -985,7 +1021,8 @@ class EvaluationRunner:
                           debug: bool = False,
                           preloaded_indices_valid: Optional[List[int]] = None,
                           preloaded_indices_custom: Optional[List[int]] = None,
-                          include_random_weights: bool = False) -> EvalResult:
+                          include_random_weights: bool = False,
+                          mask_memory_path: Optional[str] = None) -> EvalResult:
         """
         Run evaluation on a single checkpoint.
         
@@ -1013,7 +1050,11 @@ class EvaluationRunner:
         
         # Load model and extract best_loss from checkpoint
         try:
-            model, model_cfg, checkpoint_info_loaded = load_fairseq_checkpoint(checkpoint_info.path)
+            if load_fairseq_checkpoint is None:
+                # Use fallback if model_loader is not available
+                model, model_cfg, checkpoint_info_loaded = _load_fairseq_checkpoint_fallback(checkpoint_info.path)
+            else:
+                model, model_cfg, checkpoint_info_loaded = load_fairseq_checkpoint(checkpoint_info.path)
             cfg = checkpoint_info_loaded["cfg"]  # Full config from checkpoint
             
             # Extract best_loss directly from checkpoint
@@ -1039,12 +1080,12 @@ class EvaluationRunner:
         # Run validation_loss only if it's in eval_methods
         if "validation_loss" in eval_methods:
             print("[+] Running validation loss evaluation on sanity dataset (training data)...")
-            sanity_metrics = self._eval_validation_loss(model, cfg, split="sanity", eval_data_dir=None, debug=False, checkpoint_path=checkpoint_info.path)
+            sanity_metrics = self._eval_validation_loss(model, cfg, split="sanity", eval_data_dir=None, debug=False, checkpoint_path=checkpoint_info.path, mask_memory_path=mask_memory_path)
             metrics.update({f"sanity_{k}": v for k, v in sanity_metrics.items()})
             
-            print("[+] Running validation loss evaluation on eval dataset...")
-            eval_metrics = self._eval_validation_loss(model, cfg, split="valid", eval_data_dir=eval_data_dir, debug=False, checkpoint_path=checkpoint_info.path)
-            metrics.update({f"eval_{k}": v for k, v in eval_metrics.items()})
+            # print("[+] Running validation loss evaluation on eval dataset...")
+            # eval_metrics = self._eval_validation_loss(model, cfg, split="valid", eval_data_dir=eval_data_dir, debug=False, checkpoint_path=checkpoint_info.path, mask_memory_path=mask_memory_path)
+            # metrics.update({f"eval_{k}": v for k, v in eval_metrics.items()})
         else:
             print("[+] Skipping validation loss evaluation (not in eval_methods)")
         
@@ -1288,7 +1329,8 @@ class EvaluationRunner:
                     custom_dataset_path: Optional[str] = None,
                     eval_data_dir: Optional[str] = None,
                     debug: bool = False,
-                    include_random_weights: bool = False) -> List[EvalResult]:
+                    include_random_weights: bool = False,
+                    mask_memory_path: Optional[str] = None) -> List[EvalResult]:
         """
         Evaluate multiple checkpoints.
         
@@ -1312,7 +1354,10 @@ class EvaluationRunner:
             print("\n[+] Pre-loading custom dataset samples (will be reused across all checkpoints)...")
             # Load first checkpoint to get config for dataset loading
             try:
-                model_first, model_cfg_first, checkpoint_info_first = load_fairseq_checkpoint(checkpoints[0].path)
+                if load_fairseq_checkpoint is None:
+                    model_first, model_cfg_first, checkpoint_info_first = _load_fairseq_checkpoint_fallback(checkpoints[0].path)
+                else:
+                    model_first, model_cfg_first, checkpoint_info_first = load_fairseq_checkpoint(checkpoints[0].path)
                 cfg_first = checkpoint_info_first["cfg"]
             except Exception as e:
                 print(f"[!] Failed to load first checkpoint for custom dataset sample loading: {e}")
@@ -1358,7 +1403,10 @@ class EvaluationRunner:
             print("\n[+] Pre-loading valid samples (will be reused across all checkpoints)...")
             # Load first checkpoint to get config for dataset loading
             try:
-                model_first, model_cfg_first, checkpoint_info_first = load_fairseq_checkpoint(checkpoints[0].path)
+                if load_fairseq_checkpoint is None:
+                    model_first, model_cfg_first, checkpoint_info_first = _load_fairseq_checkpoint_fallback(checkpoints[0].path)
+                else:
+                    model_first, model_cfg_first, checkpoint_info_first = load_fairseq_checkpoint(checkpoints[0].path)
                 cfg_first = checkpoint_info_first["cfg"]
             except Exception as e:
                 print(f"[!] Failed to load first checkpoint for valid sample loading: {e}")
@@ -1415,7 +1463,8 @@ class EvaluationRunner:
                 debug=debug,  # Pass debug flag
                 preloaded_indices_valid=self._preloaded_indices_valid,  # Pass indices
                 preloaded_indices_custom=self._preloaded_indices_custom,  # Pass indices
-                include_random_weights=include_random_weights  # Pass include_random_weights flag
+                include_random_weights=include_random_weights,  # Pass include_random_weights flag
+                mask_memory_path=mask_memory_path  # Pass mask_memory_path
             )
             results.append(result)
         
@@ -1664,7 +1713,10 @@ class EvaluationRunner:
                 return None
             
             print(f"[+] Loading {checkpoint_name} checkpoint from {checkpoint_path}...")
-            model, model_cfg, checkpoint_info = load_fairseq_checkpoint(checkpoint_path)
+            if load_fairseq_checkpoint is None:
+                model, model_cfg, checkpoint_info = _load_fairseq_checkpoint_fallback(checkpoint_path)
+            else:
+                model, model_cfg, checkpoint_info = load_fairseq_checkpoint(checkpoint_path)
             cfg = checkpoint_info["cfg"]  # Full config from checkpoint
             self._current_cfg = cfg
             model, model_device = self._prepare_model_for_eval(model, cfg)
@@ -2546,7 +2598,8 @@ class EvaluationRunner:
     def _eval_validation_loss(self, model, cfg, split: str = "valid", 
                              eval_data_dir: Optional[str] = None, 
                              debug: bool = False,
-                             checkpoint_path: Optional[str] = None) -> Dict[str, float]:
+                             checkpoint_path: Optional[str] = None,
+                             mask_memory_path: Optional[str] = None) -> Dict[str, float]:
         """
         Evaluate the model using trainer.valid_step (same as train.py's validate function).
         
@@ -2561,6 +2614,8 @@ class EvaluationRunner:
             eval_data_dir: Optional override for eval dataset path (only used when split="valid")
             debug: Debug flag for verbose output (default: False)
             checkpoint_path: Optional path to checkpoint file (used to resolve mask_memory_save_path)
+            mask_memory_path: Optional path to mask memory file. If provided, loads masks from this file.
+                            If None, tries to load from cfg.model.mask_memory_save_path (for backward compatibility).
         
         Returns:
             Dict with validation loss metrics
@@ -2578,8 +2633,35 @@ class EvaluationRunner:
         
         print(f"[+] Evaluating validation loss on {split_display}...")
         
-        # Load mask memory if validating sanity loss (for fixed masking experiments)
-        if split == "sanity" and hasattr(model, 'load_mask_memory') and hasattr(cfg.model, 'mask_memory_save_path'):
+        # Load mask memory if path is provided (for fixed masking experiments)
+        if mask_memory_path is not None and hasattr(model, 'load_mask_memory'):
+            mask_memory_path_str = str(mask_memory_path)
+            if os.path.exists(mask_memory_path_str):
+                # Temporarily patch torch.load to use weights_only=False for numpy arrays (PyTorch 2.6+)
+                import torch.serialization
+                torch_module = sys.modules['torch']
+                original_torch_load = torch_module.load
+                def patched_torch_load(*args, **kwargs):
+                    if 'weights_only' not in kwargs:
+                        kwargs['weights_only'] = False
+                    return original_torch_load(*args, **kwargs)
+                torch_module.load = patched_torch_load
+                try:
+                    success = model.load_mask_memory(mask_memory_path_str)
+                finally:
+                    torch_module.load = original_torch_load
+                
+                if success:
+                    model.enable_mask_memory()
+                    num_masks = len(model._mask_memory) if hasattr(model, '_mask_memory') else 0
+                    print(f"[+] Loaded mask memory from {mask_memory_path_str} ({num_masks} masks)")
+                else:
+                    print(f"[!] Failed to load mask memory from {mask_memory_path_str}")
+            else:
+                print(f"[!] Mask memory file not found: {mask_memory_path_str}")
+                print(f"[!] Will use seed-based masking instead")
+        # Backward compatibility: try loading from cfg if mask_memory_path not provided
+        elif split == "sanity" and hasattr(model, 'load_mask_memory') and hasattr(cfg.model, 'mask_memory_save_path'):
             mask_memory_path = cfg.model.mask_memory_save_path
             if mask_memory_path:
                 mask_memory_path_str = str(mask_memory_path)
@@ -2591,10 +2673,24 @@ class EvaluationRunner:
                         mask_memory_path_str = str(checkpoint_dir.parent / Path(mask_memory_path_str).name)
                 
                 if os.path.exists(mask_memory_path_str):
-                    success = model.load_mask_memory(mask_memory_path_str)
+                    # Temporarily patch torch.load to use weights_only=False for numpy arrays (PyTorch 2.6+)
+                    import torch.serialization
+                    torch_module = sys.modules['torch']
+                    original_torch_load = torch_module.load
+                    def patched_torch_load(*args, **kwargs):
+                        if 'weights_only' not in kwargs:
+                            kwargs['weights_only'] = False
+                        return original_torch_load(*args, **kwargs)
+                    torch_module.load = patched_torch_load
+                    try:
+                        success = model.load_mask_memory(mask_memory_path_str)
+                    finally:
+                        torch_module.load = original_torch_load
+                    
                     if success:
                         model.enable_mask_memory()
-                        print(f"[+] Loaded mask memory for sanity validation from {mask_memory_path_str} ({len(model._mask_memory)} masks)")
+                        num_masks = len(model._mask_memory) if hasattr(model, '_mask_memory') else 0
+                        print(f"[+] Loaded mask memory for sanity validation from {mask_memory_path_str} ({num_masks} masks)")
                     else:
                         print(f"[!] Failed to load mask memory from {mask_memory_path_str}")
                 else:
@@ -3210,7 +3306,10 @@ class EvaluationRunner:
         
         # If embeddings not provided, extract them
         if inputs is None or embeddings is None:
-            model, model_cfg, checkpoint_info_loaded = load_fairseq_checkpoint(checkpoint_info.path)
+            if load_fairseq_checkpoint is None:
+                model, model_cfg, checkpoint_info_loaded = _load_fairseq_checkpoint_fallback(checkpoint_info.path)
+            else:
+                model, model_cfg, checkpoint_info_loaded = load_fairseq_checkpoint(checkpoint_info.path)
             cfg = checkpoint_info_loaded["cfg"]  # Full config from checkpoint
             self._current_cfg = cfg
             model, device = self._prepare_model_for_eval(model, cfg)
@@ -4568,6 +4667,8 @@ def main():
                        help="Also analyze inliers (highest avg similarity) in addition to outliers (default: True)")
     parser.add_argument("--no_analyze_inliers", dest="analyze_inliers", action="store_false",
                        help="Disable inlier analysis (only analyze outliers)")
+    parser.add_argument("--mask_memory_path", type=str, default=None,
+                       help="Path to mask memory file for fixed mask evaluation")
     
     args = parser.parse_args()
     
@@ -4635,7 +4736,8 @@ def main():
                                   custom_dataset_path=args.custom_dataset_path,
                                   eval_data_dir=args.eval_data_dir,
                                   debug=args.debug,
-                                  include_random_weights=args.include_random_weights)
+                                  include_random_weights=args.include_random_weights,
+                                  mask_memory_path=args.mask_memory_path)
     
     # Create lookup for best_loss by run_name
     loss_lookup = {r.run_name: r.metrics.get("best_loss") for r in results}
