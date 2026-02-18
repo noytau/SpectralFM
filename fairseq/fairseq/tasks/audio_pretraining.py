@@ -315,8 +315,6 @@ class AudioPretrainingTask(FairseqTask):
         if data_path != original_path:
             logger.info(f"Data path translated for cross-environment evaluation: {original_path} -> {data_path}")
         
-        print(f"data_path = {data_path}, task_cfg = {task_cfg}")
-        
         # upgrade old task
         if isinstance(task_cfg, Namespace):
             if not hasattr(task_cfg, "autoregressive"):
@@ -438,8 +436,6 @@ class AudioPretrainingTask(FairseqTask):
             eval_cp_path = osp.join(
                 osp.dirname(cp_path), f"checkpoint_eval_{num_updates}.pt"
             )
-
-            print(cp_path, eval_cp_path, osp.dirname(cp_path))
 
             assert PathManager.copy(
                 cp_path, eval_cp_path, overwrite=True

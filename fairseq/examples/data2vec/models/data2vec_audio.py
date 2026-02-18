@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Debug plotting configuration
 _DEBUG_PLOT_DIR = None
 _DEBUG_PLOT_MODE = None  # 'train' or 'eval'
+_DEBUG_ENABLED = False  # Global flag to enable/disable debug plots
 _DEBUG_INPUT_COUNTER = 0
 _DEBUG_PRED_COUNTER = 0
 _DEBUG_INPUT_MAX_SAMPLES = 20
@@ -48,10 +49,11 @@ def set_debug_plot_mode(mode: str, output_dir: str = None):
         mode: 'train' or 'eval' - this creates a subdirectory
         output_dir: Optional custom base directory. If None, uses default.
     """
-    global _DEBUG_PLOT_DIR, _DEBUG_PLOT_MODE, _DEBUG_INPUT_COUNTER, _DEBUG_PRED_COUNTER
+    global _DEBUG_PLOT_DIR, _DEBUG_PLOT_MODE, _DEBUG_ENABLED, _DEBUG_INPUT_COUNTER, _DEBUG_PRED_COUNTER
     import os
     from datetime import datetime
     
+    _DEBUG_ENABLED = True
     _DEBUG_PLOT_MODE = mode
     _DEBUG_INPUT_COUNTER = 0
     _DEBUG_PRED_COUNTER = 0
@@ -67,8 +69,12 @@ def set_debug_plot_mode(mode: str, output_dir: str = None):
 
 
 def _get_debug_plot_dir():
-    """Get or create the debug plot directory with datetime."""
-    global _DEBUG_PLOT_DIR, _DEBUG_PLOT_MODE
+    """Get or create the debug plot directory with datetime.
+    Only creates directory and prints message if debug mode is enabled.
+    """
+    global _DEBUG_PLOT_DIR, _DEBUG_PLOT_MODE, _DEBUG_ENABLED
+    if not _DEBUG_ENABLED:
+        return None
     if _DEBUG_PLOT_DIR is None:
         import os
         from datetime import datetime
@@ -93,7 +99,10 @@ def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after
     
     Runs on first 20 samples total (across all batches).
     """
-    global _DEBUG_INPUT_COUNTER
+    global _DEBUG_INPUT_COUNTER, _DEBUG_ENABLED
+    
+    if not _DEBUG_ENABLED:
+        return
     
     if _DEBUG_INPUT_COUNTER >= _DEBUG_INPUT_MAX_SAMPLES:
         return
@@ -103,6 +112,8 @@ def debug_plot_input_masking(source, features_before_mask, mask_indices, x_after
     import os
     
     save_dir = _get_debug_plot_dir()
+    if save_dir is None:
+        return
     input_dir = os.path.join(save_dir, 'input_masking')
     os.makedirs(input_dir, exist_ok=True)
     
@@ -191,13 +202,18 @@ def debug_plot_predictions(x_pred, y_target):
     
     Runs on ALL batches (no limit).
     """
-    global _DEBUG_PRED_COUNTER
+    global _DEBUG_PRED_COUNTER, _DEBUG_ENABLED
+    
+    if not _DEBUG_ENABLED:
+        return
     
     import matplotlib.pyplot as plt
     import numpy as np
     import os
     
     save_dir = _get_debug_plot_dir()
+    if save_dir is None:
+        return
     pred_dir = os.path.join(save_dir, 'predictions')
     os.makedirs(pred_dir, exist_ok=True)
     
@@ -411,6 +427,12 @@ class Data2VecAudioModel(BaseFairseqModel):
         # For fixed masking memory: store masks keyed by sample ID
         self._mask_memory: Dict[int, torch.Tensor] = {}
         self._use_mask_memory: bool = False
+
+        # Enable debug plots only when debug mode is explicitly enabled
+        # Check for debug flag in config (can be set via --debug or model.debug=True)
+        debug_enabled = getattr(cfg, 'debug', False)
+        if debug_enabled:
+            set_debug_plot_mode('train')
 
         if cfg.train_only_fe:
             self.freeze_all_except_feature_extractor()
@@ -945,7 +967,9 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         sz = x.size(-1)
 
-        debug_plot_predictions(x, y)  # Enabled for debug
+        # Debug plotting (controlled by config flag)
+        if getattr(self.cfg, 'debug_plot_predictions', False):
+            debug_plot_predictions(x, y)
 
         if self.loss_beta == 0: # fixme noy debug 
             loss = F.mse_loss(x.float(), y.float(), reduction="none").sum(dim=-1)
