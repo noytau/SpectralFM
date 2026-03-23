@@ -153,6 +153,14 @@ def run_full_evaluation(
         include_random_weights=include_random_weights,
     )
 
+    # Generate label regression diagnostic plots when label_regression was evaluated
+    if "label_regression" in methods:
+        try:
+            from label_reg_evaluation import run_label_reg_plots
+            run_label_reg_plots(output_dir)
+        except Exception as e:
+            print(f"[!] label_reg plots failed (non-fatal): {e}")
+
     # Save comprehensive JSON
     output_path = os.path.join(output_dir, "full_evaluation_results.json")
     results_dict = {
