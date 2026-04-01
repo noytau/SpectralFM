@@ -376,54 +376,64 @@ def plot_embedding_similarity_comparison(signals, models, output_dir, device):
 def plot_similarity_matrices(data_dir, models, output_dir, device, n_samples=50):
     """
     Generate side-by-side similarity matrix comparison:
-    Input vs Pretrained vs FE-Only vs Full Train embeddings.
-    
+    Input vs Pretrained vs FE-Only vs Full Train embeddings and CNN FE outputs.
+
+    Four plots are saved:
+      1. similarity_matrices_4way_comparison.png  — 2-row × 4-col grid:
+           row 0 = transformer embeddings, row 1 = CNN FE outputs
+      2. similarity_matrices_diff_from_input.png  — 2-row × 3-col diff matrices
+      3. similarity_distribution_comparison.png   — histograms (solid=embed, dashed=FE)
+      4. input_vs_embedding_correlation.png       — scatter plots (embed + FE overlay)
+
     Adapted from evaluation_runner.plot_similarity_matrices.
     """
     from sklearn.metrics.pairwise import cosine_similarity
     from tqdm import tqdm
     import seaborn as sns
-    
+
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Load wav files
     wav_files = glob.glob(os.path.join(data_dir, "*.wav"))[:n_samples]
     print(f"[+] Loading {len(wav_files)} samples for similarity matrix computation...")
-    
-    # Collect inputs and embeddings from all models
+
+    # Collect inputs, embeddings, and FE outputs from all models
     inputs = []
     model_keys = ['pretrained', 'fe_only', 'full_train']
     all_embeddings = {key: [] for key in model_keys}
-    
+    all_fe_outputs = {key: [] for key in model_keys}
+
     with torch.no_grad():
-        for wav_path in tqdm(wav_files, desc="Extracting embeddings"):
+        for wav_path in tqdm(wav_files, desc="Extracting embeddings & FE outputs"):
             try:
                 waveform, sr = torchaudio.load(wav_path)
                 if sr != 16000:
                     waveform = torchaudio.functional.resample(waveform, sr, 16000)
                 if waveform.shape[0] > 1:
                     waveform = waveform.mean(dim=0, keepdim=True)
-                
+
                 # Store raw input
                 inputs.append(waveform.squeeze(0).cpu().numpy())
-                
-                # Extract embeddings from each model
+
+                # Extract embeddings and FE outputs from each model
                 for model_key in model_keys:
                     model_data = models.get(model_key)
                     if model_data is None:
                         all_embeddings[model_key].append(None)
+                        all_fe_outputs[model_key].append(None)
                         continue
-                    
+
                     model = model_data['model']
                     model.eval()
-                    
+
                     data = waveform.squeeze(0).unsqueeze(0).to(device)
+
+                    # --- Transformer embedding ---
                     try:
                         result = model.extract_features(data, padding_mask=None, mask=False)
                         emb = result["x"].mean(dim=1).cpu().numpy().squeeze()
                         all_embeddings[model_key].append(emb)
-                    except Exception as e:
-                        # Fallback: try features_only mode
+                    except Exception:
                         try:
                             output = model(data, features_only=True)
                             if hasattr(output, 'x'):
@@ -433,197 +443,266 @@ def plot_similarity_matrices(data_dir, models, output_dir, device, n_samples=50)
                             else:
                                 emb = output[0].mean(dim=1).cpu().numpy().squeeze() if isinstance(output, tuple) else None
                             all_embeddings[model_key].append(emb)
-                        except:
+                        except Exception:
                             all_embeddings[model_key].append(None)
-                            
+
+                    # --- CNN feature extractor output ---
+                    try:
+                        fe = model.feature_extractor(data)        # [1, 512, T']
+                        fe = fe.transpose(1, 2)                   # [1, T', 512]
+                        fe = model.layer_norm(fe)                 # [1, T', 512]
+                        if model.post_extract_proj is not None:
+                            fe = model.post_extract_proj(fe)      # [1, T', D]
+                        fe_vec = fe.mean(dim=1).cpu().numpy().squeeze()
+                        all_fe_outputs[model_key].append(fe_vec)
+                    except Exception:
+                        all_fe_outputs[model_key].append(None)
+
             except Exception as e:
                 print(f"[!] Error processing {wav_path}: {e}")
                 continue
-    
+
     if len(inputs) < 2:
         print("[!] Not enough samples loaded for similarity matrix")
         return {}
-    
+
     # Stack inputs
     inputs = np.stack(inputs)
-    
+
     # Compute input similarity matrix
     input_sim = cosine_similarity(inputs)
-    
-    # Compute embedding similarity matrices for each model
+
+    # Compute embedding and FE similarity matrices for each model
     emb_sim_matrices = {}
+    fe_sim_matrices = {}
     for model_key in model_keys:
-        embeddings = all_embeddings[model_key]
-        valid_embs = [e for e in embeddings if e is not None]
+        valid_embs = [e for e in all_embeddings[model_key] if e is not None]
         if len(valid_embs) >= 2:
-            emb_matrix = np.stack(valid_embs)
-            emb_sim_matrices[model_key] = cosine_similarity(emb_matrix)
+            emb_sim_matrices[model_key] = cosine_similarity(np.stack(valid_embs))
         else:
             emb_sim_matrices[model_key] = None
-    
-    # ============== PLOT 1: 4-way comparison (2x2 grid) ==============
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-    fig.suptitle('Cosine Similarity Matrix Comparison\nInput vs Pretrained vs FE-Only vs Full Train', 
-                 fontsize=14, fontweight='bold', y=1.02)
-    
-    # Define plot configs
-    plot_configs = [
-        (0, 0, 'Input Space', input_sim, '#2C3E50'),
-        (0, 1, 'Pretrained (base_libri)', emb_sim_matrices.get('pretrained'), '#3498DB'),
-        (1, 0, f'FE-Only (loss: {FE_ONLY_CHECKPOINTS[DEFAULT_FE_ONLY]["val_loss"]:.3f})', 
-         emb_sim_matrices.get('fe_only'), '#E74C3C'),
-        (1, 1, f'Full Train (loss: {FULL_TRAIN_CHECKPOINTS[DEFAULT_FULL_TRAIN]["val_loss"]:.3f})', 
-         emb_sim_matrices.get('full_train'), '#27AE60'),
-    ]
-    
-    for row, col, title, sim_matrix, color in plot_configs:
-        ax = axes[row, col]
-        if sim_matrix is not None:
-            sns.heatmap(sim_matrix, ax=ax, cmap='viridis', 
-                       xticklabels=False, yticklabels=False,
-                       vmin=0, vmax=1, cbar_kws={'label': 'Cosine Similarity'})
-            ax.set_title(title, fontsize=12, fontweight='bold', color=color)
-            ax.set_xlabel('Sample Index')
-            ax.set_ylabel('Sample Index')
-            
-            # Add statistics
-            mean_sim = sim_matrix[np.triu_indices_from(sim_matrix, k=1)].mean()
-            std_sim = sim_matrix[np.triu_indices_from(sim_matrix, k=1)].std()
-            ax.text(0.02, 0.98, f'Mean: {mean_sim:.3f}\nStd: {std_sim:.3f}', 
-                    transform=ax.transAxes, fontsize=9, verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        valid_fe = [e for e in all_fe_outputs[model_key] if e is not None]
+        if len(valid_fe) >= 2:
+            fe_sim_matrices[model_key] = cosine_similarity(np.stack(valid_fe))
         else:
-            ax.text(0.5, 0.5, 'Model Not Loaded\nor Extraction Failed', 
-                   ha='center', va='center', fontsize=12, color='#E74C3C')
-            ax.set_title(title, fontsize=12, fontweight='bold', color=color)
+            fe_sim_matrices[model_key] = None
+
+    has_fe = any(fe_sim_matrices[k] is not None for k in model_keys)
+
+    # ---- helper ---------------------------------------------------------
+    colors = {'pretrained': '#3498DB', 'fe_only': '#E74C3C', 'full_train': '#27AE60'}
+    model_display = {
+        'pretrained': 'Pretrained (base_libri)',
+        'fe_only': f'FE-Only (loss: {FE_ONLY_CHECKPOINTS[DEFAULT_FE_ONLY]["val_loss"]:.3f})',
+        'full_train': f'Full Train (loss: {FULL_TRAIN_CHECKPOINTS[DEFAULT_FULL_TRAIN]["val_loss"]:.3f})',
+    }
+
+    def _annotate(ax, sim_matrix):
+        triu = np.triu_indices_from(sim_matrix, k=1)
+        mean_v = sim_matrix[triu].mean()
+        std_v = sim_matrix[triu].std()
+        ax.text(0.02, 0.98, f'Mean: {mean_v:.3f}\nStd: {std_v:.3f}',
+                transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    def _annotate_diff(ax, diff_matrix):
+        triu = np.triu_indices_from(diff_matrix, k=1)
+        mean_d = diff_matrix[triu].mean()
+        std_d = diff_matrix[triu].std()
+        ax.text(0.02, 0.98, f'Mean Diff: {mean_d:+.3f}\nStd: {std_d:.3f}',
+                transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    def _heatmap(ax, sim_matrix, title, color, ylabel=None):
+        if sim_matrix is not None:
+            sns.heatmap(sim_matrix, ax=ax, cmap='viridis',
+                        xticklabels=False, yticklabels=False,
+                        vmin=0, vmax=1, cbar_kws={'label': 'Cosine Similarity'})
+            ax.set_title(title, fontsize=11, fontweight='bold', color=color)
+            ax.set_xlabel('Sample Index', fontsize=9)
+            if ylabel:
+                ax.set_ylabel(ylabel, fontsize=9)
+            _annotate(ax, sim_matrix)
+        else:
+            ax.text(0.5, 0.5, 'Not available', ha='center', va='center',
+                    fontsize=11, color='#E74C3C')
+            ax.set_title(title, fontsize=11, fontweight='bold', color=color)
             ax.axis('off')
-    
+
+    # ============== PLOT 1: 2×4 grid (embed row + FE row) ==============
+    n_rows = 2 if has_fe else 1
+    fig, axes = plt.subplots(n_rows, 4, figsize=(7 * 4, 6 * n_rows), squeeze=False)
+    fig.suptitle(
+        'Cosine Similarity Matrix Comparison\n'
+        'Input vs Pretrained vs FE-Only vs Full Train'
+        + ('\n(top: transformer embeddings  |  bottom: CNN FE outputs)' if has_fe else ''),
+        fontsize=13, fontweight='bold', y=1.01,
+    )
+
+    col_items = [
+        ('Input Space', input_sim, '#2C3E50'),
+        (model_display['pretrained'], emb_sim_matrices.get('pretrained'), colors['pretrained']),
+        (model_display['fe_only'], emb_sim_matrices.get('fe_only'), colors['fe_only']),
+        (model_display['full_train'], emb_sim_matrices.get('full_train'), colors['full_train']),
+    ]
+    fe_col_items = [
+        ('Input Space', input_sim, '#2C3E50'),
+        (model_display['pretrained'], fe_sim_matrices.get('pretrained'), colors['pretrained']),
+        (model_display['fe_only'], fe_sim_matrices.get('fe_only'), colors['fe_only']),
+        (model_display['full_train'], fe_sim_matrices.get('full_train'), colors['full_train']),
+    ]
+
+    for col, (title, sim_matrix, color) in enumerate(col_items):
+        ylabel = 'Embeddings' if col == 0 else None
+        _heatmap(axes[0, col], sim_matrix, title, color, ylabel=ylabel)
+
+    if has_fe:
+        for col, (title, sim_matrix, color) in enumerate(fe_col_items):
+            ylabel = 'FE Output' if col == 0 else None
+            _heatmap(axes[1, col], sim_matrix, title, color, ylabel=ylabel)
+
     plt.tight_layout()
     save_path = os.path.join(output_dir, 'similarity_matrices_4way_comparison.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"[+] Saved 4-way comparison: {save_path}")
-    
-    # ============== PLOT 2: Difference matrices (relative to input) ==============
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle('Embedding Similarity - Input Similarity (Difference Matrices)', 
+
+    # ============== PLOT 2: Difference matrices (2-row: embed + FE) ==============
+    n_diff_rows = 2 if has_fe else 1
+    fig, axes = plt.subplots(n_diff_rows, 3, figsize=(18, 5 * n_diff_rows), squeeze=False)
+    row_labels = ['Embedding − Input', 'FE Output − Input']
+    fig.suptitle('Similarity Difference Matrices (relative to input)',
                  fontsize=14, fontweight='bold')
-    
-    for idx, model_key in enumerate(model_keys):
-        ax = axes[idx]
-        model_data = models.get(model_key)
-        emb_sim = emb_sim_matrices.get(model_key)
-        
-        if emb_sim is not None and emb_sim.shape == input_sim.shape:
-            diff_matrix = emb_sim - input_sim
-            
-            model_name = model_data['name'].split('\n')[0] if model_data else model_key
-            color = model_data['color'] if model_data else '#7F8C8D'
-            
-            sns.heatmap(diff_matrix, ax=ax, cmap='RdBu_r', center=0,
-                       xticklabels=False, yticklabels=False,
-                       vmin=-1, vmax=1, cbar_kws={'label': 'Difference'})
-            ax.set_title(f'{model_name}\n(Embedding - Input)', fontsize=12, fontweight='bold', color=color)
-            ax.set_xlabel('Sample Index')
-            ax.set_ylabel('Sample Index')
-            
-            # Add statistics
-            mean_diff = diff_matrix[np.triu_indices_from(diff_matrix, k=1)].mean()
-            ax.text(0.02, 0.98, f'Mean Diff: {mean_diff:+.3f}', 
-                    transform=ax.transAxes, fontsize=9, verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        else:
-            ax.text(0.5, 0.5, 'N/A', ha='center', va='center', fontsize=14)
-            ax.axis('off')
-    
+
+    for row_idx, (sim_dict, row_label) in enumerate(
+        [(emb_sim_matrices, row_labels[0]),
+         (fe_sim_matrices, row_labels[1])][:n_diff_rows]
+    ):
+        for idx, model_key in enumerate(model_keys):
+            ax = axes[row_idx, idx]
+            model_data = models.get(model_key)
+            sim_m = sim_dict.get(model_key)
+
+            if sim_m is not None and sim_m.shape == input_sim.shape:
+                diff_matrix = sim_m - input_sim
+                model_name = model_data['name'].split('\n')[0] if model_data else model_key
+                color = model_data['color'] if model_data else '#7F8C8D'
+
+                sns.heatmap(diff_matrix, ax=ax, cmap='RdBu_r', center=0,
+                            xticklabels=False, yticklabels=False,
+                            vmin=-1, vmax=1, cbar_kws={'label': 'Difference'})
+                ax.set_title(f'{model_name}\n({row_label})',
+                             fontsize=11, fontweight='bold', color=color)
+                ax.set_xlabel('Sample Index', fontsize=9)
+                if idx == 0:
+                    ax.set_ylabel(row_label, fontsize=9)
+                _annotate_diff(ax, diff_matrix)
+            else:
+                ax.text(0.5, 0.5, 'N/A', ha='center', va='center', fontsize=14)
+                ax.axis('off')
+
     plt.tight_layout()
     save_path = os.path.join(output_dir, 'similarity_matrices_diff_from_input.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"[+] Saved difference matrices: {save_path}")
-    
+
     # ============== PLOT 3: Histogram comparison ==============
     fig, ax = plt.subplots(figsize=(12, 6))
     fig.suptitle('Distribution of Pairwise Cosine Similarities', fontsize=14, fontweight='bold')
-    
-    # Get upper triangular values (excluding diagonal)
+
     input_vals = input_sim[np.triu_indices_from(input_sim, k=1)]
     ax.hist(input_vals, bins=50, alpha=0.6, label='Input Space', color='#2C3E50', density=True)
-    
-    colors = {'pretrained': '#3498DB', 'fe_only': '#E74C3C', 'full_train': '#27AE60'}
-    labels = {
-        'pretrained': 'Pretrained (base_libri)',
-        'fe_only': f'FE-Only (loss: {FE_ONLY_CHECKPOINTS[DEFAULT_FE_ONLY]["val_loss"]:.3f})',
-        'full_train': f'Full Train (loss: {FULL_TRAIN_CHECKPOINTS[DEFAULT_FULL_TRAIN]["val_loss"]:.3f})'
-    }
-    
+
     for model_key in model_keys:
+        color = colors[model_key]
+        label_base = model_display[model_key]
         emb_sim = emb_sim_matrices.get(model_key)
+        fe_sim = fe_sim_matrices.get(model_key)
+
         if emb_sim is not None:
             emb_vals = emb_sim[np.triu_indices_from(emb_sim, k=1)]
-            ax.hist(emb_vals, bins=50, alpha=0.5, label=labels[model_key], 
-                   color=colors[model_key], density=True)
-    
+            ax.hist(emb_vals, bins=50, alpha=0.45, label=f'{label_base} (embed)',
+                    color=color, density=True, histtype='stepfilled')
+
+        if fe_sim is not None:
+            fe_vals = fe_sim[np.triu_indices_from(fe_sim, k=1)]
+            ax.hist(fe_vals, bins=50, alpha=0.45, label=f'{label_base} (FE out)',
+                    color=color, density=True, histtype='step', linewidth=2, linestyle='--')
+
     ax.set_xlabel('Cosine Similarity', fontsize=12)
     ax.set_ylabel('Density', fontsize=12)
-    ax.legend(loc='upper left', fontsize=10)
+    ax.legend(loc='upper left', fontsize=9)
     ax.set_xlim(-0.2, 1.1)
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     save_path = os.path.join(output_dir, 'similarity_distribution_comparison.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"[+] Saved distribution comparison: {save_path}")
-    
+
     # ============== PLOT 4: Correlation between models ==============
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle('Correlation: Input Similarity vs Embedding Similarity', 
+    fig.suptitle('Correlation: Input Similarity vs Embedding / FE Output Similarity',
                  fontsize=14, fontweight='bold')
-    
+
     input_vals = input_sim[np.triu_indices_from(input_sim, k=1)]
-    
+
     for idx, model_key in enumerate(model_keys):
         ax = axes[idx]
         emb_sim = emb_sim_matrices.get(model_key)
+        fe_sim = fe_sim_matrices.get(model_key)
         model_data = models.get(model_key)
-        
+        color = colors[model_key]
+        model_name = model_data['name'].split('\n')[0] if model_data else model_key
+
+        plotted = False
+
         if emb_sim is not None and emb_sim.shape == input_sim.shape:
             emb_vals = emb_sim[np.triu_indices_from(emb_sim, k=1)]
-            
-            model_name = model_data['name'].split('\n')[0] if model_data else model_key
-            color = model_data['color'] if model_data else '#7F8C8D'
-            
-            ax.scatter(input_vals, emb_vals, alpha=0.3, s=5, color=color)
-            ax.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='y=x')
-            
-            # Compute correlation
-            correlation = np.corrcoef(input_vals, emb_vals)[0, 1]
-            
-            ax.set_title(f'{model_name}\nCorrelation: {correlation:.3f}', 
-                        fontsize=12, fontweight='bold', color=color)
-            ax.set_xlabel('Input Similarity')
-            ax.set_ylabel('Embedding Similarity')
+            corr_emb = np.corrcoef(input_vals, emb_vals)[0, 1]
+            ax.scatter(input_vals, emb_vals, alpha=0.25, s=5, color=color,
+                       label=f'Embed (r={corr_emb:.3f})')
+            plotted = True
+
+        if fe_sim is not None and fe_sim.shape == input_sim.shape:
+            fe_vals = fe_sim[np.triu_indices_from(fe_sim, k=1)]
+            corr_fe = np.corrcoef(input_vals, fe_vals)[0, 1]
+            # Use lighter shade for FE output
+            ax.scatter(input_vals, fe_vals, alpha=0.25, s=5, color=color,
+                       marker='^', label=f'FE out (r={corr_fe:.3f})')
+            plotted = True
+
+        if plotted:
+            ax.plot([0, 1], [0, 1], 'k--', alpha=0.5, linewidth=1)
+            ax.set_title(f'{model_name}', fontsize=12, fontweight='bold', color=color)
+            ax.set_xlabel('Input Similarity', fontsize=10)
+            ax.set_ylabel('Similarity', fontsize=10)
             ax.set_xlim(-0.1, 1.1)
             ax.set_ylim(-0.1, 1.1)
-            ax.legend(loc='lower right')
+            ax.legend(loc='lower right', fontsize=9)
             ax.grid(True, alpha=0.3)
         else:
             ax.text(0.5, 0.5, 'N/A', ha='center', va='center', fontsize=14)
             ax.axis('off')
-    
+
     plt.tight_layout()
     save_path = os.path.join(output_dir, 'input_vs_embedding_correlation.png')
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"[+] Saved correlation plots: {save_path}")
-    
+
     # Return data for further analysis
     return {
         "input_sim_matrix": input_sim,
         "pretrained_sim_matrix": emb_sim_matrices.get('pretrained'),
         "fe_only_sim_matrix": emb_sim_matrices.get('fe_only'),
         "full_train_sim_matrix": emb_sim_matrices.get('full_train'),
+        "pretrained_fe_sim_matrix": fe_sim_matrices.get('pretrained'),
+        "fe_only_fe_sim_matrix": fe_sim_matrices.get('fe_only'),
+        "full_train_fe_sim_matrix": fe_sim_matrices.get('full_train'),
         "n_samples": len(inputs),
     }
 

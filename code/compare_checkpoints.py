@@ -201,12 +201,72 @@ def plot_embedding_metrics_comparison(results: List[EvalResult], output_dir: Pat
     print(f"[+] Saved embedding metrics table to: {csv_path}")
 
 
+def _extract_fe_outputs_from_checkpoint(
+    checkpoint_path: str,
+    samples: list,
+    device,
+    checkpoint_name: str = "",
+) -> Optional[np.ndarray]:
+    """
+    Extract CNN feature extractor output vectors from a fairseq checkpoint.
+
+    Runs each sample through the CNN frontend (feature_extractor), applies the
+    post-CNN layer norm, and optionally post_extract_proj, then mean-pools over
+    the time dimension.  Returns an array of shape (N, D).
+    """
+    from model_loader import load_fairseq_checkpoint
+    import torch
+
+    try:
+        model, _, _ = load_fairseq_checkpoint(checkpoint_path)
+        model = model.to(device)
+        model.eval()
+
+        fe_outputs = []
+        with torch.no_grad():
+            for sample in samples:
+                if isinstance(sample, dict):
+                    source = sample.get("source") or (
+                        sample.get("net_input", {}).get("source")
+                    )
+                else:
+                    source = sample
+
+                if source is None:
+                    continue
+
+                if not isinstance(source, torch.Tensor):
+                    source = torch.tensor(source, dtype=torch.float32)
+
+                if source.dim() == 1:
+                    source = source.unsqueeze(0)  # [1, T]
+                source = source.to(device)
+
+                fe = model.feature_extractor(source)   # [1, 512, T']
+                fe = fe.transpose(1, 2)                # [1, T', 512]
+                fe = model.layer_norm(fe)              # [1, T', 512]
+                if model.post_extract_proj is not None:
+                    fe = model.post_extract_proj(fe)   # [1, T', D]
+                fe_vec = fe.mean(dim=1)                # [1, D]
+                fe_outputs.append(fe_vec.squeeze(0).cpu().numpy())
+
+        if fe_outputs:
+            return np.stack(fe_outputs)
+        return None
+    except Exception as e:
+        print(f"    [!] Error extracting FE outputs from {checkpoint_name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def create_side_by_side_plots(checkpoint_infos: List[CheckpointInfo], runner: EvaluationRunner, 
                                output_dir: Path, custom_dataset_path: Optional[str] = None):
     """
     Create comparison plots showing cosine similarity matrices for each checkpoint.
     Creates 2 plots: one for valid dataset, one for custom dataset.
-    Each plot has 5 subplots (one per checkpoint).
+    Each plot has two rows per checkpoint: embeddings (top) and CNN feature
+    extractor outputs (bottom).
     """
     from sklearn.metrics.pairwise import cosine_similarity
     from model_loader import load_fairseq_checkpoint
@@ -324,10 +384,11 @@ def create_side_by_side_plots(checkpoint_infos: List[CheckpointInfo], runner: Ev
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     
-    # Extract embeddings from each checkpoint for valid dataset
+    # Extract embeddings and FE outputs from each checkpoint for valid dataset
     # Use stored embeddings from evaluation if available (ensures exact same embeddings)
     print("[+] Getting embeddings from checkpoints for valid dataset...")
     valid_embeddings_list = []
+    valid_fe_list = []
     valid_run_names = []
     
     for ckpt_info in checkpoint_infos:
@@ -364,14 +425,39 @@ def create_side_by_side_plots(checkpoint_infos: List[CheckpointInfo], runner: Ev
                 valid_run_names.append(run_name)
             else:
                 print(f"    [!] Failed to get/extract embeddings from {run_name}")
+                continue
+
+            # Extract FE outputs (try stored, then fresh extraction)
+            fe_outputs = None
+            fe_key = f'fe_outputs_{run_name}_valid'
+            if fe_key in runner.eval_data:
+                fe_outputs = runner.eval_data[fe_key]
+                print(f"        Using stored FE outputs from evaluation: {fe_outputs.shape}")
+            else:
+                fe_path = runner.data_dir_out / f"fe_outputs_{run_name}_valid.npy"
+                if fe_path.exists():
+                    try:
+                        fe_outputs = np.load(fe_path)
+                        print(f"        Loaded FE outputs from file: {fe_outputs.shape}")
+                    except Exception as e:
+                        print(f"        [!] Could not load FE outputs from file: {e}")
+
+            if fe_outputs is None:
+                print(f"        Extracting FE outputs from checkpoint...")
+                fe_outputs = _extract_fe_outputs_from_checkpoint(
+                    ckpt_info.path, samples_valid, device, checkpoint_name=run_name
+                )
+            valid_fe_list.append(fe_outputs)
+
         except Exception as e:
             print(f"    [!] Error loading {run_name}: {e}")
             import traceback
             traceback.print_exc()
     
-    # Extract embeddings from each checkpoint for custom dataset
+    # Extract embeddings and FE outputs from each checkpoint for custom dataset
     # Use stored embeddings from evaluation if available (ensures exact same embeddings)
     custom_embeddings_list = []
+    custom_fe_list = []
     custom_run_names = []
     
     if samples_custom is not None and len(samples_custom) > 0:
@@ -410,82 +496,106 @@ def create_side_by_side_plots(checkpoint_infos: List[CheckpointInfo], runner: Ev
                     custom_run_names.append(run_name)
                 else:
                     print(f"    [!] Failed to get/extract embeddings from {run_name}")
+                    continue
+
+                # Extract FE outputs (try stored, then fresh extraction)
+                fe_outputs = None
+                fe_key = f'fe_outputs_{run_name}_{custom_dataset_name}'
+                if fe_key in runner.eval_data:
+                    fe_outputs = runner.eval_data[fe_key]
+                    print(f"        Using stored FE outputs from evaluation: {fe_outputs.shape}")
+                else:
+                    fe_path = runner.data_dir_out / f"fe_outputs_{run_name}_{custom_dataset_name}.npy"
+                    if fe_path.exists():
+                        try:
+                            fe_outputs = np.load(fe_path)
+                            print(f"        Loaded FE outputs from file: {fe_outputs.shape}")
+                        except Exception as e:
+                            print(f"        [!] Could not load FE outputs from file: {e}")
+
+                if fe_outputs is None:
+                    print(f"        Extracting FE outputs from checkpoint...")
+                    fe_outputs = _extract_fe_outputs_from_checkpoint(
+                        ckpt_info.path, samples_custom, device, checkpoint_name=run_name
+                    )
+                custom_fe_list.append(fe_outputs)
+
             except Exception as e:
                 print(f"    [!] Error loading {run_name}: {e}")
                 import traceback
                 traceback.print_exc()
-    
+
+    def _plot_similarity_rows(embeddings_list, fe_list, run_names, title, output_path):
+        """Plot a 2-row (or 1-row fallback) similarity heatmap figure."""
+        n_models = len(embeddings_list)
+        has_fe = any(fe is not None for fe in fe_list)
+        n_rows = 2 if has_fe else 1
+        fig, axes = plt.subplots(n_rows, n_models,
+                                 figsize=(5 * n_models, 5 * n_rows),
+                                 squeeze=False)
+
+        for idx, (embeddings, run_name) in enumerate(zip(embeddings_list, run_names)):
+            # --- Row 0: Embeddings ---
+            sim_matrix = cosine_similarity(embeddings)
+            triu = np.triu_indices_from(sim_matrix, k=1)
+            sim_mean = np.mean(sim_matrix[triu])
+            sim_std = np.std(sim_matrix[triu])
+
+            ax = axes[0, idx]
+            sns.heatmap(sim_matrix, ax=ax, cmap="viridis",
+                        xticklabels=False, yticklabels=False, vmin=0, vmax=1)
+            ax.set_title(f"{run_name}\n(mean={sim_mean:.3f}, std={sim_std:.3f})",
+                         fontsize=11, fontweight='bold')
+            ax.set_xlabel(f"Sample Index (N={len(embeddings)})", fontsize=10)
+            if idx == 0:
+                ax.set_ylabel("Embeddings\nSample Index", fontsize=10)
+
+            # --- Row 1: FE outputs ---
+            if has_fe:
+                fe = fe_list[idx] if idx < len(fe_list) else None
+                ax_fe = axes[1, idx]
+                if fe is not None and len(fe) > 1:
+                    fe_sim = cosine_similarity(fe)
+                    fe_triu = np.triu_indices_from(fe_sim, k=1)
+                    fe_mean = np.mean(fe_sim[fe_triu])
+                    fe_std = np.std(fe_sim[fe_triu])
+
+                    sns.heatmap(fe_sim, ax=ax_fe, cmap="viridis",
+                                xticklabels=False, yticklabels=False, vmin=0, vmax=1)
+                    ax_fe.set_title(f"FE Output\n(mean={fe_mean:.3f}, std={fe_std:.3f})",
+                                    fontsize=11)
+                else:
+                    ax_fe.text(0.5, 0.5, "FE outputs\nnot available",
+                               ha='center', va='center', fontsize=11)
+                    ax_fe.axis('off')
+
+                ax_fe.set_xlabel(f"Sample Index (N={len(embeddings)})", fontsize=10)
+                if idx == 0:
+                    ax_fe.set_ylabel("FE Output\nSample Index", fontsize=10)
+
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"[+] Saved comparison to: {output_path}")
+
     # Create plot for valid dataset
     if valid_embeddings_list:
         print("[+] Creating valid dataset comparison plot...")
-        n_models = len(valid_embeddings_list)
-        fig, axes = plt.subplots(1, n_models, figsize=(5 * n_models, 5))
-        if n_models == 1:
-            axes = [axes]
-        
-        for idx, (embeddings, run_name) in enumerate(zip(valid_embeddings_list, valid_run_names)):
-            # Compute cosine similarity matrix
-            sim_matrix = cosine_similarity(embeddings)
-            
-            # Calculate mean and std (excluding diagonal)
-            triu_indices = np.triu_indices_from(sim_matrix, k=1)
-            sim_values = sim_matrix[triu_indices]
-            sim_mean = np.mean(sim_values)
-            sim_std = np.std(sim_values)
-            
-            # Plot
-            sns.heatmap(sim_matrix, ax=axes[idx], cmap="viridis",
-                       xticklabels=False, yticklabels=False,
-                       vmin=0, vmax=1)
-            axes[idx].set_title(f"{run_name}\n(mean={sim_mean:.3f}, std={sim_std:.3f})", 
-                               fontsize=11, fontweight='bold')
-            axes[idx].set_xlabel(f"Sample Index (N={len(embeddings)})", fontsize=10)
-            if idx == 0:
-                axes[idx].set_ylabel(f"Sample Index (N={len(embeddings)})", fontsize=10)
-        
-        fig.suptitle("Embedding Similarity Comparison - Valid Dataset", 
-                     fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        output_path = plots_dir / "embedding_similarity_comparison_valid.png"
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"[+] Saved valid dataset comparison to: {output_path}")
+        _plot_similarity_rows(
+            valid_embeddings_list, valid_fe_list, valid_run_names,
+            title="Embedding & FE Output Similarity Comparison - Valid Dataset",
+            output_path=plots_dir / "embedding_similarity_comparison_valid.png",
+        )
     
     # Create plot for custom dataset
     if custom_embeddings_list:
         print("[+] Creating custom dataset comparison plot...")
-        n_models = len(custom_embeddings_list)
-        fig, axes = plt.subplots(1, n_models, figsize=(5 * n_models, 5))
-        if n_models == 1:
-            axes = [axes]
-        
-        for idx, (embeddings, run_name) in enumerate(zip(custom_embeddings_list, custom_run_names)):
-            # Compute cosine similarity matrix
-            sim_matrix = cosine_similarity(embeddings)
-            
-            # Calculate mean and std (excluding diagonal)
-            triu_indices = np.triu_indices_from(sim_matrix, k=1)
-            sim_values = sim_matrix[triu_indices]
-            sim_mean = np.mean(sim_values)
-            sim_std = np.std(sim_values)
-            
-            # Plot
-            sns.heatmap(sim_matrix, ax=axes[idx], cmap="viridis",
-                       xticklabels=False, yticklabels=False,
-                       vmin=0, vmax=1)
-            axes[idx].set_title(f"{run_name}\n(mean={sim_mean:.3f}, std={sim_std:.3f})", 
-                               fontsize=11, fontweight='bold')
-            axes[idx].set_xlabel(f"Sample Index (N={len(embeddings)})", fontsize=10)
-            if idx == 0:
-                axes[idx].set_ylabel(f"Sample Index (N={len(embeddings)})", fontsize=10)
-        
-        dataset_title = f"Embedding Similarity Comparison - {custom_dataset_name}"
-        fig.suptitle(dataset_title, fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        output_path = plots_dir / f"embedding_similarity_comparison_{custom_dataset_name}.png"
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"[+] Saved custom dataset comparison to: {output_path}")
+        _plot_similarity_rows(
+            custom_embeddings_list, custom_fe_list, custom_run_names,
+            title=f"Embedding & FE Output Similarity Comparison - {custom_dataset_name}",
+            output_path=plots_dir / f"embedding_similarity_comparison_{custom_dataset_name}.png",
+        )
 
 
 def calculate_validation_loss_for_split(runner: EvaluationRunner, model, cfg, split: str, 

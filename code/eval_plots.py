@@ -830,3 +830,544 @@ def plot_per_bin_completion_error(
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return save_path
+
+
+# ------------------------------------------------------------------ #
+#  FE Decoder Reconstruction Plots (fe_dec_*)                        #
+# ------------------------------------------------------------------ #
+
+def plot_fe_decoder_reconstruction_samples(
+    originals: np.ndarray,
+    reconstructed: np.ndarray,
+    per_cosine: np.ndarray,
+    per_mse: np.ndarray,
+    save_path: str,
+    title: str = "FE Decoder — Reconstruction Samples",
+    n_panels: int = 8,
+    seed: int = 0,
+) -> str:
+    """
+    Grid of N eval samples showing original vs reconstructed 245-d spectrogram.
+
+    Each panel overlays:
+      - blue solid:    original input
+      - orange dashed: decoder reconstruction
+      - annotation box: per-sample cosine similarity and MSE
+
+    Args:
+        originals:     float32 [N_eval, D]  ground-truth spectrogram
+        reconstructed: float32 [N_eval, D]  decoder output
+        per_cosine:    float [N_eval]       per-sample cosine similarity
+        per_mse:       float [N_eval]       per-sample MSE
+        save_path:     output PNG path
+        title:         figure suptitle
+        n_panels:      number of samples to show (default 8, arranged in 2 rows)
+        seed:          for reproducible sample selection
+
+    Returns:
+        save_path
+    """
+    rng = np.random.default_rng(seed)
+    N = len(originals)
+    n_panels = min(n_panels, N)
+    indices = sorted(rng.choice(N, n_panels, replace=False).tolist())
+
+    n_cols = 4
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.5 * n_rows),
+                             squeeze=False)
+
+    for panel_idx, sample_idx in enumerate(indices):
+        row, col = divmod(panel_idx, n_cols)
+        ax = axes[row, col]
+
+        orig = originals[sample_idx]
+        recon = reconstructed[sample_idx]
+        cos = per_cosine[sample_idx]
+        mse = per_mse[sample_idx]
+
+        x = np.arange(len(orig))
+        ax.plot(x, orig, color="#2196F3", linewidth=1.2, label="Original")
+        ax.plot(x, recon, color="#FF9800", linewidth=1.2, linestyle="--",
+                label="Reconstructed")
+        ax.text(0.02, 0.98,
+                f"cos={cos:.3f}\nMSE={mse:.4f}",
+                transform=ax.transAxes, fontsize=8, verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.85))
+        ax.set_title(f"Sample {sample_idx}", fontsize=9)
+        ax.set_xlabel("Position", fontsize=8)
+        ax.set_ylabel("Amplitude", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.3)
+        if panel_idx == 0:
+            ax.legend(fontsize=7, loc="upper right")
+
+    for panel_idx in range(n_panels, n_rows * n_cols):
+        row, col = divmod(panel_idx, n_cols)
+        axes[row, col].axis("off")
+
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+def plot_fe_decoder_score_distribution(
+    per_cosine: np.ndarray,
+    per_mse: np.ndarray,
+    save_path: str,
+    title: str = "FE Decoder — Score Distributions",
+    run_name: str = "",
+) -> str:
+    """
+    Two-panel distribution plot for the eval split.
+
+    Left panel:  histogram of per-sample cosine similarity (higher is better)
+    Right panel: histogram of per-sample MSE (lower is better)
+
+    Both panels annotate mean ± std with vertical lines and a text box.
+
+    Args:
+        per_cosine: float [N_eval] per-sample cosine similarity
+        per_mse:    float [N_eval] per-sample MSE
+        save_path:  output PNG path
+        title:      figure suptitle
+        run_name:   checkpoint label shown in subtitle
+
+    Returns:
+        save_path
+    """
+    fig, (ax_cos, ax_mse) = plt.subplots(1, 2, figsize=(12, 5))
+
+    def _hist_panel(ax, values, xlabel, color, higher_is_better=True):
+        mean_v = np.mean(values)
+        std_v = np.std(values)
+        ax.hist(values, bins=40, color=color, alpha=0.7, edgecolor="white",
+                density=True)
+        ax.axvline(mean_v, color="black", linewidth=1.8, linestyle="-",
+                   label=f"Mean {mean_v:.3f}")
+        ax.axvline(mean_v - std_v, color="black", linewidth=1.0, linestyle="--",
+                   alpha=0.6)
+        ax.axvline(mean_v + std_v, color="black", linewidth=1.0, linestyle="--",
+                   alpha=0.6, label=f"±Std {std_v:.3f}")
+        ax.text(0.98, 0.97,
+                f"Mean: {mean_v:.4f}\nStd:  {std_v:.4f}\nN={len(values)}",
+                transform=ax.transAxes, fontsize=9, verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.85))
+        ax.set_xlabel(xlabel, fontsize=11)
+        ax.set_ylabel("Density", fontsize=11)
+        direction = "(↑ better)" if higher_is_better else "(↓ better)"
+        ax.set_title(f"{xlabel} {direction}", fontsize=11, fontweight="bold")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    _hist_panel(ax_cos, per_cosine, "Cosine Similarity", "#2196F3",
+                higher_is_better=True)
+    _hist_panel(ax_mse, per_mse, "MSE", "#F44336",
+                higher_is_better=False)
+
+    subtitle = f"Run: {run_name}" if run_name else ""
+    full_title = f"{title}\n{subtitle}" if subtitle else title
+    fig.suptitle(full_title, fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+# ── FE vs Transformer comparison bar chart ───────────────────────────────────
+
+def plot_fe_vs_transformer_comparison_bar_chart(
+    fe_metrics_list: List[Dict],
+    tr_metrics_list: List[Dict],
+    run_names: List[str],
+    output_path: str,
+) -> None:
+    """
+    Grouped bar chart: for each checkpoint, two side-by-side bars
+    (FE decoder = blue, Transformer decoder = orange) across 3 metric panels
+    (cosine similarity, MSE, R²).
+    """
+    n = len(run_names)
+    x = np.arange(n)
+    w = 0.38
+
+    metrics_cfg = [
+        ("fe_dec_cosine_mean", "fe_dec_cosine_std",
+         "Cosine Similarity (↑)", "Reconstruction Cosine (mean ± std)", True, ".3f"),
+        ("fe_dec_mse", None,
+         "MSE (↓)",               "Reconstruction MSE",                 False, ".4f"),
+        ("fe_dec_r2",  None,
+         "R² (↑)",                "Reconstruction R²",                  True,  ".3f"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig.suptitle("FE Decoder  vs  Transformer Decoder — Checkpoint Comparison",
+                 fontsize=13, fontweight="bold")
+
+    fe_color = "#3498DB"
+    tr_color = "#E67E22"
+
+    for ax, (key, std_key, ylabel, title, higher, fmt) in zip(axes, metrics_cfg):
+        fe_vals = [m[key] for m in fe_metrics_list]
+        tr_vals = [m[key] for m in tr_metrics_list]
+        fe_errs = [m[std_key] for m in fe_metrics_list] if std_key else None
+        tr_errs = [m[std_key] for m in tr_metrics_list] if std_key else None
+
+        b_fe = ax.bar(x - w / 2, fe_vals, w,
+                      yerr=fe_errs, capsize=4 if fe_errs else 0,
+                      color=fe_color, alpha=0.85, label="FE decoder")
+        b_tr = ax.bar(x + w / 2, tr_vals, w,
+                      yerr=tr_errs, capsize=4 if tr_errs else 0,
+                      color=tr_color, alpha=0.85, label="Transformer decoder")
+
+        for bar, val in zip(b_fe, fe_vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + (0.003 if higher else 1e-5),
+                    f"{val:{fmt}}", ha="center", va="bottom", fontsize=7.5,
+                    color=fe_color, fontweight="bold")
+        for bar, val in zip(b_tr, tr_vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + (0.003 if higher else 1e-5),
+                    f"{val:{fmt}}", ha="center", va="bottom", fontsize=7.5,
+                    color=tr_color, fontweight="bold")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(run_names, rotation=18, ha="right", fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.legend(fontsize=9)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[+] Saved FE vs Transformer bar chart: {output_path}")
+
+
+# ── Triple reconstruction comparison (original / FE recon / transformer recon) ─
+
+def plot_reconstruction_triple(
+    originals: np.ndarray,
+    fe_reconstructed: np.ndarray,
+    tr_reconstructed: np.ndarray,
+    per_cosine_fe: np.ndarray,
+    per_cosine_tr: np.ndarray,
+    per_mse_fe: np.ndarray,
+    per_mse_tr: np.ndarray,
+    save_path: str,
+    title: str = "FE vs Transformer Decoder — Reconstruction Comparison",
+    n_panels: int = 8,
+    seed: int = 0,
+) -> str:
+    """
+    3-row grid:  Row 1 = original  |  Row 2 = FE recon  |  Row 3 = Transformer recon.
+
+    All three rows share the same randomly selected eval samples so the
+    reconstructions can be compared column by column.
+    """
+    rng = np.random.default_rng(seed)
+    n_panels = min(n_panels, len(originals))
+    indices = rng.choice(len(originals), size=n_panels, replace=False)
+
+    fig, axes = plt.subplots(3, n_panels, figsize=(2.5 * n_panels, 8))
+    if n_panels == 1:
+        axes = axes[:, np.newaxis]
+
+    row_labels = ["Original", "FE decoder", "Transformer\ndecoder"]
+    row_colors = ["#555555", "#3498DB", "#E67E22"]
+
+    for col, idx in enumerate(indices):
+        orig = originals[idx]
+        fe   = fe_reconstructed[idx]
+        tr   = tr_reconstructed[idx]
+        x    = np.arange(len(orig))
+
+        for row, (signal, color) in enumerate([(orig, "#555555"), (fe, "#3498DB"), (tr, "#E67E22")]):
+            ax = axes[row][col]
+            ax.plot(x, orig,   color="#CCCCCC", linewidth=0.8, alpha=0.7)
+            ax.plot(x, signal, color=color,     linewidth=1.0)
+            ax.set_xlim(0, len(orig) - 1)
+            ax.tick_params(labelsize=6)
+            ax.grid(True, alpha=0.2)
+
+            if col == 0:
+                ax.set_ylabel(row_labels[row], fontsize=8, color=row_colors[row],
+                              fontweight="bold")
+            if row == 0:
+                ax.set_title(f"Sample {idx}", fontsize=7)
+            if row == 1:
+                ax.set_xlabel(
+                    f"cos={per_cosine_fe[idx]:.3f}  mse={per_mse_fe[idx]:.4f}",
+                    fontsize=6,
+                )
+            if row == 2:
+                ax.set_xlabel(
+                    f"cos={per_cosine_tr[idx]:.3f}  mse={per_mse_tr[idx]:.4f}",
+                    fontsize=6,
+                )
+
+    fig.suptitle(title, fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+# ── D1: Per-bin normalized RMSE heatmap ──────────────────────────────────────
+
+def plot_per_bin_error_heatmap(
+    originals_list: List[np.ndarray],
+    reconstructed_list: List[np.ndarray],
+    run_names: List[str],
+    save_path: str,
+) -> str:
+    """
+    D1 — Heatmap: rows = models, columns = frequency bins (245).
+    Color encodes normalized RMSE = sqrt(mean((orig-recon)²)) / (std(orig) + 1e-8).
+    Teal = low error, red = high error.
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    n_models = len(run_names)
+    n_bins = originals_list[0].shape[1]
+
+    heatmap = np.zeros((n_models, n_bins))
+    for i, (orig, recon) in enumerate(zip(originals_list, reconstructed_list)):
+        rmse = np.sqrt(np.mean((orig - recon) ** 2, axis=0))
+        heatmap[i] = rmse / (np.std(orig, axis=0) + 1e-8)
+
+    cmap = LinearSegmentedColormap.from_list(
+        "teal_red", ["#00897B", "#FFF9C4", "#C62828"]
+    )
+
+    fig_h = max(2.5, n_models * 0.9 + 1.5)
+    fig, ax = plt.subplots(figsize=(14, fig_h))
+
+    im = ax.imshow(heatmap, aspect="auto", cmap=cmap, interpolation="nearest")
+    plt.colorbar(im, ax=ax, label="Normalized RMSE  (lower = better)", shrink=0.8)
+
+    ax.set_yticks(range(n_models))
+    ax.set_yticklabels(run_names, fontsize=10)
+    ax.set_xlabel("Frequency Bin (0 – 244)", fontsize=11)
+    ax.set_title(
+        "D1 — Per-Bin Normalized RMSE\n"
+        r"RMSE$_k$ / std($x_k$)  per frequency bin $k$",
+        fontsize=12, fontweight="bold",
+    )
+
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+# ── D2: PCA component R² ─────────────────────────────────────────────────────
+
+def plot_pca_component_r2(
+    originals: np.ndarray,
+    reconstructed_list: List[np.ndarray],
+    run_names: List[str],
+    save_path: str,
+    n_components: int = 50,
+) -> str:
+    """
+    D2 — Line chart of R² per PCA component (1–50).
+
+    PCA is fitted once on the original eval spectrograms; both originals and
+    each model's reconstructions are projected into that space.  R² is computed
+    per component across all eval samples.
+
+    The x-coordinate where each model's curve first crosses R²=0.5 is the
+    "effective reconstruction depth" — annotated on the chart.
+    """
+    from sklearn.decomposition import PCA
+
+    pca = PCA(n_components=n_components)
+    proj_orig = pca.fit_transform(originals)          # [N, n_components]
+
+    colors = ["#3498DB", "#E74C3C", "#27AE60", "#8E44AD", "#F39C12",
+              "#1ABC9C", "#E67E22", "#95A5A6"]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    for i, (recon, name) in enumerate(zip(reconstructed_list, run_names)):
+        proj_recon = pca.transform(recon)
+
+        r2_per_comp = []
+        for k in range(n_components):
+            ss_res = np.sum((proj_orig[:, k] - proj_recon[:, k]) ** 2)
+            ss_tot = np.sum((proj_orig[:, k] - proj_orig[:, k].mean()) ** 2)
+            r2_per_comp.append(float(1.0 - ss_res / (ss_tot + 1e-10)))
+
+        r2_arr = np.array(r2_per_comp)
+        color = colors[i % len(colors)]
+        ax.plot(range(1, n_components + 1), r2_arr,
+                color=color, linewidth=2.0, label=name)
+
+        # Mark effective depth (first component that drops below 0.5)
+        crossing = next((k + 1 for k, v in enumerate(r2_arr) if v < 0.5), None)
+        if crossing:
+            ax.axvline(crossing, color=color, linestyle=":", linewidth=1.2, alpha=0.7)
+            ax.text(crossing + 0.3, 0.53, str(crossing),
+                    color=color, fontsize=8, va="bottom")
+
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=1.0,
+               label="R²=0.5 threshold")
+    ax.axhline(0.0, color="black", linewidth=0.5, alpha=0.3)
+    ax.set_xlim(1, n_components)
+    ax.set_ylim(-0.1, 1.05)
+    ax.set_xlabel("PCA Component Index", fontsize=11)
+    ax.set_ylabel("R²", fontsize=11)
+    ax.set_title(
+        "D2 — PCA Component R²\n"
+        "Number at dotted line = effective reconstruction depth (first component below R²=0.5)",
+        fontsize=12, fontweight="bold",
+    )
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+# ── D3: Residual scatter ──────────────────────────────────────────────────────
+
+def plot_residual_scatter(
+    originals_list: List[np.ndarray],
+    reconstructed_list: List[np.ndarray],
+    run_names: List[str],
+    save_path: str,
+    n_points: int = 2000,
+) -> str:
+    """
+    D3 — Residual scatter: x = original value, y = original − reconstructed.
+
+    2000 random (sample, bin) pairs are plotted per panel.
+    A dashed trend line exposes any slope — a non-zero slope indicates the
+    decoder systematically under-predicts high-amplitude bins (positive slope)
+    or over-predicts them (negative slope).  Ideal: flat band at y=0.
+    """
+    n_models = len(run_names)
+    n_cols = min(n_models, 3)
+    n_rows = (n_models + n_cols - 1) // n_cols
+
+    colors = ["#3498DB", "#E74C3C", "#27AE60", "#8E44AD", "#F39C12",
+              "#1ABC9C", "#E67E22", "#95A5A6"]
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(5.5 * n_cols, 4.5 * n_rows),
+                             squeeze=False)
+    rng = np.random.default_rng(42)
+
+    for i, (orig, recon, name) in enumerate(
+        zip(originals_list, reconstructed_list, run_names)
+    ):
+        row, col = divmod(i, n_cols)
+        ax = axes[row][col]
+
+        residuals = (orig - recon).ravel()
+        orig_flat = orig.ravel()
+
+        total = len(residuals)
+        idx = rng.choice(total, size=min(n_points, total), replace=False)
+        x, y = orig_flat[idx], residuals[idx]
+
+        ax.scatter(x, y, alpha=0.15, s=4, color=colors[i % len(colors)],
+                   rasterized=True)
+        ax.axhline(0, color="black", linewidth=1.5)
+
+        m, b = np.polyfit(x, y, 1)
+        x_line = np.linspace(x.min(), x.max(), 100)
+        ax.plot(x_line, m * x_line + b, "k--", linewidth=1.5,
+                label=f"slope = {m:+.3f}")
+
+        ax.set_xlabel("Original value", fontsize=10)
+        ax.set_ylabel("Residual (orig − recon)", fontsize=10)
+        ax.set_title(name, fontsize=10, fontweight="bold")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.2)
+
+    for j in range(n_models, n_rows * n_cols):
+        axes[j // n_cols][j % n_cols].axis("off")
+
+    fig.suptitle(
+        "D3 — Residual Scatter\n"
+        "Flat band → unbiased  |  Sloped band → systematic under/over-prediction",
+        fontsize=12, fontweight="bold",
+    )
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+# ── D4: FE decoder vs transformer decoder R² per sample ──────────────────────
+
+def plot_fe_vs_transformer_r2(
+    fe_per_r2_list: List[np.ndarray],
+    transformer_per_r2_list: List[np.ndarray],
+    run_names: List[str],
+    save_path: str,
+) -> str:
+    """
+    D4 — Scatter: FE decoder R² (x) vs transformer decoder R² (y) per sample.
+
+    Points well below the diagonal indicate samples where the transformer
+    discarded information that the FE still retained.
+    """
+    n_models = len(run_names)
+    n_cols = min(n_models, 3)
+    n_rows = (n_models + n_cols - 1) // n_cols
+
+    colors = ["#3498DB", "#E74C3C", "#27AE60", "#8E44AD", "#F39C12",
+              "#1ABC9C", "#E67E22", "#95A5A6"]
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(5.5 * n_cols, 4.5 * n_rows),
+                             squeeze=False)
+
+    for i, (fe_r2, tr_r2, name) in enumerate(
+        zip(fe_per_r2_list, transformer_per_r2_list, run_names)
+    ):
+        row, col = divmod(i, n_cols)
+        ax = axes[row][col]
+
+        ax.scatter(fe_r2, tr_r2, alpha=0.35, s=8,
+                   color=colors[i % len(colors)], rasterized=True)
+
+        lo = min(float(fe_r2.min()), float(tr_r2.min())) - 0.05
+        hi = max(float(fe_r2.max()), float(tr_r2.max())) + 0.05
+        ax.plot([lo, hi], [lo, hi], "k--", linewidth=1.2, label="y = x")
+
+        frac_below = float(np.mean(tr_r2 < fe_r2))
+        ax.text(
+            0.05, 0.95,
+            f"{frac_below * 100:.1f}% below diagonal\n"
+            f"(transformer < FE decoder)",
+            transform=ax.transAxes, fontsize=8, va="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+        )
+
+        ax.set_xlabel("FE decoder R² per sample", fontsize=10)
+        ax.set_ylabel("Transformer decoder R² per sample", fontsize=10)
+        ax.set_title(name, fontsize=10, fontweight="bold")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.2)
+
+    for j in range(n_models, n_rows * n_cols):
+        axes[j // n_cols][j % n_cols].axis("off")
+
+    fig.suptitle(
+        "D4 — FE Decoder vs Transformer Decoder R² per sample\n"
+        "Points below diagonal = samples where transformer lost info the FE had",
+        fontsize=12, fontweight="bold",
+    )
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path

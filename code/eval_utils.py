@@ -353,9 +353,21 @@ def load_wav_files_torchaudio(
     except ImportError:
         raise ImportError("torchaudio is required for light mode. Install with: pip install torchaudio")
 
-    wav_files = sorted(glob.glob(os.path.join(data_dir, "*.wav")))[:max_samples]
+    # Most nova_data datasets store WAVs in a `wav/` or `wavs/` subdirectory.
+    # Fall back to those automatically when the root dir has no *.wav files.
+    wav_root = data_dir
+    if not glob.glob(os.path.join(data_dir, "*.wav")):
+        for subdir in ("wav", "wavs"):
+            candidate = os.path.join(data_dir, subdir)
+            if glob.glob(os.path.join(candidate, "*.wav")):
+                wav_root = candidate
+                break
+
+    wav_files = sorted(glob.glob(os.path.join(wav_root, "*.wav")))[:max_samples]
     if not wav_files:
-        raise FileNotFoundError(f"No WAV files found in {data_dir}")
+        raise FileNotFoundError(
+            f"No WAV files found in {data_dir} (also tried wav/ and wavs/ subdirs)"
+        )
 
     inputs = []
     filenames = []

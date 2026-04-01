@@ -15,6 +15,157 @@ import warnings
 
 
 # ------------------------------------------------------------------ #
+#  FE Decoder Reconstruction (fe_dec_*)                              #
+# ------------------------------------------------------------------ #
+
+def compute_fe_decoder_metrics(
+    inputs: np.ndarray,
+    fe_outputs: np.ndarray,
+    train_mask: np.ndarray,
+    epochs: int = 200,
+    lr: float = 1e-3,
+    batch_size: int = 64,
+    seed: int = 42,
+    smoothness_weight: float = 0.1,
+    decoder_hidden: int = 0,
+) -> Tuple[Dict[str, float], np.ndarray]:
+    """
+    Train a linear decoder on frozen CNN feature-extractor outputs to reconstruct
+    the original 245-d input spectrogram, then evaluate on the held-out split.
+
+    The decoder is a single nn.Linear(fe_dim, input_dim) trained with MSE loss.
+    Using a linear probe is deliberate: it gives a clean lower bound on how much
+    information the FE output preserves about the original signal.
+
+    Args:
+        inputs:     float32 [N, input_dim=245]  raw input spectrograms
+        fe_outputs: float32 [N, fe_dim]  FE outputs, mean-pooled over the time axis
+                    (after feature_extractor → transpose → layer_norm → mean(dim=1))
+                    Expected fe_dim = 512 (not the flattened 47×512 = 24064).
+        train_mask: bool [N]  True for training samples
+        epochs:     number of Adam training epochs (default 200)
+        lr:         Adam learning rate (default 1e-3)
+        batch_size: mini-batch size during training (default 64)
+        seed:       torch manual seed for reproducibility
+
+    Returns:
+        (metrics, reconstructed_eval)
+        metrics: dict with keys fe_dec_mse, fe_dec_mae, fe_dec_cosine_mean,
+                 fe_dec_cosine_std, fe_dec_r2, fe_dec_train_loss
+        reconstructed_eval: float32 [N_eval, input_dim] reconstructed signals
+                            on the eval split, in original index order
+
+    Metric ranges:
+        fe_dec_cosine_mean: [-1, 1], higher is better
+        fe_dec_r2:          (-inf, 1], 1 = perfect reconstruction
+        fe_dec_mse:         [0, inf), lower is better
+    """
+    import torch
+    import torch.nn as nn
+
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+
+    eval_mask = ~train_mask
+
+    X_tr = torch.from_numpy(fe_outputs[train_mask]).float()
+    y_tr = torch.from_numpy(inputs[train_mask]).float()
+    X_ev = torch.from_numpy(fe_outputs[eval_mask]).float()
+    y_ev = torch.from_numpy(inputs[eval_mask]).float()
+
+    fe_dim = X_tr.shape[1]
+    input_dim = y_tr.shape[1]
+
+    if decoder_hidden > 0:
+        decoder = nn.Sequential(
+            nn.Linear(fe_dim, decoder_hidden),
+            nn.ReLU(),
+            nn.Linear(decoder_hidden, input_dim),
+        )
+        for layer in decoder:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.zeros_(layer.bias)
+    else:
+        decoder = nn.Linear(fe_dim, input_dim)
+        nn.init.xavier_uniform_(decoder.weight)
+        nn.init.zeros_(decoder.bias)
+
+    optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+
+    def smoothness_loss(pred: "torch.Tensor", weight: float = 0.1) -> "torch.Tensor":
+        # Penalize second-order differences (curvature) along the spectral axis.
+        diff2 = pred[:, 2:] - 2 * pred[:, 1:-1] + pred[:, :-2]
+        return weight * diff2.pow(2).mean()
+
+    n_train = X_tr.shape[0]
+    decoder.train()
+    train_loss = float("inf")
+    for epoch in range(epochs):
+        perm = torch.randperm(n_train)
+        epoch_loss = 0.0
+        n_batches = 0
+        for start in range(0, n_train, batch_size):
+            idx = perm[start : start + batch_size]
+            xb, yb = X_tr[idx], y_tr[idx]
+            optimizer.zero_grad()
+            pred = decoder(xb)
+            loss = loss_fn(pred, yb) + smoothness_loss(pred, weight=smoothness_weight)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
+        train_loss = epoch_loss / max(n_batches, 1)
+
+    decoder.eval()
+    with torch.no_grad():
+        pred_ev = decoder(X_ev).numpy()  # [N_eval, input_dim]
+
+    y_ev_np = y_ev.numpy()
+
+    # per-sample metrics
+    per_mse = np.mean((pred_ev - y_ev_np) ** 2, axis=1)
+    per_mae = np.mean(np.abs(pred_ev - y_ev_np), axis=1)
+
+    # cosine similarity per sample
+    norms_pred = np.linalg.norm(pred_ev, axis=1, keepdims=True) + 1e-10
+    norms_gt = np.linalg.norm(y_ev_np, axis=1, keepdims=True) + 1e-10
+    per_cosine = np.sum((pred_ev / norms_pred) * (y_ev_np / norms_gt), axis=1)
+
+    # R²
+    ss_res = np.sum((y_ev_np - pred_ev) ** 2)
+    ss_tot = np.sum((y_ev_np - y_ev_np.mean()) ** 2)
+    r2 = float(1.0 - ss_res / (ss_tot + 1e-10))
+
+    metrics = {
+        "fe_dec_mse": float(np.mean(per_mse)),
+        "fe_dec_mae": float(np.mean(per_mae)),
+        "fe_dec_cosine_mean": float(np.mean(per_cosine)),
+        "fe_dec_cosine_std": float(np.std(per_cosine)),
+        "fe_dec_r2": r2,
+        "fe_dec_train_loss": float(train_loss),
+        "fe_dec_n_train": int(train_mask.sum()),
+        "fe_dec_n_eval": int(eval_mask.sum()),
+        "fe_dec_fe_dim": fe_dim,
+        "fe_dec_input_dim": input_dim,
+    }
+
+    # per-sample R²
+    ss_res_per = np.sum((y_ev_np - pred_ev) ** 2, axis=1)
+    ss_tot_per = np.sum((y_ev_np - y_ev_np.mean(axis=1, keepdims=True)) ** 2, axis=1)
+    per_r2 = 1.0 - ss_res_per / (ss_tot_per + 1e-10)
+
+    # Attach per-sample arrays as numpy so callers can build plots
+    metrics["_per_cosine"] = per_cosine      # not serialised to JSON; prefix _ signals internal
+    metrics["_per_mse"] = per_mse
+    metrics["_per_mae"] = per_mae
+    metrics["_per_r2"] = per_r2
+
+    return metrics, pred_ev
+
+
+# ------------------------------------------------------------------ #
 #  KNN Retrieval & Neighbor Overlap (Phase 0A: audit-existing-evals) #
 # ------------------------------------------------------------------ #
 
