@@ -8,6 +8,35 @@ import logging
 import os
 import sys
 
+# ---------------------------------------------------------------------------
+# Server-aware path resolution
+# /mnt5  = geoffry (local workstation)
+# /storage = RunAI cluster
+# ---------------------------------------------------------------------------
+_MNT5_BASE = "/mnt5/noy/SpectralFM"
+_STORAGE_BASE = "/storage/noy/SpectralFM"
+
+def _detect_base_path() -> str:
+    """Return the correct repo root for this server."""
+    if os.path.isdir(_MNT5_BASE):
+        return _MNT5_BASE
+    if os.path.isdir(_STORAGE_BASE):
+        return _STORAGE_BASE
+    # Fallback: use whichever prefix the first path starts with
+    return _MNT5_BASE
+
+
+def _patch_cfg_paths(obj, src: str, dst: str):
+    """Recursively replace *src* with *dst* in every string value of *obj*
+    (dict or list produced by OmegaConf.to_container)."""
+    if isinstance(obj, dict):
+        return {k: _patch_cfg_paths(v, src, dst) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_patch_cfg_paths(v, src, dst) for v in obj]
+    if isinstance(obj, str):
+        return obj.replace(src, dst)
+    return obj
+
 try:
     import mlflow
     MLFLOW_AVAILABLE = True
@@ -53,10 +82,27 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
             OmegaConf.to_container(cfg, resolve=True, enum_to_str=True)
         )
     OmegaConf.set_struct(cfg, True)
-    
+
+    # --- Auto-fix hardcoded paths for the current server ---
+    _base = _detect_base_path()
+    _other = _STORAGE_BASE if _base == _MNT5_BASE else _MNT5_BASE
+    if _other in OmegaConf.to_yaml(cfg):
+        logger.info(
+            f"[server-path] Replacing '{_other}' → '{_base}' in all config paths"
+        )
+        with open_dict(cfg):
+            patched = _patch_cfg_paths(
+                OmegaConf.to_container(cfg, resolve=True, enum_to_str=True),
+                _other,
+                _base,
+            )
+            cfg = OmegaConf.create(patched)
+        OmegaConf.set_struct(cfg, True)
+
     # --- Initialize MLflow run (if available) ---
     if MLFLOW_AVAILABLE:
-        mlflow.set_tracking_uri("file:/mnt5/noy/code/mlruns")  # fixme noy change to a remote server if needed 
+        _mlflow_base = "/mnt5/noy" if _base == _MNT5_BASE else "/storage/noy"
+        mlflow.set_tracking_uri(f"file:{_mlflow_base}/code/mlruns")
         mlflow.set_experiment("SpectralFM")
 
         run_name = getattr(cfg.common, "wandb_run_name", None)
