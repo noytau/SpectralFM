@@ -17,12 +17,20 @@ _MNT5_BASE = "/mnt5/noy/SpectralFM"
 _STORAGE_BASE = "/storage/noy/SpectralFM"
 
 def _detect_base_path() -> str:
-    """Return the correct repo root for this server."""
-    if os.path.isdir(_MNT5_BASE):
-        return _MNT5_BASE
-    if os.path.isdir(_STORAGE_BASE):
+    """Return the correct repo root for this server.
+
+    Uses __file__ (the path of the running script) as the authoritative signal,
+    since both /mnt5 and /storage may be NFS-mounted on both servers.
+    """
+    this_file = os.path.abspath(__file__)
+    if this_file.startswith(_STORAGE_BASE):
         return _STORAGE_BASE
-    # Fallback: use whichever prefix the first path starts with
+    if this_file.startswith(_MNT5_BASE):
+        return _MNT5_BASE
+    # Fallback: check CWD
+    cwd = os.getcwd()
+    if cwd.startswith(_STORAGE_BASE):
+        return _STORAGE_BASE
     return _MNT5_BASE
 
 
