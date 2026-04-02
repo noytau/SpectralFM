@@ -346,11 +346,109 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=False, metadata={"help": "if true, does not load pretrained weights"}
     )
 
+    # --- Tier 1 ablation fields ---
+    fe_mode: str = field(
+        default="train",
+        metadata={"help": "Feature extractor mode: 'train' | 'frozen' | 'identity'"},
+    )
+    freeze_encoder: bool = field(
+        default=False,
+        metadata={"help": "Freeze all transformer encoder parameters"},
+    )
+    lambda_var: float = field(
+        default=0.0,
+        metadata={"help": "Weight for variance regularization loss (VICReg-style)"},
+    )
+    lambda_cov: float = field(
+        default=0.0,
+        metadata={"help": "Weight for covariance regularization loss (VICReg-style)"},
+    )
+    lambda_uniform: float = field(
+        default=0.0,
+        metadata={"help": "Weight for uniformity loss (Wang & Isola 2020)"},
+    )
+    var_gamma: float = field(
+        default=1.0,
+        metadata={"help": "Target std for variance hinge loss"},
+    )
+
 
 def get_annealed_rate(start, end, curr_step, total_steps):
     r = end - start
     pct_remaining = 1 - curr_step / total_steps
     return end - r * pct_remaining
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 ablation helpers
+# ---------------------------------------------------------------------------
+
+class IdentityFEProjection(nn.Module):
+    """Drop-in replacement for ConvFeatureExtractionModel used in ablations.
+
+    Maps each raw time step through a single linear layer without any striding,
+    so the sequence length T is preserved (unlike the CNN FE which reduces T by
+    the stride product).  Output shape matches ConvFE: [B, extractor_embed, T].
+    """
+
+    def __init__(self, extractor_embed: int):
+        super().__init__()
+        self.proj = nn.Linear(1, extractor_embed)
+
+    def forward(self, x):  # x: [B, T]
+        x = x.unsqueeze(-1)       # [B, T, 1]
+        x = self.proj(x)          # [B, T, extractor_embed]
+        return x.transpose(1, 2)  # [B, extractor_embed, T]
+
+
+def variance_loss(z: torch.Tensor, gamma: float = 1.0, eps: float = 1e-4) -> torch.Tensor:
+    """VICReg variance term: hinge loss pushing per-dim std above *gamma*.
+
+    Args:
+        z: embeddings of shape [N, D] or [B, T, D] (flattened internally).
+        gamma: target standard deviation (default 1.0).
+        eps: numerical stability offset added before sqrt.
+    Returns:
+        Scalar loss; 0 when every dimension already has std >= gamma.
+    """
+    if z.dim() == 3:
+        z = z.reshape(-1, z.shape[-1])
+    std = torch.sqrt(z.var(dim=0) + eps)
+    return F.relu(gamma - std).mean()
+
+
+def covariance_loss(z: torch.Tensor) -> torch.Tensor:
+    """VICReg covariance term: penalise off-diagonal entries of the cov matrix.
+
+    Args:
+        z: embeddings of shape [N, D] or [B, T, D] (flattened internally).
+    Returns:
+        Scalar loss; 0 when embedding dimensions are fully decorrelated.
+    """
+    if z.dim() == 3:
+        z = z.reshape(-1, z.shape[-1])
+    N, D = z.shape
+    z = z - z.mean(dim=0)
+    cov = (z.T @ z) / (N - 1)
+    off_diag = cov.pow(2).sum() - cov.diag().pow(2).sum()
+    return off_diag / D
+
+
+def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
+    """Wang & Isola (ICML 2020) uniformity loss on the unit hypersphere.
+
+    Args:
+        z: embeddings of shape [N, D] (will be L2-normalised internally).
+           For efficiency, pass at most ~1024 vectors.
+        t: temperature (default 2.0).
+    Returns:
+        Scalar log-mean-exp loss; lower means more uniformly distributed.
+    """
+    if z.dim() == 3:
+        z = z.reshape(-1, z.shape[-1])
+    z = F.normalize(z, dim=1)
+    sq_pdist = torch.pdist(z, p=2).pow(2)
+    return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
 
 
 @register_model("data2vec_audio", dataclass=Data2VecAudioConfig)
@@ -378,6 +476,17 @@ class Data2VecAudioModel(BaseFairseqModel):
             mode=cfg.extractor_mode,
             conv_bias=cfg.conv_bias,
         )
+
+        # --- Tier 1: FE mode wiring ---
+        fe_mode = getattr(cfg, "fe_mode", "train")
+        if fe_mode == "identity":
+            self.feature_extractor = IdentityFEProjection(self.extractor_embed)
+            logger.info("[Tier1] FE replaced with IdentityFEProjection (no striding)")
+        elif fe_mode == "frozen":
+            # feature_grad_mult=0 routes FE forward through torch.no_grad(),
+            # so no gradients reach the optimizer for FE parameters.
+            self.feature_grad_mult = 0.0
+            logger.info("[Tier1] FE frozen (feature_grad_mult=0, weights from cfg.model_path)")
 
         self.post_extract_proj = nn.Linear(self.extractor_embed, cfg.encoder_embed_dim)
 
@@ -409,6 +518,12 @@ class Data2VecAudioModel(BaseFairseqModel):
         self.encoder = TransformerEncoder(cfg)
         self.layer_norm = LayerNorm(self.extractor_embed)
 
+        # --- Tier 1: encoder freezing ---
+        if getattr(cfg, "freeze_encoder", False):
+            for p in self.encoder.parameters():
+                p.requires_grad = False
+            logger.info("[Tier1] Transformer encoder frozen")
+
         self.final_proj = nn.Linear(self.embed, self.embed)
 
         self.num_updates = 0
@@ -436,9 +551,9 @@ class Data2VecAudioModel(BaseFairseqModel):
         if debug_enabled:
             set_debug_plot_mode('train')
 
-        if cfg.train_only_fe:
+        if cfg.train_only_fe and getattr(cfg, "fe_mode", "train") == "train":
             self.freeze_all_except_feature_extractor()
-        else:
+        elif not cfg.train_only_fe:
             print("[+] Training the entire model (not only Feature-Extractor)")
             logger.info("[+] Training the entire model (not only Feature-Extractor)")
 
@@ -560,11 +675,30 @@ class Data2VecAudioModel(BaseFairseqModel):
         """Build a new model instance."""
         model = cls(cfg)
         if cfg.model_path and not cfg.skip_pretrained_weights:
-                model_path = cfg.model_path
-                logger.info(f"Loading pretrained checkpoint from {model_path}")
-                print(f"Loading pretrained checkpoint from {model_path}")
-                state = checkpoint_utils.load_checkpoint_to_cpu(model_path, {})
-                ckpt_model = state.get("model", state)
+            logger.info(f"Loading pretrained checkpoint from {cfg.model_path}")
+            print(f"Loading pretrained checkpoint from {cfg.model_path}")
+            state = checkpoint_utils.load_checkpoint_to_cpu(cfg.model_path, {})
+            ckpt = state.get("model", state)
+            ckpt.pop("_ema", None)
+
+            fe_mode = getattr(cfg, "fe_mode", "train")
+            if fe_mode == "frozen":
+                # Load only the feature_extractor weights from the pretrained checkpoint.
+                # This lets us initialise the FE with Librispeech-pretrained weights
+                # while keeping the transformer randomly initialised.
+                fe_weights = {
+                    k[len("feature_extractor."):]: v
+                    for k, v in ckpt.items()
+                    if k.startswith("feature_extractor.")
+                }
+                model.feature_extractor.load_state_dict(fe_weights, strict=True)
+                logger.info(
+                    f"[Tier1] Loaded pretrained FE weights ({len(fe_weights)} tensors) "
+                    f"from {cfg.model_path}"
+                )
+            else:
+                model.load_state_dict(ckpt, strict=False)
+                logger.info(f"Loaded full pretrained checkpoint (strict=False)")
 
         return model
 
@@ -810,23 +944,29 @@ class Data2VecAudioModel(BaseFairseqModel):
         orig_padding_mask = padding_mask
 
         if padding_mask is not None and padding_mask.any():
-            input_lengths = (1 - padding_mask.long()).sum(-1)
-            # apply conv formula to get real output_lengths
-            output_lengths = self._get_feat_extract_output_lengths(input_lengths)
+            if getattr(self.cfg, "fe_mode", "train") == "identity":
+                # IdentityFEProjection preserves sequence length T, so the
+                # padding_mask from the dataloader (shape [B, T]) is already
+                # correct — no conv-stride recalculation needed.
+                pass
+            else:
+                input_lengths = (1 - padding_mask.long()).sum(-1)
+                # apply conv formula to get real output_lengths
+                output_lengths = self._get_feat_extract_output_lengths(input_lengths)
 
-            padding_mask = torch.zeros(
-                features.shape[:2], dtype=features.dtype, device=features.device
-            )
-
-            # these two operations makes sure that all values
-            # before the output lengths indices are attended to
-            padding_mask[
-                (
-                    torch.arange(padding_mask.shape[0], device=padding_mask.device),
-                    output_lengths - 1,
+                padding_mask = torch.zeros(
+                    features.shape[:2], dtype=features.dtype, device=features.device
                 )
-            ] = 1
-            padding_mask = (1 - padding_mask.flip([-1]).cumsum(-1).flip([-1])).bool()
+
+                # these two operations makes sure that all values
+                # before the output lengths indices are attended to
+                padding_mask[
+                    (
+                        torch.arange(padding_mask.shape[0], device=padding_mask.device),
+                        output_lengths - 1,
+                    )
+                ] = 1
+                padding_mask = (1 - padding_mask.flip([-1]).cumsum(-1).flip([-1])).bool()
         else:
             padding_mask = None
 
@@ -984,6 +1124,11 @@ class Data2VecAudioModel(BaseFairseqModel):
 
             y = y[mask_indices]
 
+        # Stash full encoder output (all positions) for regularization losses.
+        # detach() so that reg-loss gradients flow only through their own path
+        # and do not interfere with the EMA target computation.
+        x_for_reg = x.reshape(-1, x.shape[-1]).detach()
+
         x = x[mask_indices]
         x = self.final_proj(x)
 
@@ -1006,6 +1151,25 @@ class Data2VecAudioModel(BaseFairseqModel):
             scale = 1 / math.sqrt(sz)
 
         result["losses"]["regression"] = loss.sum() * scale
+
+        # --- Tier 1 regularization losses ---
+        if getattr(self.cfg, "lambda_var", 0.0) > 0:
+            vl = variance_loss(x_for_reg, getattr(self.cfg, "var_gamma", 1.0))
+            result["losses"]["var"] = vl * self.cfg.lambda_var
+            result["var"] = vl.detach()
+        if getattr(self.cfg, "lambda_cov", 0.0) > 0:
+            cl = covariance_loss(x_for_reg)
+            result["losses"]["cov"] = cl * self.cfg.lambda_cov
+            result["cov"] = cl.detach()
+        if getattr(self.cfg, "lambda_uniform", 0.0) > 0:
+            # uniformity is O(N²); subsample to at most 1024 vectors for efficiency
+            emb_u = x_for_reg
+            if emb_u.shape[0] > 1024:
+                idx = torch.randperm(emb_u.shape[0], device=emb_u.device)[:1024]
+                emb_u = emb_u[idx]
+            ul = uniformity_loss(emb_u)
+            result["losses"]["uniform"] = ul * self.cfg.lambda_uniform
+            result["uniform"] = ul.detach()
 
         if "sample_size" not in result:
             result["sample_size"] = loss.numel()
