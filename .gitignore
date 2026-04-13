@@ -33,6 +33,9 @@ wheels/
 # Evaluation outputs (large generated artifacts)
 code/eval_results/
 
+# Pulled RunAI outputs (kubectl cp); keep local only
+artifacts/
+
 # Logs and data
 *.log
 *.sqlite3

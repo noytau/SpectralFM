@@ -48,7 +48,7 @@ submit_job() {
     echo ""
 }
 
-echo "=== Submitting reconstruction loss experiments (batch=512, update_freq=4) ==="
+echo "=== Submitting reconstruction loss experiments Exp1–Exp4 (batch=512, update_freq=4) ==="
 echo ""
 
 # Exp1: YAML defaults (λ_fe=1, λ_trans=0, freeze_encoder=false)
@@ -60,6 +60,10 @@ submit_job "sfm-recon-exp2-fe-tr" "40G" \
 
 submit_job "sfm-recon-exp3-frozen" "40G" \
   "model.freeze_encoder=true common.wandb_run_name=recon_exp3_fe-recon_frozen-trans"
+
+# Exp4: train feature extractor stack only (transformer frozen by train_only_fe); FE + trans recon λ unchanged
+submit_job "sfm-recon-exp4-train-fe-only" "40G" \
+  "model.train_only_fe=true common.wandb_run_name=recon_exp4_train-fe-only_lambda-fe1"
 
 echo "=== Done ==="
 echo "WandB: spectralfm_recon_loss"

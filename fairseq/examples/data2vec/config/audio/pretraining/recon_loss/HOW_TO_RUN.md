@@ -104,11 +104,12 @@ python fairseq_cli/hydra_train.py \
 
 ## Experiment matrix (submit only adds WandB name + one or two overrides)
 
-| Job | Extra overrides |
-|-----|------------------|
-| Exp 1 | (YAML default: λ_fe=1, λ_trans=0, train encoder) |
-| Exp 2 | `model.lambda_recon_trans=1.0` |
-| Exp 3 | `model.freeze_encoder=true` |
+| Job (RunAI) | Extra overrides |
+|---------------|-----------------|
+| Exp 1 `sfm-recon-exp1-fe` | (YAML default: λ_fe=1, λ_trans=0, train encoder) |
+| Exp 2 `sfm-recon-exp2-fe-tr` | `model.lambda_recon_trans=1.0` |
+| Exp 3 `sfm-recon-exp3-frozen` | `model.freeze_encoder=true` |
+| Exp 4 `sfm-recon-exp4-train-fe-only` | `model.train_only_fe=true` (FE stack trains; transformer not updated) |
 
 ## RunAI
 
