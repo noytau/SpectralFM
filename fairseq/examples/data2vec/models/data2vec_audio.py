@@ -6,7 +6,7 @@
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 from omegaconf import II
 
@@ -372,6 +372,55 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         metadata={"help": "Target std for variance hinge loss"},
     )
 
+    # --- Reconstruction loss (optional; EMA regression unchanged) ---
+    lambda_recon_fe: float = field(
+        default=0.0,
+        metadata={"help": "Weight for L1 recon from pooled FE (post layer_norm) to input spectrogram"},
+    )
+    lambda_recon_trans: float = field(
+        default=0.0,
+        metadata={"help": "Weight for L1 recon from pooled transformer output to input spectrogram"},
+    )
+    recon_output_dim: int = field(
+        default=245,
+        metadata={"help": "Target spectrogram dimension for reconstruction heads"},
+    )
+    recon_decoder_hidden: str = field(
+        default="512",
+        metadata={"help": "Comma-separated hidden dims for recon MLP, or empty string for linear"},
+    )
+
+    # --- Cosine similarity maps (optional; rank 0; see cosim_epoch_utils + HOW_TO_RUN) ---
+    epoch_cosim_enable: bool = field(
+        default=False,
+        metadata={"help": "If True, run cosine heatmaps on a fixed subset (by step or end-of-epoch)"},
+    )
+    epoch_cosim_interval_updates: int = field(
+        default=1000,
+        metadata={
+            "help": "If >0, run cosine maps every N optimizer steps (skips end-of-epoch cosim). "
+            "If 0, run only in task.end_epoch once per training epoch."
+        },
+    )
+    epoch_cosim_subset_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to .npy/.txt of train indices or structured_similarity JSON; see cosim_epoch_utils"
+        },
+    )
+    epoch_cosim_max_samples: int = field(
+        default=100,
+        metadata={"help": "Max indices after loading subset"},
+    )
+    epoch_cosim_output_subdir: str = field(
+        default="cosim_epoch",
+        metadata={"help": "Subdir under checkpoint.save_dir for PNG heatmaps"},
+    )
+    epoch_cosim_micro_batch: int = field(
+        default=8,
+        metadata={"help": "Micro-batch size for epoch cosim forward passes"},
+    )
+
 
 def get_annealed_rate(start, end, curr_step, total_steps):
     r = end - start
@@ -451,6 +500,28 @@ def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
     return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
 
 
+class ReconstructionDecoder(nn.Module):
+    """MLP (or linear) mapping pooled embeddings → spectrogram bins."""
+
+    def __init__(self, in_dim: int, out_dim: int, hidden_spec: str):
+        super().__init__()
+        spec = (hidden_spec or "").strip()
+        if not spec:
+            self.net = nn.Linear(in_dim, out_dim)
+        else:
+            dims = [int(x.strip()) for x in spec.split(",") if x.strip()]
+            layers = []
+            prev = in_dim
+            for h in dims:
+                layers.extend([nn.Linear(prev, h), nn.GELU()])
+                prev = h
+            layers.append(nn.Linear(prev, out_dim))
+            self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 @register_model("data2vec_audio", dataclass=Data2VecAudioConfig)
 class Data2VecAudioModel(BaseFairseqModel):
     def __init__(self, cfg: Data2VecAudioConfig):
@@ -526,6 +597,11 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         self.final_proj = nn.Linear(self.embed, self.embed)
 
+        hspec = getattr(cfg, "recon_decoder_hidden", "512") or "512"
+        out_d = int(getattr(cfg, "recon_output_dim", 245))
+        self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, hspec)
+        self.trans_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
+
         self.num_updates = 0
         
         # For sanity testing: fixed mask indices range
@@ -556,6 +632,13 @@ class Data2VecAudioModel(BaseFairseqModel):
         elif not cfg.train_only_fe:
             print("[+] Training the entire model (not only Feature-Extractor)")
             logger.info("[+] Training the entire model (not only Feature-Extractor)")
+
+        if getattr(cfg, "lambda_recon_fe", 0.0) > 0:
+            for p in self.fe_recon_decoder.parameters():
+                p.requires_grad = True
+        if getattr(cfg, "lambda_recon_trans", 0.0) > 0:
+            for p in self.trans_recon_decoder.parameters():
+                p.requires_grad = True
 
     def freeze_all_except_feature_extractor(self):
         for name, p in self.named_parameters():
@@ -940,6 +1023,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         features = features.transpose(1, 2)
 
         features = self.layer_norm(features)
+        fe_seq = features  # pre-mask FE for reconstruction loss
 
         orig_padding_mask = padding_mask
 
@@ -1129,6 +1213,20 @@ class Data2VecAudioModel(BaseFairseqModel):
         # and do not interfere with the EMA target computation.
         x_for_reg = x.reshape(-1, x.shape[-1]).detach()
 
+        recon_target = self._recon_target(source)
+        if getattr(self.cfg, "lambda_recon_fe", 0.0) > 0:
+            fe_p = self._mean_pool(fe_seq, padding_mask)
+            pred_fe = self.fe_recon_decoder(fe_p)
+            result["losses"]["recon_fe"] = (
+                F.l1_loss(pred_fe, recon_target, reduction="mean") * self.cfg.lambda_recon_fe
+            )
+        if getattr(self.cfg, "lambda_recon_trans", 0.0) > 0:
+            tp = self._mean_pool(x, padding_mask)
+            pred_t = self.trans_recon_decoder(tp)
+            result["losses"]["recon_trans"] = (
+                F.l1_loss(pred_t, recon_target, reduction="mean") * self.cfg.lambda_recon_trans
+            )
+
         x = x[mask_indices]
         x = self.final_proj(x)
 
@@ -1214,6 +1312,80 @@ class Data2VecAudioModel(BaseFairseqModel):
             return torch.sqrt(var + 1e-6).mean()
         else:
             return torch.sqrt(y.var(dim=0) + 1e-6).mean()
+
+    def _mean_pool(
+        self, x: torch.Tensor, padding_mask: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        """Mean-pool over time; padding_mask True = padded (ignored)."""
+        if padding_mask is None:
+            return x.mean(dim=1)
+        m = (~padding_mask).float().unsqueeze(-1)
+        denom = m.sum(dim=1).clamp(min=1e-8)
+        return (x * m).sum(dim=1) / denom
+
+    def _recon_target(self, source: torch.Tensor) -> torch.Tensor:
+        d = int(getattr(self.cfg, "recon_output_dim", 245))
+        x = source.float()
+        if x.dim() == 2:
+            if x.shape[1] >= d:
+                return x[:, :d]
+            return F.pad(x, (0, d - x.shape[1]))
+        flat = x.reshape(x.shape[0], -1)
+        if flat.shape[1] >= d:
+            return flat[:, :d]
+        return F.pad(flat, (0, d - flat.shape[1]))
+
+    def extract_cosim_epoch_features(
+        self,
+        source: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Input / pooled FE (post layer_norm) / pooled transformer emb for epoch cosine maps."""
+        was_training = self.training
+        self.eval()
+        try:
+            with torch.no_grad():
+                features = source
+                if self.feature_grad_mult > 0:
+                    features = self.feature_extractor(features)
+                else:
+                    with torch.no_grad():
+                        features = self.feature_extractor(features)
+                features = features.transpose(1, 2)
+                features = self.layer_norm(features)
+                fe_seq = features
+                if padding_mask is not None and padding_mask.any():
+                    if getattr(self.cfg, "fe_mode", "train") == "identity":
+                        pass
+                    else:
+                        input_lengths = (1 - padding_mask.long()).sum(-1)
+                        output_lengths = self._get_feat_extract_output_lengths(input_lengths)
+                        padding_mask = torch.zeros(
+                            features.shape[:2], dtype=features.dtype, device=features.device
+                        )
+                        padding_mask[
+                            (
+                                torch.arange(padding_mask.shape[0], device=padding_mask.device),
+                                output_lengths - 1,
+                            )
+                        ] = 1
+                        padding_mask = (
+                            1 - padding_mask.flip([-1]).cumsum(-1).flip([-1])
+                        ).bool()
+                else:
+                    padding_mask = None
+
+                fe_pool = self._mean_pool(fe_seq, padding_mask)
+                if self.post_extract_proj is not None:
+                    features = self.post_extract_proj(features)
+                features = self.dropout_input(features)
+                x, _ = self.encoder(features, padding_mask=padding_mask)
+                emb_pool = self._mean_pool(x, padding_mask)
+                inp = self._recon_target(source)
+                return inp, fe_pool, emb_pool
+        finally:
+            if was_training:
+                self.train()
 
     def extract_features(
         self, source, padding_mask, mask=False, layer=None

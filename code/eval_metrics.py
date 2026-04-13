@@ -28,25 +28,35 @@ def compute_fe_decoder_metrics(
     seed: int = 42,
     smoothness_weight: float = 0.1,
     decoder_hidden: int = 0,
+    decoder_layers: Optional[List[int]] = None,
 ) -> Tuple[Dict[str, float], np.ndarray]:
     """
-    Train a linear decoder on frozen CNN feature-extractor outputs to reconstruct
-    the original 245-d input spectrogram, then evaluate on the held-out split.
+    Train a decoder on frozen CNN feature-extractor outputs to reconstruct the
+    original 245-d input spectrogram, then evaluate on the held-out split.
 
-    The decoder is a single nn.Linear(fe_dim, input_dim) trained with MSE loss.
-    Using a linear probe is deliberate: it gives a clean lower bound on how much
-    information the FE output preserves about the original signal.
+    Three decoder architectures (controlled by ``decoder_layers``):
+      - Linear  (decoder_layers=None or []):  Linear(fe_dim → 245)          ~125k params
+      - MLP-1   (decoder_layers=[512]):       Linear→ReLU→Linear            ~387k params
+      - MLP-2   (decoder_layers=[512, 256]):  Linear→ReLU→Linear→ReLU→Linear~518k params
+
+    Using a linear probe is the lower bound on decodable information; MLP variants
+    reveal whether the FE representation is linearly vs non-linearly structured.
 
     Args:
-        inputs:     float32 [N, input_dim=245]  raw input spectrograms
-        fe_outputs: float32 [N, fe_dim]  FE outputs, mean-pooled over the time axis
-                    (after feature_extractor → transpose → layer_norm → mean(dim=1))
-                    Expected fe_dim = 512 (not the flattened 47×512 = 24064).
-        train_mask: bool [N]  True for training samples
-        epochs:     number of Adam training epochs (default 200)
-        lr:         Adam learning rate (default 1e-3)
-        batch_size: mini-batch size during training (default 64)
-        seed:       torch manual seed for reproducibility
+        inputs:         float32 [N, input_dim=245]  raw input spectrograms
+        fe_outputs:     float32 [N, fe_dim]  FE outputs, mean-pooled over the time axis
+                        (after feature_extractor → transpose → layer_norm → mean(dim=1))
+                        Expected fe_dim = 512 (not the flattened 47×512 = 24064).
+        train_mask:     bool [N]  True for training samples
+        epochs:         number of Adam training epochs (default 200)
+        lr:             Adam learning rate (default 1e-3)
+        batch_size:     mini-batch size during training (default 64)
+        seed:           torch manual seed for reproducibility
+        smoothness_weight: weight for second-order curvature penalty on decoder output
+        decoder_hidden: (legacy) single hidden-layer size; ignored when decoder_layers given
+        decoder_layers: list of hidden layer dims, e.g. [512] or [512, 256].
+                        None / [] → single Linear decoder (default).
+                        Overrides decoder_hidden when set.
 
     Returns:
         (metrics, reconstructed_eval)
@@ -63,7 +73,6 @@ def compute_fe_decoder_metrics(
     import torch
     import torch.nn as nn
 
-    rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
 
     eval_mask = ~train_mask
@@ -76,12 +85,20 @@ def compute_fe_decoder_metrics(
     fe_dim = X_tr.shape[1]
     input_dim = y_tr.shape[1]
 
-    if decoder_hidden > 0:
-        decoder = nn.Sequential(
-            nn.Linear(fe_dim, decoder_hidden),
-            nn.ReLU(),
-            nn.Linear(decoder_hidden, input_dim),
-        )
+    # Resolve hidden layers: decoder_layers takes precedence over legacy decoder_hidden
+    hidden = decoder_layers if decoder_layers is not None else (
+        [decoder_hidden] if decoder_hidden > 0 else []
+    )
+
+    if hidden:
+        layer_list = []
+        in_dim = fe_dim
+        for h in hidden:
+            layer_list.append(nn.Linear(in_dim, h))
+            layer_list.append(nn.ReLU())
+            in_dim = h
+        layer_list.append(nn.Linear(in_dim, input_dim))
+        decoder = nn.Sequential(*layer_list)
         for layer in decoder:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)

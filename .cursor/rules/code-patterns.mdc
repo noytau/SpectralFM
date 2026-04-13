@@ -1,0 +1,70 @@
+---
+description: Code patterns and conventions for evaluation_runner.py implementation
+globs:
+  - code/evaluation_runner.py
+  - code/run_full_evaluation.py
+---
+
+# Code Patterns for SpectralFM Evaluation
+
+## Adding a New `_eval_*` Method
+
+Every eval method follows this pattern:
+
+```python
+def _eval_new_metric(self, inputs: np.ndarray, embeddings: np.ndarray,
+                     output_dir: str) -> Dict[str, float]:
+    """
+    Brief description of what this evaluates.
+    
+    Metrics: MetricName (Author, Year), ...
+    Expected range: [low, high] where high = good.
+    """
+    metrics = {}
+    
+    # 1. Compute metrics
+    metrics["metric_key"] = value
+    
+    # 2. Register descriptions
+    self._current_descriptions["metric_key"] = "What this metric measures"
+    
+    # 3. Generate plot and register path
+    plot_path = os.path.join(output_dir, "metric_plot.png")
+    self._plot_new_metric(data, plot_path)
+    self._current_plot_paths["metric_plot"] = plot_path
+    
+    return metrics
+```
+
+## Plot Style Convention
+
+All plots use:
+```python
+fig, axes = plt.subplots(...)
+fig.suptitle("SpectralFM: ...")
+# Use seaborn style where appropriate
+plt.tight_layout()
+plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+plt.close(fig)
+```
+
+## Key Data Shapes
+- `inputs`: `(N, 245)` — raw spectrograms, 245 frequency bins
+- `embeddings`: `(N, 768)` — transformer output, 768-d
+- Component IDs: extracted from WAV filenames via `_extract_component_id(filename)`
+- `parameter_0`: float labels from `labels.tsv` in labeled_data only
+
+## Model Loading Paths
+- Fairseq: `model_loader.load_fairseq_checkpoint(checkpoint_path)` → returns model
+- Light mode (planned): `model_loader.load_custom_data2vec_audio_model(config_path, state_dict_path)`
+
+## Import Conventions
+```python
+import numpy as np
+import torch
+from scipy import stats
+from sklearn.metrics import ...
+from sklearn.linear_model import Ridge, RidgeCV
+from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
+```

@@ -2,57 +2,67 @@
 FE Decoder Reconstruction Evaluation
 =====================================
 
-Trains a lightweight linear decoder on top of **frozen** CNN feature-extractor
-outputs to reconstruct the original input spectrogram, then evaluates how well
-the reconstruction succeeds.  Better reconstruction = more input information is
-preserved at the CNN stage, before the transformer processes it.
+Trains lightweight decoders on top of **frozen** CNN feature-extractor outputs
+to reconstruct the original input spectrogram.  Three decoder architectures are
+compared in one run (the "3 experiments"):
 
-Pipeline
---------
+  Exp 1 — Linear  : Linear(512 → 245)                                 ~125k params
+  Exp 2 — MLP-512 : Linear(512→512) → ReLU → Linear(512→245)         ~387k params
+  Exp 3 — MLP-512-256: …→ReLU→Linear(512→256)→ReLU→Linear(256→245)  ~518k params
+
+All three decoders receive the same mean-pooled FE representation [B, 512].
+Better reconstruction with a linear decoder = the FE encodes the input in a
+linearly-accessible way.  A gap between Linear and MLP variants reveals how
+much non-linear structure is present in the FE encoding.
+
+Pipeline (shared across all 3 experiments)
+------------------------------------------
   input [B, 245]
-    → feature_extractor  → [B, 512, 47]
-    → transpose          → [B, 47, 512]
-    → layer_norm         → [B, 47, 512]   ← FE output (before post_extract_proj)
-    → mean over time     → [B, 512]       ← pooled FE representation (used for decoding)
-    → Linear(512, 245)   → [B, 245]       ← decoder (trained; FE frozen)
+    → feature_extractor (5 valid-conv layers, no padding):
+        conv1 k=3 s=1  → [B, 512, 243]
+        conv2 k=3 s=1  → [B, 512, 241]
+        conv3 k=3 s=1  → [B, 512, 239]
+        conv4 k=3 s=1  → [B, 512, 237]
+        conv5 k=5 s=5  → [B, 512, 47]   (T' = floor((237-5)/5+1) = 47)
+    → transpose(1,2)   → [B, 47, 512]
+    → layer_norm       → [B, 47, 512]
+    → mean over time   → [B, 512]       ← shared FE representation
+    ↓
+  Exp 1: Linear(512 → 245)
+  Exp 2: Linear(512→512) → ReLU → Linear(512→245)
+  Exp 3: Linear(512→512) → ReLU → Linear(512→256) → ReLU → Linear(256→245)
 
-NOTE on dimensionality: flattening [B, 47, 512] → [B, 24064] gives a 5.9M-parameter
-decoder which is 5900× overparameterised for 1k training samples and fails to learn.
-Mean-pooling first yields a 512-dim representation → 125k parameters, tractable with 1k
-samples (≈8 samples/parameter).
+NOTE — padding: all CNN layers use **valid** (no-padding) convolutions.
+No padding tokens are added anywhere; all sequences are fixed-length (245→47).
 
 CLI mirrors evaluation_runner.py so the script can be dropped into the same
 workflow.  The eval method name is ``decode_fe``.
 
 Usage examples
 --------------
-# Single checkpoint — same flags as evaluation_runner.py
+# Run all 3 decoder experiments on a single checkpoint (default behaviour)
 python code/eval_fe_decoder.py \\
     --checkpoint /path/to/checkpoint_best.pt \\
-    --eval_methods decode_fe \\
     --eval_data_dir fairseq/data/nova_data/single_channel_10k \\
     --max_eval_samples 2000
 
-# Auto-discover all checkpoints in a directory (best-only)
+# Run only a single linear decoder (legacy behaviour)
 python code/eval_fe_decoder.py \\
-    --checkpoint_dir /mnt5/noy/SpectralFM/checkpoints/runai/2026-03-10-compare-single-to-multi \\
-    --eval_methods decode_fe \\
+    --checkpoint /path/to/checkpoint_best.pt \\
+    --eval_data_dir fairseq/data/nova_data/single_channel_10k \\
+    --decoder_variants 0
+
+# Custom decoder specs: linear + MLP-1024 + MLP-1024:512
+python code/eval_fe_decoder.py \\
+    --checkpoint /path/to/checkpoint_best.pt \\
+    --eval_data_dir fairseq/data/nova_data/single_channel_10k \\
+    --decoder_variants 0 1024 1024:512
+
+# Auto-discover all checkpoints in a directory
+python code/eval_fe_decoder.py \\
+    --checkpoint_dir /mnt5/noy/SpectralFM/checkpoints/runai/fe_vs_transformer_collapse \\
     --eval_data_dir fairseq/data/nova_data/single_channel_10k \\
     --max_eval_samples 2000
-
-# Filter specific run names within a directory
-python code/eval_fe_decoder.py \\
-    --checkpoint_dir /mnt5/noy/SpectralFM/checkpoints/runai \\
-    --run_names 2026-01-07_21-50-07 2026-02-25_13-46-46 \\
-    --eval_methods decode_fe \\
-    --eval_data_dir fairseq/data/nova_data/single_channel_10k \\
-    --max_eval_samples 2000
-
-# Use pre-saved .npy inputs (skip live WAV loading)
-python code/eval_fe_decoder.py \\
-    --checkpoint_dir /path/to/runai_dir \\
-    --inputs_npy code/eval_results/20260317_213209/data/inputs_2026-01-07_21-50-07_structured_similarity.npy \\
-    --max_eval_samples 100
 
 Checkpoint directory structures supported
 -----------------------------------------
@@ -76,7 +86,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import matplotlib
@@ -101,6 +111,9 @@ from eval_plots import (
     plot_fe_vs_transformer_r2,
     plot_fe_vs_transformer_comparison_bar_chart,
     plot_reconstruction_triple,
+    plot_all_decoder_variants,
+    plot_fe_vs_transformer_by_architecture,
+    plot_fe_vs_transformer_by_architecture_multi_model,
 )
 
 # Pattern that matches the date-time prefix (with optional short tag) used as
@@ -398,6 +411,139 @@ def plot_comparison_bar_chart(
     print(f"[+] Saved comparison chart: {output_path}")
 
 
+# ── Decoder variant helpers ───────────────────────────────────────────────────
+
+def parse_decoder_variant(spec: str) -> List[int]:
+    """
+    Parse a decoder variant spec string into a list of hidden-layer dims.
+
+    Examples
+    --------
+    "0"       → []          (single Linear, no hidden layers)
+    "512"     → [512]       (1 hidden layer: Linear→ReLU→Linear)
+    "512:256" → [512, 256]  (2 hidden layers: Linear→ReLU→Linear→ReLU→Linear)
+    """
+    spec = spec.strip()
+    if spec == "0":
+        return []
+    return [int(x) for x in spec.split(":")]
+
+
+def variant_label(hidden: List[int]) -> str:
+    """Return a short human-readable label for a decoder variant."""
+    if not hidden:
+        return "Linear"
+    return "MLP-" + "-".join(str(h) for h in hidden)
+
+
+def plot_decoder_variants_comparison(
+    variants_metrics: Dict[str, Dict],
+    run_name: str,
+    output_path: str,
+) -> None:
+    """
+    Bar chart comparing 3 decoder variants (Linear / MLP-1 / MLP-2) for a single
+    checkpoint.  Shows Cosine (mean±std), MSE, and R² side-by-side.
+    """
+    labels = list(variants_metrics.keys())
+    cosine_means = [variants_metrics[v]["fe_dec_cosine_mean"] for v in labels]
+    cosine_stds  = [variants_metrics[v]["fe_dec_cosine_std"]  for v in labels]
+    mse_vals     = [variants_metrics[v]["fe_dec_mse"]         for v in labels]
+    r2_vals      = [variants_metrics[v]["fe_dec_r2"]          for v in labels]
+
+    x = np.arange(len(labels))
+    colors = ["#3498DB", "#E74C3C", "#27AE60"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    fig.suptitle(f"Decoder Variants — {run_name}", fontsize=12, fontweight="bold")
+
+    panels = [
+        (axes[0], cosine_means, cosine_stds, "Cosine Similarity (↑)", True),
+        (axes[1], mse_vals,     None,         "MSE (↓)",              False),
+        (axes[2], r2_vals,      None,         "R² (↑)",               True),
+    ]
+    for ax, vals, errs, ylabel, fmt3 in panels:
+        bars = ax.bar(
+            x, vals,
+            yerr=errs, capsize=5 if errs else 0,
+            color=[colors[i % len(colors)] for i in range(len(labels))],
+            edgecolor="white", alpha=0.85,
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.grid(True, axis="y", alpha=0.3)
+        for bar, val in zip(bars, vals):
+            fmt = f"{val:.3f}" if fmt3 else f"{val:.5f}"
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + (0.003 if fmt3 else 1e-6),
+                    fmt, ha="center", va="bottom", fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"    [+] Saved variant comparison: {output_path}")
+
+
+def plot_cross_checkpoint_variants(
+    all_variants_metrics: Dict[str, Dict[str, Dict]],
+    output_path: str,
+) -> None:
+    """
+    Grouped bar chart: rows = metric (Cosine / R²), columns = decoder variant,
+    colour = checkpoint.  Lets you compare models across all decoder depths at once.
+
+    all_variants_metrics: {run_name → {variant_label → metrics_dict}}
+    """
+    run_names  = list(all_variants_metrics.keys())
+    if not run_names:
+        return
+    variant_labels = list(next(iter(all_variants_metrics.values())).keys())
+
+    palette = ["#3498DB", "#E74C3C", "#27AE60", "#8E44AD", "#F39C12",
+               "#1ABC9C", "#E67E22", "#95A5A6"]
+
+    n_variants = len(variant_labels)
+    fig, axes = plt.subplots(2, n_variants,
+                             figsize=(5 * n_variants, 8),
+                             constrained_layout=True)
+    if n_variants == 1:
+        axes = axes[:, np.newaxis]
+
+    fig.suptitle("Decoder Variants × Checkpoints", fontsize=13, fontweight="bold")
+
+    metrics_to_plot = [
+        ("fe_dec_cosine_mean", "fe_dec_cosine_std", "Cosine Similarity (↑)"),
+        ("fe_dec_r2",          None,                "R² (↑)"),
+    ]
+
+    x = np.arange(len(run_names))
+    bar_w = 0.65
+
+    for row, (key, err_key, ylabel) in enumerate(metrics_to_plot):
+        for col, vlabel in enumerate(variant_labels):
+            ax = axes[row, col]
+            vals = [all_variants_metrics[rn].get(vlabel, {}).get(key, 0.0)
+                    for rn in run_names]
+            errs = ([all_variants_metrics[rn].get(vlabel, {}).get(err_key, 0.0)
+                     for rn in run_names] if err_key else None)
+            bars = ax.bar(
+                x, vals, yerr=errs, capsize=4,
+                width=bar_w,
+                color=[palette[i % len(palette)] for i in range(len(run_names))],
+                edgecolor="white", alpha=0.85,
+            )
+            ax.set_xticks(x)
+            ax.set_xticklabels(run_names, rotation=30, ha="right", fontsize=8)
+            ax.set_title(vlabel if row == 0 else "", fontsize=11, fontweight="bold")
+            ax.set_ylabel(ylabel if col == 0 else "", fontsize=9)
+            ax.grid(True, axis="y", alpha=0.3)
+
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[+] Saved cross-checkpoint variant plot: {output_path}")
+
+
 # ── Per-checkpoint evaluation ─────────────────────────────────────────────────
 
 def evaluate_checkpoint(
@@ -412,10 +558,20 @@ def evaluate_checkpoint(
     batch_size: int,
     fe_batch_size: int,
     smoothness_weight: float = 0.1,
-    decoder_hidden: int = 0,
+    decoder_variants: Optional[List[List[int]]] = None,
     include_embedding_decoder: bool = False,
 ) -> Optional[Dict]:
-    """Run the full FE-decoder evaluation for one checkpoint."""
+    """
+    Run the full FE-decoder evaluation for one checkpoint.
+
+    Trains one decoder per entry in ``decoder_variants``:
+      - []        → Linear(512 → 245)                                 Exp 1
+      - [512]     → Linear(512→512) → ReLU → Linear(512→245)         Exp 2
+      - [512,256] → Linear(512→512) → ReLU→Linear(512→256)→ReLU→245 Exp 3
+    """
+    if decoder_variants is None:
+        decoder_variants = [[]]   # default: single linear decoder
+
     print(f"\n{'='*60}")
     print(f"[+] Checkpoint: {run_name}")
     print(f"    Path: {checkpoint_path}")
@@ -445,57 +601,89 @@ def evaluate_checkpoint(
     train_mask = np.zeros(len(all_inputs), dtype=bool)
     train_mask[:n_train] = True
 
-    arch = f"Linear({all_fe.shape[1]}→{decoder_hidden}→ReLU→245)" if decoder_hidden > 0 else f"Linear({all_fe.shape[1]}→245)"
-    print(f"[+] Training FE decoder [{arch}] (epochs={epochs}, lr={lr}, smoothness={smoothness_weight}) ...")
-    metrics, reconstructed_eval = compute_fe_decoder_metrics(
-        inputs=all_inputs,
-        fe_outputs=all_fe,
-        train_mask=train_mask,
-        epochs=epochs,
-        lr=lr,
-        batch_size=batch_size,
-        smoothness_weight=smoothness_weight,
-        decoder_hidden=decoder_hidden,
-    )
+    # ── Loop over decoder variants (Exp 1 / 2 / 3) ───────────────────────────
+    variants_metrics: Dict[str, Dict] = {}  # label → clean metrics dict
+    first_metrics = None                    # used for downstream plots
+    first_reconstructed = None
 
-    per_cosine = metrics.pop("_per_cosine")
-    per_mse    = metrics.pop("_per_mse")
-    per_r2     = metrics.pop("_per_r2")
-    metrics.pop("_per_mae", None)
+    for hidden in decoder_variants:
+        vlabel = variant_label(hidden)
+        n_params = _decoder_param_count(hidden, all_fe.shape[1], train_inputs.shape[1])
+        arch_str = _decoder_arch_str(hidden, all_fe.shape[1], train_inputs.shape[1])
+        print(f"\n[+] Decoder [{vlabel}] {arch_str}  ({n_params:,} params, "
+              f"epochs={epochs}, lr={lr}, smoothness={smoothness_weight})")
 
-    print(f"\n    Results for {run_name}:")
-    for k, v in metrics.items():
-        if isinstance(v, float):
-            print(f"      {k}: {v:.5f}")
-        else:
-            print(f"      {k}: {v}")
+        metrics, reconstructed_eval = compute_fe_decoder_metrics(
+            inputs=all_inputs,
+            fe_outputs=all_fe,
+            train_mask=train_mask,
+            epochs=epochs,
+            lr=lr,
+            batch_size=batch_size,
+            smoothness_weight=smoothness_weight,
+            decoder_layers=hidden,
+        )
 
-    metrics_json = {k: v for k, v in metrics.items()
-                    if isinstance(v, (int, float, str, bool))}
-    metrics_json["run_name"] = run_name
-    metrics_json["checkpoint_path"] = checkpoint_path
-    with open(run_dir / "metrics.json", "w") as f:
-        json.dump(metrics_json, f, indent=2)
-    print(f"    Saved metrics: {run_dir / 'metrics.json'}")
+        per_cosine = metrics.pop("_per_cosine")
+        per_mse    = metrics.pop("_per_mse")
+        per_r2     = metrics.pop("_per_r2")
+        metrics.pop("_per_mae", None)
 
-    np.save(run_dir / "reconstructed_eval.npy", reconstructed_eval)
+        print(f"    [{vlabel}] cosine={metrics['fe_dec_cosine_mean']:.4f}  "
+              f"mse={metrics['fe_dec_mse']:.5f}  r2={metrics['fe_dec_r2']:.4f}")
 
-    plot_fe_decoder_reconstruction_samples(
-        originals=eval_inputs,
-        reconstructed=reconstructed_eval,
-        per_cosine=per_cosine,
-        per_mse=per_mse,
-        save_path=str(plots_dir / "reconstruction_samples.png"),
-        title=f"FE Decoder — Reconstruction Samples\n{run_name}",
-        n_panels=8,
-    )
-    plot_fe_decoder_score_distribution(
-        per_cosine=per_cosine,
-        per_mse=per_mse,
-        save_path=str(plots_dir / "score_distributions.png"),
-        title="FE Decoder — Score Distributions",
-        run_name=run_name,
-    )
+        # Save per-variant metrics JSON
+        metrics_json = {k: v for k, v in metrics.items()
+                        if isinstance(v, (int, float, str, bool))}
+        metrics_json.update({"run_name": run_name, "decoder_variant": vlabel,
+                              "decoder_arch": arch_str, "n_params": n_params,
+                              "checkpoint_path": checkpoint_path})
+        variant_dir = run_dir / vlabel
+        variant_dir.mkdir(exist_ok=True)
+        with open(variant_dir / "metrics.json", "w") as f:
+            json.dump(metrics_json, f, indent=2)
+
+        # Save reconstructed eval + per-sample arrays (needed for combined plots)
+        np.save(variant_dir / "reconstructed_eval.npy", reconstructed_eval)
+        np.save(variant_dir / "per_cosine.npy", per_cosine)
+        np.save(variant_dir / "per_mse.npy",    per_mse)
+
+        # Per-variant reconstruction samples plot
+        plot_fe_decoder_reconstruction_samples(
+            originals=eval_inputs,
+            reconstructed=reconstructed_eval,
+            per_cosine=per_cosine,
+            per_mse=per_mse,
+            save_path=str(plots_dir / f"reconstruction_samples_{vlabel}.png"),
+            title=f"FE Decoder [{vlabel}] — {run_name}",
+            n_panels=8,
+        )
+        plot_fe_decoder_score_distribution(
+            per_cosine=per_cosine,
+            per_mse=per_mse,
+            save_path=str(plots_dir / f"score_distributions_{vlabel}.png"),
+            title=f"FE Decoder [{vlabel}] — Score Distributions",
+            run_name=run_name,
+        )
+
+        variants_metrics[vlabel] = metrics
+        # Keep the first variant's data for backward-compat downstream plots
+        if first_metrics is None:
+            first_metrics = dict(metrics)
+            first_metrics["_per_cosine"]    = per_cosine
+            first_metrics["_per_mse"]       = per_mse
+            first_metrics["_per_r2"]        = per_r2
+            first_metrics["_eval_inputs"]   = eval_inputs
+            first_metrics["_reconstructed"] = reconstructed_eval
+
+    # Per-checkpoint variant comparison bar chart
+    if len(decoder_variants) > 1:
+        plot_decoder_variants_comparison(
+            variants_metrics=variants_metrics,
+            run_name=run_name,
+            output_path=str(plots_dir / "decoder_variants_comparison.png"),
+        )
+
     print(f"    Saved plots to: {plots_dir}/")
 
     # ── Optional: train a comparison decoder on transformer embeddings ────────
@@ -507,90 +695,152 @@ def evaluate_checkpoint(
         if all_emb is not None:
             np.save(run_dir / "embeddings_train.npy", all_emb[:n_train])
             np.save(run_dir / "embeddings_eval.npy",  all_emb[n_train:])
-
             print(f"    Embedding shape: {all_emb.shape}")
-            tr_arch = f"Linear({all_emb.shape[1]}→{decoder_hidden}→ReLU→245)" if decoder_hidden > 0 else f"Linear({all_emb.shape[1]}→245)"
-            print(f"[+] Training transformer decoder [{tr_arch}] (epochs={epochs}, lr={lr}) ...")
-            tr_metrics, tr_recon_eval = compute_fe_decoder_metrics(
-                inputs=all_inputs,
-                fe_outputs=all_emb,
-                train_mask=train_mask,
-                epochs=epochs,
-                lr=lr,
-                batch_size=batch_size,
-                smoothness_weight=smoothness_weight,
-                decoder_hidden=decoder_hidden,
-            )
 
-            tr_per_cosine = tr_metrics.pop("_per_cosine")
-            tr_per_mse    = tr_metrics.pop("_per_mse")
-            tr_per_r2     = tr_metrics.pop("_per_r2")
-            tr_metrics.pop("_per_mae", None)
+            # Train transformer decoder for EACH variant and generate triple plots
+            tr_variants_recon: Dict[str, np.ndarray]     = {}
+            tr_variants_cosine: Dict[str, np.ndarray]    = {}
+            tr_variants_mse: Dict[str, np.ndarray]       = {}
+            tr_variants_r2: Dict[str, float]             = {}
+            tr_variants_per_r2: Dict[str, np.ndarray]   = {}   # per-sample R² arrays
+            tr_variants_metrics: Dict[str, Dict]         = {}
+            fe_variants_recon: Dict[str, np.ndarray]     = {}
+            fe_variants_cosine: Dict[str, np.ndarray]    = {}
+            fe_variants_mse: Dict[str, np.ndarray]       = {}
 
-            print(f"\n    Transformer decoder results for {run_name}:")
-            for k, v in tr_metrics.items():
-                if isinstance(v, float):
-                    print(f"      {k}: {v:.5f}")
+            for hidden in decoder_variants:
+                vlabel = variant_label(hidden)
+                arch_str = _decoder_arch_str(hidden, all_emb.shape[1], train_inputs.shape[1])
+                print(f"[+] Training transformer decoder [{vlabel}] {arch_str} ...")
+                tr_metrics, tr_recon_eval = compute_fe_decoder_metrics(
+                    inputs=all_inputs,
+                    fe_outputs=all_emb,
+                    train_mask=train_mask,
+                    epochs=epochs,
+                    lr=lr,
+                    batch_size=batch_size,
+                    smoothness_weight=smoothness_weight,
+                    decoder_layers=hidden,
+                )
+                tr_per_cosine = tr_metrics.pop("_per_cosine")
+                tr_per_mse    = tr_metrics.pop("_per_mse")
+                tr_per_r2     = tr_metrics.pop("_per_r2")
+                tr_metrics.pop("_per_mae", None)
 
-            # Save transformer metrics JSON
-            tr_json = {k: v for k, v in tr_metrics.items()
-                       if isinstance(v, (int, float, str, bool))}
-            tr_json["run_name"] = run_name
-            tr_json["decoder_source"] = "transformer_embeddings"
-            with open(run_dir / "metrics_transformer.json", "w") as f:
-                json.dump(tr_json, f, indent=2)
+                print(f"    [Trans {vlabel}] cosine={tr_metrics['fe_dec_cosine_mean']:.4f}  "
+                      f"r2={tr_metrics['fe_dec_r2']:.4f}")
 
-            np.save(run_dir / "tr_reconstructed_eval.npy", tr_recon_eval)
+                tr_variants_recon[vlabel]   = tr_recon_eval
+                tr_variants_cosine[vlabel]  = tr_per_cosine
+                tr_variants_mse[vlabel]     = tr_per_mse
+                tr_variants_r2[vlabel]      = float(tr_metrics.get("fe_dec_r2", 0.0))
+                tr_variants_per_r2[vlabel]  = tr_per_r2
+                tr_variants_metrics[vlabel] = {k: v for k, v in tr_metrics.items()
+                                               if isinstance(v, (int, float, str, bool))}
 
-            # Per-run transformer plots
-            tr_plots_dir = plots_dir / "transformer"
-            tr_plots_dir.mkdir(exist_ok=True)
-            plot_fe_decoder_reconstruction_samples(
+                # Save per-variant transformer metrics
+                tr_json = {k: v for k, v in tr_metrics.items()
+                           if isinstance(v, (int, float, str, bool))}
+                tr_json.update({"run_name": run_name, "decoder_source": "transformer",
+                                "decoder_variant": vlabel})
+                variant_dir = run_dir / vlabel
+                variant_dir.mkdir(exist_ok=True)
+                with open(variant_dir / "metrics_transformer.json", "w") as f:
+                    json.dump(tr_json, f, indent=2)
+                np.save(variant_dir / "tr_reconstructed_eval.npy", tr_recon_eval)
+
+                # Load saved FE per-sample arrays for this variant
+                fe_variants_recon[vlabel]  = np.load(run_dir / vlabel / "reconstructed_eval.npy")
+                fe_variants_cosine[vlabel] = np.load(run_dir / vlabel / "per_cosine.npy")
+                fe_variants_mse[vlabel]    = np.load(run_dir / vlabel / "per_mse.npy")
+
+                # Per-variant triple plot
+                tr_plots_dir = plots_dir / "transformer"
+                tr_plots_dir.mkdir(exist_ok=True)
+
+                plot_reconstruction_triple(
+                    originals=eval_inputs,
+                    fe_reconstructed=fe_variants_recon[vlabel],
+                    tr_reconstructed=tr_recon_eval,
+                    per_cosine_fe=fe_variants_cosine[vlabel],
+                    per_cosine_tr=tr_per_cosine,
+                    per_mse_fe=fe_variants_mse[vlabel],
+                    per_mse_tr=tr_per_mse,
+                    save_path=str(plots_dir / f"reconstruction_triple_{vlabel}.png"),
+                    title=f"FE vs Transformer — {vlabel}\n{run_name}",
+                    n_panels=8,
+                )
+                print(f"    [+] Saved reconstruction_triple_{vlabel}.png")
+
+            # Combined all-variants grid
+            plot_all_decoder_variants(
                 originals=eval_inputs,
-                reconstructed=tr_recon_eval,
-                per_cosine=tr_per_cosine,
-                per_mse=tr_per_mse,
-                save_path=str(tr_plots_dir / "reconstruction_samples.png"),
-                title=f"Transformer Decoder — Reconstruction Samples\n{run_name}",
+                fe_variants=fe_variants_recon,
+                tr_variants=tr_variants_recon,
+                fe_cosines=fe_variants_cosine,
+                fe_mses=fe_variants_mse,
+                tr_cosines=tr_variants_cosine,
+                tr_mses=tr_variants_mse,
+                save_path=str(plots_dir / "reconstruction_all_variants.png"),
+                title=f"All Decoder Variants — FE vs Transformer\n{run_name}",
                 n_panels=8,
             )
-            plot_fe_decoder_score_distribution(
-                per_cosine=tr_per_cosine,
-                per_mse=tr_per_mse,
-                save_path=str(tr_plots_dir / "score_distributions.png"),
-                title="Transformer Decoder — Score Distributions",
+            print(f"    [+] Saved reconstruction_all_variants.png")
+
+            # Per-checkpoint FE vs Transformer bar chart grouped by architecture
+            plot_fe_vs_transformer_by_architecture(
+                fe_variants_metrics=variants_metrics,
+                tr_variants_metrics=tr_variants_metrics,
                 run_name=run_name,
+                save_path=str(plots_dir / "fe_vs_transformer_by_architecture.png"),
             )
 
-            # Triple comparison plot (original / FE recon / transformer recon)
-            plot_reconstruction_triple(
-                originals=eval_inputs,
-                fe_reconstructed=reconstructed_eval,
-                tr_reconstructed=tr_recon_eval,
-                per_cosine_fe=per_cosine,
-                per_cosine_tr=tr_per_cosine,
-                per_mse_fe=per_mse,
-                per_mse_tr=tr_per_mse,
-                save_path=str(plots_dir / "reconstruction_triple.png"),
-                title=f"FE vs Transformer Decoder\n{run_name}",
-            )
-            print(f"    Saved transformer plots to: {tr_plots_dir}/")
+            # Attach tr_variants_metrics for cross-model plot in main()
+            first_metrics["_tr_variants_metrics"] = tr_variants_metrics
 
-            # Store for multi-model plots in main()
-            metrics["_tr_metrics"]     = {k: v for k, v in tr_metrics.items()
-                                          if isinstance(v, (int, float, str, bool))}
-            metrics["_tr_reconstructed"] = tr_recon_eval
-            metrics["_tr_per_cosine"]  = tr_per_cosine
-            metrics["_tr_per_mse"]     = tr_per_mse
-            metrics["_tr_per_r2"]      = tr_per_r2
+            # Score-distribution plots for transformer
+            for hidden in decoder_variants:
+                vlabel = variant_label(hidden)
+                plot_fe_decoder_score_distribution(
+                    per_cosine=tr_variants_cosine[vlabel],
+                    per_mse=tr_variants_mse[vlabel],
+                    save_path=str(plots_dir / "transformer" / f"score_distributions_{vlabel}.png"),
+                    title=f"Transformer Decoder [{vlabel}] — Score Distributions",
+                    run_name=run_name,
+                )
 
-    # Return raw arrays so main() can build multi-model diagnostic plots
-    metrics["_per_cosine"]    = per_cosine
-    metrics["_per_mse"]       = per_mse
-    metrics["_per_r2"]        = per_r2
-    metrics["_eval_inputs"]   = eval_inputs
-    metrics["_reconstructed"] = reconstructed_eval
-    return metrics
+            # Use first variant for FE vs transformer bar chart and D4 scatter
+            first_vlabel = variant_label(decoder_variants[0])
+            first_tr_json_path = run_dir / first_vlabel / "metrics_transformer.json"
+            with open(first_tr_json_path) as f:
+                _first_tr = json.load(f)
+            first_metrics["_tr_metrics"]      = _first_tr
+            first_metrics["_tr_reconstructed"] = tr_variants_recon[first_vlabel]
+            first_metrics["_tr_per_cosine"]    = tr_variants_cosine[first_vlabel]
+            first_metrics["_tr_per_mse"]       = tr_variants_mse[first_vlabel]
+            first_metrics["_tr_per_r2"]        = tr_variants_per_r2[first_vlabel]
+            print(f"    Saved all variant plots to: {plots_dir}/")
+
+    # Attach variants_metrics so main() can build cross-checkpoint comparison
+    first_metrics["_variants_metrics"] = variants_metrics
+    return first_metrics
+
+
+# ── Decoder architecture helpers ──────────────────────────────────────────────
+
+def _decoder_arch_str(hidden: List[int], fe_dim: int, out_dim: int) -> str:
+    dims = [fe_dim] + hidden + [out_dim]
+    parts = []
+    for i in range(len(dims) - 1):
+        parts.append(f"Linear({dims[i]}→{dims[i+1]})")
+        if i < len(dims) - 2:
+            parts.append("ReLU")
+    return " → ".join(parts)
+
+
+def _decoder_param_count(hidden: List[int], fe_dim: int, out_dim: int) -> int:
+    dims = [fe_dim] + hidden + [out_dim]
+    return sum((dims[i] + 1) * dims[i + 1] for i in range(len(dims) - 1))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -651,6 +901,11 @@ def main(args: argparse.Namespace) -> None:
     all_metrics = []
     run_names = []
 
+    # Parse decoder variants once
+    decoder_variants: List[List[int]] = [
+        parse_decoder_variant(s) for s in args.decoder_variants
+    ]
+
     for run_name, ckpt_path in checkpoints:
         metrics = evaluate_checkpoint(
             checkpoint_path=ckpt_path,
@@ -664,7 +919,7 @@ def main(args: argparse.Namespace) -> None:
             batch_size=args.batch_size,
             fe_batch_size=args.fe_batch_size,
             smoothness_weight=args.smoothness_weight,
-            decoder_hidden=args.decoder_hidden,
+            decoder_variants=decoder_variants,
             include_embedding_decoder=args.include_embedding_decoder,
         )
         if metrics is not None:
@@ -675,13 +930,25 @@ def main(args: argparse.Namespace) -> None:
         print("[!] No successful evaluations.")
         sys.exit(1)
 
-    # ── Comparison bar chart (FE decoder only) ───────────────────────────────
+    # ── Comparison bar chart (first decoder variant, FE only) ────────────────
     plot_comparison_bar_chart(
         all_metrics=[{k: v for k, v in m.items() if not k.startswith("_")}
                      for m in all_metrics],
         run_names=run_names,
         output_path=str(output_dir / "comparison_bar_chart.png"),
     )
+
+    # ── Cross-checkpoint decoder variants comparison ──────────────────────────
+    if len(decoder_variants) > 1:
+        all_variants_metrics = {
+            rn: m["_variants_metrics"]
+            for rn, m in zip(run_names, all_metrics)
+            if "_variants_metrics" in m
+        }
+        plot_cross_checkpoint_variants(
+            all_variants_metrics=all_variants_metrics,
+            output_path=str(output_dir / "decoder_variants_cross_checkpoint.png"),
+        )
 
     originals_list     = [m["_eval_inputs"]   for m in all_metrics]
     reconstructed_list = [m["_reconstructed"] for m in all_metrics]
@@ -700,6 +967,18 @@ def main(args: argparse.Namespace) -> None:
             run_names=run_names,
             output_path=str(output_dir / "fe_vs_transformer_bar_chart.png"),
         )
+
+        # Cross-checkpoint architecture × FE/Transformer grouped bar chart
+        has_arch_metrics = all("_variants_metrics" in m and "_tr_variants_metrics" in m
+                               for m in all_metrics)
+        if has_arch_metrics:
+            all_fe_variants = {rn: m["_variants_metrics"]    for rn, m in zip(run_names, all_metrics)}
+            all_tr_variants = {rn: m["_tr_variants_metrics"] for rn, m in zip(run_names, all_metrics)}
+            plot_fe_vs_transformer_by_architecture_multi_model(
+                all_fe_variants=all_fe_variants,
+                all_tr_variants=all_tr_variants,
+                save_path=str(output_dir / "fe_vs_transformer_architecture_multi_model.png"),
+            )
 
     # ── Multi-model diagnostic plots (D1–D4) ─────────────────────────────────
     # When transformer decoder ran, interleave FE and transformer into one set
@@ -856,11 +1135,22 @@ if __name__ == "__main__":
     parser.add_argument("--smoothness_weight", type=float, default=0.1,
                         help="Weight for second-order smoothness penalty on decoder output.")
     parser.add_argument(
-        "--decoder_hidden", type=int, default=0,
+        "--decoder_variants", nargs="+", default=["0", "512", "512:256"],
+        metavar="SPEC",
         help=(
-            "If > 0, use a 2-layer MLP decoder: Linear(dim → hidden) → ReLU → Linear(hidden → 245). "
-            "Default 0 = single linear layer. "
-            "Recommended: 256 or 512 for a richer decoder that better tests representation quality."
+            "Decoder architectures to compare.  Each spec is a colon-separated list of "
+            "hidden-layer sizes, or '0' for a single linear layer.\n"
+            "  '0'       → Linear(512→245)                          Exp 1 (default)\n"
+            "  '512'     → Linear(512→512)→ReLU→Linear(512→245)    Exp 2\n"
+            "  '512:256' → …→ReLU→Linear(512→256)→ReLU→Linear→245 Exp 3\n"
+            "Default: ['0', '512', '512:256'] runs all 3 experiments and compares them."
+        ),
+    )
+    parser.add_argument(
+        "--decoder_hidden", type=int, default=None,
+        help=(
+            "[Legacy] Single hidden-layer size.  Equivalent to "
+            "--decoder_variants 0 N.  Ignored when --decoder_variants is set explicitly."
         ),
     )
     parser.add_argument(
@@ -883,6 +1173,11 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Legacy --decoder_hidden: override decoder_variants if --decoder_variants was not
+    # explicitly set (i.e., still at its default).
+    if args.decoder_hidden is not None:
+        args.decoder_variants = ["0", str(args.decoder_hidden)]
 
     # Warn about unknown eval_methods (only decode_fe is implemented)
     for m in args.eval_methods:

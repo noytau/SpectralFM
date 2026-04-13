@@ -1047,6 +1047,166 @@ def plot_fe_vs_transformer_comparison_bar_chart(
     print(f"[+] Saved FE vs Transformer bar chart: {output_path}")
 
 
+def plot_fe_vs_transformer_by_architecture(
+    fe_variants_metrics: "Dict[str, Dict]",
+    tr_variants_metrics: "Dict[str, Dict]",
+    run_name: str,
+    save_path: str,
+) -> None:
+    """
+    Per-checkpoint grouped bar chart: architecture on the X-axis,
+    blue = FE decoder, orange = Transformer decoder.
+
+    Three metric panels: Cosine Similarity, MSE, R².
+    For each architecture variant (Linear / MLP-512 / MLP-512-256), two bars
+    are shown side-by-side so you can see at a glance:
+      - how much each decoder variant improves over the linear baseline
+      - whether the FE or Transformer representation is more decodable
+
+    Args:
+        fe_variants_metrics: {variant_label → metrics_dict}   (FE decoder)
+        tr_variants_metrics: {variant_label → metrics_dict}   (Transformer decoder)
+        run_name: checkpoint name used in the title
+        save_path: output file path
+    """
+    variant_labels = list(fe_variants_metrics.keys())
+    n = len(variant_labels)
+    x = np.arange(n)
+    w = 0.38
+
+    fe_color = "#3498DB"
+    tr_color = "#E67E22"
+
+    metrics_cfg = [
+        ("fe_dec_cosine_mean", "fe_dec_cosine_std", "Cosine Similarity (↑)", True,  ".3f"),
+        ("fe_dec_mse",         None,                "MSE (↓)",               False, ".5f"),
+        ("fe_dec_r2",          None,                "R² (↑)",                True,  ".3f"),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5), constrained_layout=True)
+    fig.suptitle(
+        f"FE vs Transformer Decoder — Architecture Comparison\n{run_name}",
+        fontsize=12, fontweight="bold",
+    )
+
+    for ax, (key, std_key, ylabel, higher, fmt) in zip(axes, metrics_cfg):
+        fe_vals = [fe_variants_metrics[v].get(key, 0.0) for v in variant_labels]
+        tr_vals = [tr_variants_metrics[v].get(key, 0.0) for v in variant_labels]
+        fe_errs = [fe_variants_metrics[v].get(std_key, 0.0)
+                   for v in variant_labels] if std_key else None
+        tr_errs = [tr_variants_metrics[v].get(std_key, 0.0)
+                   for v in variant_labels] if std_key else None
+
+        b_fe = ax.bar(x - w / 2, fe_vals, w,
+                      yerr=fe_errs, capsize=4,
+                      color=fe_color, alpha=0.85, label="FE decoder",
+                      edgecolor="white")
+        b_tr = ax.bar(x + w / 2, tr_vals, w,
+                      yerr=tr_errs, capsize=4,
+                      color=tr_color, alpha=0.85, label="Transformer decoder",
+                      edgecolor="white")
+
+        offset = 0.002 if higher else 1e-6
+        for bar, val in zip(b_fe, fe_vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + offset,
+                    f"{val:{fmt}}", ha="center", va="bottom",
+                    fontsize=8, color=fe_color, fontweight="bold")
+        for bar, val in zip(b_tr, tr_vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + offset,
+                    f"{val:{fmt}}", ha="center", va="bottom",
+                    fontsize=8, color=tr_color, fontweight="bold")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(variant_labels, fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(ylabel, fontsize=11, fontweight="bold")
+        ax.legend(fontsize=9)
+        ax.grid(True, axis="y", alpha=0.3)
+
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    [+] Saved architecture comparison bar chart: {save_path}")
+
+
+def plot_fe_vs_transformer_by_architecture_multi_model(
+    all_fe_variants: "Dict[str, Dict[str, Dict]]",
+    all_tr_variants: "Dict[str, Dict[str, Dict]]",
+    save_path: str,
+) -> None:
+    """
+    Cross-checkpoint architecture comparison: one row per metric, one column per
+    decoder architecture.  Within each subplot, grouped bars show FE (blue) and
+    Transformer (orange) for every checkpoint.
+
+    all_fe_variants: {run_name → {variant_label → metrics_dict}}
+    all_tr_variants: {run_name → {variant_label → metrics_dict}}
+    """
+    run_names      = list(all_fe_variants.keys())
+    variant_labels = list(next(iter(all_fe_variants.values())).keys())
+    n_models   = len(run_names)
+    n_variants = len(variant_labels)
+
+    fe_color = "#3498DB"
+    tr_color = "#E67E22"
+
+    metrics_cfg = [
+        ("fe_dec_cosine_mean", "fe_dec_cosine_std", "Cosine Similarity (↑)"),
+        ("fe_dec_r2",          None,                "R² (↑)"),
+        ("fe_dec_mse",         None,                "MSE (↓)"),
+    ]
+    n_metrics = len(metrics_cfg)
+
+    x    = np.arange(n_models)
+    w    = 0.38
+    palette = ["#3498DB", "#E74C3C", "#27AE60", "#8E44AD",
+               "#F39C12", "#1ABC9C", "#E67E22", "#95A5A6"]
+
+    fig, axes = plt.subplots(
+        n_metrics, n_variants,
+        figsize=(5.5 * n_variants, 4.5 * n_metrics),
+        constrained_layout=True,
+    )
+    if n_variants == 1:
+        axes = axes[:, np.newaxis]
+    if n_metrics == 1:
+        axes = axes[np.newaxis, :]
+
+    fig.suptitle("FE vs Transformer — Architecture × Checkpoint",
+                 fontsize=13, fontweight="bold")
+
+    for row, (key, std_key, ylabel) in enumerate(metrics_cfg):
+        for col, vlabel in enumerate(variant_labels):
+            ax = axes[row][col]
+
+            fe_vals = [all_fe_variants[rn].get(vlabel, {}).get(key, 0.0) for rn in run_names]
+            tr_vals = [all_tr_variants[rn].get(vlabel, {}).get(key, 0.0) for rn in run_names]
+            fe_errs = ([all_fe_variants[rn].get(vlabel, {}).get(std_key, 0.0)
+                        for rn in run_names] if std_key else None)
+            tr_errs = ([all_tr_variants[rn].get(vlabel, {}).get(std_key, 0.0)
+                        for rn in run_names] if std_key else None)
+
+            ax.bar(x - w / 2, fe_vals, w, yerr=fe_errs, capsize=3,
+                   color=fe_color, alpha=0.85, label="FE" if (row == 0 and col == 0) else "",
+                   edgecolor="white")
+            ax.bar(x + w / 2, tr_vals, w, yerr=tr_errs, capsize=3,
+                   color=tr_color, alpha=0.85, label="Transformer" if (row == 0 and col == 0) else "",
+                   edgecolor="white")
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(run_names, rotation=25, ha="right", fontsize=8)
+            ax.set_title(vlabel if row == 0 else "", fontsize=11, fontweight="bold")
+            ax.set_ylabel(ylabel if col == 0 else "", fontsize=9)
+            ax.grid(True, axis="y", alpha=0.3)
+            if row == 0 and col == 0:
+                ax.legend(fontsize=8)
+
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[+] Saved multi-model architecture chart: {save_path}")
+
+
 # ── Triple reconstruction comparison (original / FE recon / transformer recon) ─
 
 def plot_reconstruction_triple(
@@ -1368,6 +1528,102 @@ def plot_fe_vs_transformer_r2(
         fontsize=12, fontweight="bold",
     )
     plt.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return save_path
+
+
+def plot_all_decoder_variants(
+    originals: np.ndarray,
+    fe_variants: "Dict[str, np.ndarray]",
+    tr_variants: "Dict[str, np.ndarray]",
+    fe_cosines: "Dict[str, np.ndarray]",
+    fe_mses: "Dict[str, np.ndarray]",
+    tr_cosines: "Dict[str, np.ndarray]",
+    tr_mses: "Dict[str, np.ndarray]",
+    save_path: str,
+    title: str = "All Decoder Variants — FE vs Transformer",
+    n_panels: int = 6,
+    seed: int = 0,
+) -> str:
+    """
+    Combined grid comparing all decoder variants (Linear / MLP-1 / MLP-2) for
+    both FE decoder (blue) and Transformer decoder (orange).
+
+    Layout — n_panels columns, rows:
+        Row 0              Original
+        Row 1  FE-Linear   FE decoder, linear variant
+        Row 2  TR-Linear   Transformer decoder, linear variant
+        Row 3  FE-MLP-512  FE decoder, MLP-1 variant
+        Row 4  TR-MLP-512  Transformer decoder, MLP-1 variant
+        …
+
+    Args:
+        originals   : float32 [N, 245]
+        fe_variants : {variant_label: reconstructed [N, 245]}
+        tr_variants : {variant_label: reconstructed [N, 245]}
+        fe_cosines  : {variant_label: per_cosine [N]}
+        fe_mses     : {variant_label: per_mse    [N]}
+        tr_cosines  : {variant_label: per_cosine [N]}
+        tr_mses     : {variant_label: per_mse    [N]}
+    """
+    rng = np.random.default_rng(seed)
+    n_panels = min(n_panels, len(originals))
+    indices = rng.choice(len(originals), size=n_panels, replace=False)
+
+    variant_labels = list(fe_variants.keys())
+    n_rows = 1 + 2 * len(variant_labels)
+
+    row_labels = ["Original"]
+    row_colors = ["#555555"]
+    for vlabel in variant_labels:
+        row_labels += [f"FE [{vlabel}]", f"Transf [{vlabel}]"]
+        row_colors += ["#3498DB", "#E67E22"]
+
+    fig, axes = plt.subplots(
+        n_rows, n_panels,
+        figsize=(2.5 * n_panels, 2.2 * n_rows),
+        constrained_layout=True,
+    )
+    if n_panels == 1:
+        axes = axes[:, np.newaxis]
+
+    for col, idx in enumerate(indices):
+        orig = originals[idx]
+        x = np.arange(len(orig))
+
+        # Original row
+        ax = axes[0][col]
+        ax.plot(x, orig, color="#555555", linewidth=1.0)
+        ax.set_xlim(0, len(orig) - 1)
+        ax.tick_params(labelsize=6)
+        ax.grid(True, alpha=0.2)
+        if col == 0:
+            ax.set_ylabel(row_labels[0], fontsize=8, color=row_colors[0],
+                          fontweight="bold")
+        ax.set_title(f"Sample {idx}", fontsize=7)
+
+        for v_idx, vlabel in enumerate(variant_labels):
+            for fe_or_tr, (signals, cosines, mses, color) in enumerate([
+                (fe_variants[vlabel], fe_cosines[vlabel], fe_mses[vlabel], "#3498DB"),
+                (tr_variants[vlabel], tr_cosines[vlabel], tr_mses[vlabel], "#E67E22"),
+            ]):
+                row = 1 + 2 * v_idx + fe_or_tr
+                ax = axes[row][col]
+                ax.plot(x, orig,         color="#DDDDDD", linewidth=0.7, alpha=0.6)
+                ax.plot(x, signals[idx], color=color,     linewidth=1.0)
+                ax.set_xlim(0, len(orig) - 1)
+                ax.tick_params(labelsize=6)
+                ax.grid(True, alpha=0.2)
+                if col == 0:
+                    ax.set_ylabel(row_labels[row], fontsize=7,
+                                  color=row_colors[row], fontweight="bold")
+                ax.set_xlabel(
+                    f"cos={cosines[idx]:.3f}  mse={mses[idx]:.4f}",
+                    fontsize=5.5,
+                )
+
+    fig.suptitle(title, fontsize=12, fontweight="bold")
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return save_path

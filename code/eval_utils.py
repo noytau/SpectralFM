@@ -399,23 +399,30 @@ def load_wav_files_torchaudio(
 #  Structured Similarity Subset (offline builder)                    #
 # ------------------------------------------------------------------ #
 
-def _read_tsv_indices(dataset_dir: str) -> List[Tuple[int, str]]:
+def _read_tsv_indices(
+    dataset_dir: str,
+    prefer_manifest: Optional[str] = None,
+) -> List[Tuple[int, str]]:
     """
-    Read a fairseq-style TSV manifest and return (dataset_index, filename) pairs.
+    Read a fairseq-style TSV manifest and return (line_index, filename) pairs.
 
-    TSV format:
-        line 0  — root directory (skipped)
-        line i  — <relative_filename>\\t<nframes>   (i >= 1)
-
-    dataset_index is 0-based (first data row = 0), matching dataset[idx].
-
-    Falls back to train.tsv if valid.tsv is not found.
+    Line index matches enumerate(lines[1:]) (data lines after root). For training
+    alignment use ``prefer_manifest='train'`` so indices match ``train.tsv``.
     """
-    for tsv_name in ("valid.tsv", "train.tsv"):
-        tsv_path = os.path.join(dataset_dir, tsv_name)
-        if os.path.exists(tsv_path):
-            break
+    if prefer_manifest == "train":
+        order = ("train.tsv", "valid.tsv")
+    elif prefer_manifest == "valid":
+        order = ("valid.tsv", "train.tsv")
     else:
+        order = ("valid.tsv", "train.tsv")
+
+    tsv_path = None
+    for tsv_name in order:
+        p = os.path.join(dataset_dir, tsv_name)
+        if os.path.exists(p):
+            tsv_path = p
+            break
+    if tsv_path is None:
         raise FileNotFoundError(f"No valid.tsv or train.tsv found in {dataset_dir}")
 
     rows: List[Tuple[int, str]] = []
@@ -428,6 +435,27 @@ def _read_tsv_indices(dataset_dir: str) -> List[Tuple[int, str]]:
         filename = line.split("\t")[0]
         rows.append((dataset_idx, filename))
     return rows
+
+
+def fairseq_manifest_line_to_train_dataset_index(
+    train_tsv_path: str,
+    min_sample_size: int = 0,
+) -> Dict[int, int]:
+    """Map manifest data-line index → FileAudioDataset index (train.tsv)."""
+    mapping: Dict[int, int] = {}
+    ds_i = 0
+    with open(train_tsv_path, "r") as f:
+        f.readline()
+        for line_i, line in enumerate(f):
+            items = line.strip().split("\t")
+            if len(items) != 2:
+                continue
+            sz = int(items[1])
+            if min_sample_size is not None and sz < min_sample_size:
+                continue
+            mapping[line_i] = ds_i
+            ds_i += 1
+    return mapping
 
 
 def _group_by_component(rows: List[Tuple[int, str]]) -> Dict[int, List[Tuple[int, str]]]:
@@ -462,13 +490,12 @@ def _group_by_spec_index(rows: List[Tuple[int, str]]) -> Dict[int, List[Tuple[in
     return dict(groups)
 
 
-def _load_wav_data_for_index(dataset_dir: str, index: int) -> Optional[np.ndarray]:
-    """
-    Load the raw waveform for a given 0-based dataset index from a fairseq TSV manifest.
-
-    Reads valid.tsv (or train.tsv) to find the filename, then loads the WAV with soundfile.
-    Returns a 1-D float32 array, or None on failure.
-    """
+def _load_wav_data_for_index(
+    dataset_dir: str,
+    index: int,
+    prefer_manifest: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Load waveform for manifest line index (see :func:`_read_tsv_indices`)."""
     try:
         import soundfile as sf
     except ImportError:
@@ -478,11 +505,20 @@ def _load_wav_data_for_index(dataset_dir: str, index: int) -> Optional[np.ndarra
         except ImportError:
             return None
 
-    for tsv_name in ("valid.tsv", "train.tsv"):
-        tsv_path = os.path.join(dataset_dir, tsv_name)
-        if os.path.exists(tsv_path):
-            break
+    if prefer_manifest == "train":
+        order = ("train.tsv", "valid.tsv")
+    elif prefer_manifest == "valid":
+        order = ("valid.tsv", "train.tsv")
     else:
+        order = ("valid.tsv", "train.tsv")
+
+    tsv_path = None
+    for tsv_name in order:
+        p = os.path.join(dataset_dir, tsv_name)
+        if os.path.exists(p):
+            tsv_path = p
+            break
+    if tsv_path is None:
         return None
 
     with open(tsv_path, "r") as f:
@@ -492,12 +528,12 @@ def _load_wav_data_for_index(dataset_dir: str, index: int) -> Optional[np.ndarra
         return None
 
     root_dir = lines[0].strip()
-    data_lines = [l.strip() for l in lines[1:] if l.strip()]
-
-    if index >= len(data_lines):
+    if index < 0 or index > len(lines) - 2:
         return None
-
-    rel_path = data_lines[index].split("\t")[0]
+    raw = lines[index + 1].strip()
+    if not raw:
+        return None
+    rel_path = raw.split("\t")[0]
     wav_path = os.path.join(root_dir, rel_path)
 
     try:
@@ -515,6 +551,8 @@ def _load_wav_data_for_index(dataset_dir: str, index: int) -> Optional[np.ndarra
 def build_structured_similarity_subset(
     nova_data_dir: str,
     seed: int = 42,
+    *,
+    prefer_manifest: Optional[str] = None,
 ) -> List[Dict]:
     """
     Build the structured similarity subset definition (run once offline).
@@ -543,7 +581,7 @@ def build_structured_similarity_subset(
     # ---- single_channel_all: 3 stacks × 10 --------------------------------
     sc_name = "single_channel_all"
     sc_path = os.path.join(nova_data_dir, sc_name)
-    sc_rows = _read_tsv_indices(sc_path)
+    sc_rows = _read_tsv_indices(sc_path, prefer_manifest=prefer_manifest)
     total_stacks = len(sc_rows) // 10
     if total_stacks < 3:
         raise ValueError(
@@ -569,7 +607,7 @@ def build_structured_similarity_subset(
         ("labeled_data", 2),
     ]:
         ds_path = os.path.join(nova_data_dir, ds_name)
-        ds_rows = _read_tsv_indices(ds_path)
+        ds_rows = _read_tsv_indices(ds_path, prefer_manifest=prefer_manifest)
         comp_to_rows = _group_by_component(ds_rows)
         eligible = sorted(c for c, rows in comp_to_rows.items() if len(rows) >= 10)
         if len(eligible) < n_groups:
@@ -596,6 +634,42 @@ def build_structured_similarity_subset(
                 })
 
     return entries
+
+
+def structured_subset_epoch_cosim_train_indices(
+    nova_data_dir: str,
+    task_data_dir: str,
+    min_sample_size: int,
+    seed: int = 42,
+    prefer_manifest: str = "train",
+) -> List[int]:
+    """Structured subset filtered to ``task_data_dir``, remapped to train dataset indices."""
+    entries = build_structured_similarity_subset(
+        nova_data_dir, seed=seed, prefer_manifest=prefer_manifest
+    )
+    data_root = os.path.normpath(os.path.expanduser(task_data_dir))
+    base = os.path.basename(data_root.rstrip(os.sep))
+    train_tsv = os.path.join(data_root, "train.tsv")
+    if not os.path.isfile(train_tsv):
+        raise FileNotFoundError(f"task train manifest not found: {train_tsv}")
+
+    line_map = fairseq_manifest_line_to_train_dataset_index(
+        train_tsv, min_sample_size=min_sample_size
+    )
+
+    out: List[int] = []
+    for e in entries:
+        ep = os.path.normpath(os.path.expanduser(e.get("path", "")))
+        ds = e.get("dataset")
+        if ds != base and ep != data_root:
+            continue
+        line_idx = int(e["index"])
+        if line_idx not in line_map:
+            raise ValueError(
+                f"Structured index {line_idx} ({e.get('group')}) not in FileAudioDataset(train)."
+            )
+        out.append(line_map[line_idx])
+    return out
 
 
 # ------------------------------------------------------------------ #

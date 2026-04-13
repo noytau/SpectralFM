@@ -164,6 +164,10 @@ class FairseqTask(object):
             raise TypeError("Datasets are expected to be of type FairseqDataset")
         return self.datasets[split]
 
+    def end_epoch(self, epoch: int, trainer) -> None:
+        """Hook after each training epoch (default: no-op). Subclasses may override."""
+        return
+
     def filter_indices_by_size(
         self, indices, dataset, max_positions=None, ignore_invalid_inputs=False
     ):

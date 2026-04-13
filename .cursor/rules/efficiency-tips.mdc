@@ -1,0 +1,28 @@
+---
+alwaysApply: true
+---
+
+# Efficiency Guidelines
+
+## File Reading Strategy
+- **Never re-explore the project structure** — see [project-architecture.mdc](mdc:.cursor/rules/project-architecture.mdc) for file map
+- **Never `ls` data directories** — see [datasets-and-checkpoints.mdc](mdc:.cursor/rules/datasets-and-checkpoints.mdc) for all paths, sizes, labels
+- **For paper citations**, check [paper-references.mdc](mdc:.cursor/rules/paper-references.mdc) before searching the full plan
+- **For metric key names**, check [metric-naming.mdc](mdc:.cursor/rules/metric-naming.mdc)
+
+## Large File Handling
+- `code/evaluation_runner.py` is ~5900 lines. **Do NOT read the whole file.** Use semantic search or grep to find the specific `_eval_*` method or section you need.
+- When the file grows past ~2000 lines per logical section, split into:
+  - `code/eval_plots.py` — all `_plot_*` helper methods
+  - `code/eval_metrics.py` — pure metric computation functions
+  - `code/eval_utils.py` — data loading, splitting, component ID extraction
+
+## Plan File
+- **Plans directory (authoritative):** `/home/noy/.cursor/plans/` — SpectralFM Cursor plans live here (not under the repo’s `.cursor/plans/`).
+- **Evaluation metrics / runner work:** `/home/noy/.cursor/plans/spectralfm_evaluation_suite_10f99c29.plan.md` — completed phases are marked `✅` (skip those sections).
+- **Reconstruction-loss training + epoch cosine (data2vec_audio, Hydra recon_loss, RunAI submit, `.npy` subset):** `/home/noy/.cursor/plans/reconstruction_loss_experiments_1ec3ff93.plan.md` — use this plan when implementing or debugging recon experiments (not the evaluation suite plan).
+- When only metric definitions are needed, read `code/eval_metrics_reference.md` instead of the full evaluation plan
+
+## Evaluation Workflow
+- Always follow [evaluation-workflow.mdc](mdc:.cursor/rules/evaluation-workflow.mdc) when implementing new `_eval_*` methods
+- Always follow [code-patterns.mdc](mdc:.cursor/rules/code-patterns.mdc) for code templates and conventions

@@ -416,6 +416,74 @@ class AudioPretrainingTask(FairseqTask):
         """Maximum input length supported by the encoder."""
         return sys.maxsize, sys.maxsize
 
+    def maybe_run_epoch_cosim_on_interval(self, trainer, epoch: int) -> None:
+        """If model.epoch_cosim_interval_updates > 0, run cosim every N optimizer steps (train loop)."""
+        models = trainer.get_model()
+        if isinstance(models, (list, tuple)):
+            model = models[0]
+        else:
+            model = models
+        cfg_m = getattr(model, "cfg", None)
+        if cfg_m is None or not getattr(cfg_m, "epoch_cosim_enable", False):
+            return
+        interval = int(getattr(cfg_m, "epoch_cosim_interval_updates", 0) or 0)
+        if interval <= 0:
+            return
+        num_updates = trainer.get_num_updates()
+        if num_updates <= 0 or num_updates % interval != 0:
+            return
+        fairseq_repo_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        cosim_path = os.path.join(
+            fairseq_repo_root, "examples", "data2vec", "cosim_epoch_utils.py"
+        )
+        if not os.path.isfile(cosim_path):
+            logger.warning("epoch_cosim: missing %s", cosim_path)
+            return
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("cosim_epoch_utils", cosim_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        try:
+            mod.maybe_run_epoch_cosim(epoch, trainer, self, step_label=num_updates)
+        except Exception as e:
+            logger.warning("epoch_cosim (interval) failed: %s", e)
+
+    def end_epoch(self, epoch: int, trainer) -> None:
+        super().end_epoch(epoch, trainer)
+        models = trainer.get_model()
+        if isinstance(models, (list, tuple)):
+            model = models[0]
+        else:
+            model = models
+        cfg_m = getattr(model, "cfg", None)
+        want = cfg_m is not None and getattr(cfg_m, "epoch_cosim_enable", False)
+        if not want:
+            return
+        if int(getattr(cfg_m, "epoch_cosim_interval_updates", 0) or 0) > 0:
+            # Step-scheduled cosim runs from fairseq_cli/train.py; skip duplicate end-of-epoch run.
+            return
+        fairseq_repo_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        cosim_path = os.path.join(
+            fairseq_repo_root, "examples", "data2vec", "cosim_epoch_utils.py"
+        )
+        if not os.path.isfile(cosim_path):
+            logger.warning("epoch_cosim: missing %s", cosim_path)
+            return
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("cosim_epoch_utils", cosim_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        try:
+            mod.maybe_run_epoch_cosim(epoch, trainer, self)
+        except Exception as e:
+            logger.warning("epoch_cosim failed: %s", e)
+
     def build_model(self, model_cfg: FairseqDataclass, from_checkpoint=False):
         model = super().build_model(model_cfg, from_checkpoint)
 
