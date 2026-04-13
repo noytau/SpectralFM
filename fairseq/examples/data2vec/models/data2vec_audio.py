@@ -408,6 +408,14 @@ class Data2VecAudioConfig(Wav2Vec2Config):
             "help": "Path to .npy/.txt of train indices or structured_similarity JSON; see cosim_epoch_utils"
         },
     )
+    epoch_cosim_structured_entries_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "If set, JSON with {\"entries\": [...]} — full structured panel (~100 samples across "
+            "single_channel_all, multi_channel, sampled_data, labeled_data). Overrides epoch_cosim_subset_path. "
+            "Generate with code/precompute_epoch_cosim_indices.py --structured_entries_json"
+        },
+    )
     epoch_cosim_max_samples: int = field(
         default=100,
         metadata={"help": "Max indices after loading subset"},

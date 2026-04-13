@@ -23,13 +23,57 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--nova_data_dir", required=True)
-    p.add_argument("--task_data", required=True)
+    p.add_argument(
+        "--task_data",
+        default="",
+        help="Task data root for filtered .npy (required when using --out).",
+    )
     p.add_argument("--min_sample_size", type=int, default=200)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--prefer_manifest", choices=("train", "valid"), default="train")
-    p.add_argument("--out", required=True)
+    p.add_argument(
+        "--out",
+        default="",
+        help="Filtered train indices for --task_data (.npy/.txt). Omit if you only use --structured_entries_json.",
+    )
     p.add_argument("--dump_json_meta", default="")
+    p.add_argument(
+        "--structured_entries_json",
+        default="",
+        metavar="PATH",
+        help="Also write full structured-similarity panel (~100 entries, all datasets) for "
+        "model.epoch_cosim_structured_entries_path (training-time cosim heatmap).",
+    )
     args = p.parse_args()
+
+    if not args.out and not args.structured_entries_json:
+        p.error("Provide --out and/or --structured_entries_json")
+    if args.out and not args.task_data:
+        p.error("--task_data is required when using --out")
+
+    if args.structured_entries_json:
+        from eval_utils import build_structured_similarity_subset
+
+        full = build_structured_similarity_subset(
+            args.nova_data_dir,
+            seed=args.seed,
+            prefer_manifest=args.prefer_manifest,
+        )
+        jp = os.path.expanduser(args.structured_entries_json)
+        os.makedirs(os.path.dirname(jp) or ".", exist_ok=True)
+        meta = {
+            "seed": args.seed,
+            "prefer_manifest": args.prefer_manifest,
+            "nova_data_dir": os.path.abspath(args.nova_data_dir),
+            "n_entries": len(full),
+            "entries": full,
+        }
+        with open(jp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        print(f"[+] Wrote {len(full)} structured entries to {jp}")
+
+    if not args.out:
+        return
 
     indices = structured_subset_epoch_cosim_train_indices(
         args.nova_data_dir,

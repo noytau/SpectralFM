@@ -13,13 +13,27 @@
 
 ## Cosine similarity maps (what actually runs)
 
-When `model.epoch_cosim_enable=true` and `model.epoch_cosim_subset_path` points to a valid file:
+When `model.epoch_cosim_enable=true` and a subset is configured:
+
+**A — Single-dataset panel (default)** — `model.epoch_cosim_subset_path` = `.npy` of train indices for **`task.data` only** (~30 samples for `single_channel_all`).
+
+**B — Full structured panel (~100 samples, same as offline eval)** — set `model.epoch_cosim_structured_entries_path` to a JSON file with `{"entries": [...]}` produced by `build_structured_similarity_subset` (single + multi + sampled + labeled). **Overrides** the `.npy` path for cosim only; training still uses `task.data`. Generate once:
+
+```bash
+cd /mnt5/noy/SpectralFM/code
+python precompute_epoch_cosim_indices.py \
+  --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data \
+  --structured_entries_json /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_full.json
+```
+(`--task_data` / `--out` are only needed for the filtered `.npy`; not for `--structured_entries_json` alone.)
+
+Then in Hydra: `model.epoch_cosim_structured_entries_path=/.../structured_similarity_full.json`.
 
 1. **When:** If `model.epoch_cosim_interval_updates` **> 0** (default **1000**), rank 0 runs after each successful `train_step` when `num_updates % N == 0`. If **0**, the same pipeline runs **once per training epoch** in `task.end_epoch` instead (no mid-training maps).
-2. **Data:** Load capped train indices from the subset file (see below); batch them with `epoch_cosim_micro_batch`; collate from `task.dataset("train")`.
+2. **Data:** (A) capped indices from `.npy` / filtered JSON; collate from `task.dataset("train")`. (B) walk each entry’s dataset root + manifest line index; one `FileAudioDataset` per root (same audio settings as the task).
 3. **Forward:** `model.eval()` + `torch.no_grad()`; `extract_cosim_epoch_features` → pooled **input**, **FE**, and **transformer embedding** vectors.
 4. **Metrics:** `sklearn.metrics.pairwise.cosine_similarity` on each representation; mean/std of upper triangle per panel.
-5. **Artifacts:** PNG `step_{updates:07d}_cosim_triple.png` (interval mode) or `epoch_{epoch:03d}_cosim_triple.png` (epoch-only mode) under `checkpoint.save_dir` / `epoch_cosim_output_subdir`; WandB `epoch_cosim/*` and image at `trainer.get_num_updates()` step.
+5. **Artifacts:** PNG `step_{updates:07d}_cosim_triple.png` or `..._n{N}_structured.png` for mode (B); WandB `epoch_cosim/*` including `epoch_cosim/num_samples`, `epoch_cosim/is_structured_multi_dataset`.
 
 Implementation: `examples/data2vec/cosim_epoch_utils.py` (logic), `fairseq_cli/train.py` (interval hook), `fairseq/tasks/audio_pretraining.py` (`maybe_run_epoch_cosim_on_interval` + `end_epoch` when interval is 0).
 

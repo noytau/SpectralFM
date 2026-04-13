@@ -3,8 +3,9 @@
 # Cosine similarity heatmaps during data2vec_audio training (rank 0 only).
 #
 # What runs when triggered (epoch_cosim_enable=True, subset file present):
-#   1) Load fixed train indices from epoch_cosim_subset_path (.npy/.txt/.json); cap at epoch_cosim_max_samples.
-#   2) For each micro-batch of indices, collate from task.dataset("train"), forward in eval mode via
+#   1) If model.epoch_cosim_structured_entries_path is set: load JSON {"entries": [...]} (~100 samples across
+#      datasets). Else: load epoch_cosim_subset_path (.npy/.txt/.json filtered to task.data).
+#   2) For each micro-batch, collate from task.dataset("train") OR per-entry FileAudioDataset roots, forward via
 #      model.extract_cosim_epoch_features → pooled input / FE / transformer embedding vectors (numpy).
 #   3) Concatenate batches; compute sklearn cosine_similarity matrices for the three representations.
 #   4) Save a 3-panel PNG under checkpoint.save_dir / epoch_cosim_output_subdir:
@@ -117,6 +118,146 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _fairseq_train_line_map(train_tsv_path: str, min_sample_size: Optional[int]) -> Dict[int, int]:
+    """Map manifest data-line index (after header) → FileAudioDataset index (same as eval_utils)."""
+    mapping: Dict[int, int] = {}
+    ds_i = 0
+    with open(train_tsv_path, "r") as f:
+        f.readline()
+        for line_i, line in enumerate(f):
+            items = line.strip().split("\t")
+            if len(items) != 2:
+                continue
+            sz = int(items[1])
+            if min_sample_size is not None and sz < min_sample_size:
+                continue
+            mapping[line_i] = ds_i
+            ds_i += 1
+    return mapping
+
+
+def _file_audio_train_dataset_for_root(task, data_root: str):
+    """Build train split FileAudioDataset for ``data_root`` (already path-translated). Same settings as task."""
+    from fairseq.data import FileAudioDataset
+    from fairseq.data.text_compressor import TextCompressionLevel
+
+    manifest_path = os.path.join(data_root, "train.tsv")
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(f"epoch_cosim structured: missing {manifest_path}")
+
+    text_compression_level = getattr(
+        TextCompressionLevel, str(task.cfg.text_compression_level)
+    )
+    compute_mask = getattr(task.cfg, "precompute_mask_config", None) is not None
+    mask_args: Dict[str, Any] = {}
+    if compute_mask:
+        mask_args = dict(task.cfg.precompute_mask_config)
+
+    sample_rate = getattr(task.cfg, "sample_rate", 16000)
+    return FileAudioDataset(
+        manifest_path=manifest_path,
+        sample_rate=sample_rate,
+        max_sample_size=task.cfg.max_sample_size,
+        min_sample_size=task.cfg.min_sample_size,
+        pad=task.cfg.labels is not None or task.cfg.enable_padding,
+        normalize=task.cfg.normalize,
+        num_buckets=task.cfg.num_batch_buckets or int(task.cfg.tpu),
+        text_compression_level=text_compression_level,
+        compute_mask=compute_mask,
+        **mask_args,
+    )
+
+
+def collect_cosim_arrays_structured(
+    trainer, task, entries: List[Dict[str, Any]], micro_batch: int
+):
+    """
+    Same as collect_cosim_arrays but entries may span multiple dataset roots (structured ~100 panel).
+    Each entry: path, index (manifest line index after header, same as eval_utils / train.tsv).
+    """
+    import torch
+
+    from fairseq.tasks.audio_pretraining import maybe_translate_path_for_eval
+
+    cache_ds: Dict[str, Any] = {}
+    cache_map: Dict[str, Dict[int, int]] = {}
+
+    def get_ds_and_map(raw_path: str):
+        root = maybe_translate_path_for_eval(os.path.normpath(os.path.expanduser(raw_path)))
+        if root not in cache_ds:
+            cache_ds[root] = _file_audio_train_dataset_for_root(task, root)
+            train_tsv = os.path.join(root, "train.tsv")
+            cache_map[root] = _fairseq_train_line_map(train_tsv, task.cfg.min_sample_size)
+        return cache_ds[root], cache_map[root]
+
+    model = _unwrap_model(trainer.get_model())
+    if not hasattr(model, "extract_cosim_epoch_features"):
+        raise RuntimeError("Model has no extract_cosim_epoch_features (expected data2vec_audio).")
+
+    device = trainer.device
+    was_training = model.training
+    model.eval()
+
+    in_list, fe_list, emb_list = [], [], []
+
+    try:
+        with torch.no_grad():
+            i = 0
+            n = len(entries)
+            while i < n:
+                root0 = maybe_translate_path_for_eval(
+                    os.path.normpath(os.path.expanduser(entries[i].get("path", "")))
+                )
+                ds, lmap = get_ds_and_map(entries[i].get("path", ""))
+
+                batch_ds_idx: List[int] = []
+                j = i
+                while j < n:
+                    rj = maybe_translate_path_for_eval(
+                        os.path.normpath(os.path.expanduser(entries[j].get("path", "")))
+                    )
+                    if rj != root0:
+                        break
+                    lj = int(entries[j]["index"])
+                    if lj not in lmap:
+                        raise KeyError(
+                            f"epoch_cosim structured: manifest line {lj} not in train after "
+                            f"min_sample_size filter for {rj}"
+                        )
+                    batch_ds_idx.append(lmap[lj])
+                    j += 1
+                    if len(batch_ds_idx) >= micro_batch:
+                        break
+
+                samples = [ds[bi] for bi in batch_ds_idx]
+                sample = ds.collater(samples)
+                if not sample or "net_input" not in sample:
+                    i = j
+                    continue
+                net = sample["net_input"]
+                source = net["source"].to(device)
+                padding_mask = net.get("padding_mask")
+                if padding_mask is not None:
+                    padding_mask = padding_mask.to(device)
+
+                inp, fe, emb = model.extract_cosim_epoch_features(source, padding_mask)
+                in_list.append(inp.float().cpu().numpy())
+                fe_list.append(fe.float().cpu().numpy())
+                emb_list.append(emb.float().cpu().numpy())
+                i = j
+    finally:
+        if was_training:
+            model.train()
+
+    if not in_list:
+        raise RuntimeError("epoch_cosim structured: no samples collected (empty batches?)")
+
+    inputs = np.concatenate(in_list, axis=0)
+    fes = np.concatenate(fe_list, axis=0)
+    embs = np.concatenate(emb_list, axis=0)
+    return inputs, fes, embs
+
+
 def collect_cosim_arrays(trainer, task, indices: List[int], micro_batch: int):
     import torch
 
@@ -175,31 +316,59 @@ def maybe_run_epoch_cosim(
     cfg = getattr(model, "cfg", None)
     if cfg is None or not getattr(cfg, "epoch_cosim_enable", False):
         return
+
+    structured_path = getattr(cfg, "epoch_cosim_structured_entries_path", None)
     subset_path = getattr(cfg, "epoch_cosim_subset_path", None)
-    if not subset_path:
-        logger.warning("epoch_cosim_enable=True but epoch_cosim_subset_path is unset; skipping.")
-        return
 
     max_n = int(getattr(cfg, "epoch_cosim_max_samples", 100))
     micro = int(getattr(cfg, "epoch_cosim_micro_batch", 8))
     subdir = getattr(cfg, "epoch_cosim_output_subdir", "cosim_epoch")
 
-    try:
-        indices = load_subset_indices(subset_path, max_n, task)
-    except Exception as e:
-        logger.error("epoch_cosim: failed to load subset: %s", e)
+    use_structured = bool(
+        structured_path and os.path.isfile(os.path.expanduser(structured_path))
+    )
+    if not use_structured and not subset_path:
+        logger.warning(
+            "epoch_cosim_enable=True but neither epoch_cosim_structured_entries_path nor "
+            "epoch_cosim_subset_path is set; skipping."
+        )
         return
 
-    if len(indices) < 2:
-        logger.warning("epoch_cosim: need at least 2 indices, got %d", len(indices))
-        return
+    entries: Optional[List[Dict[str, Any]]] = None
+    indices: Optional[List[int]] = None
+
+    if use_structured:
+        try:
+            with open(os.path.expanduser(structured_path), encoding="utf-8") as f:
+                payload = json.load(f)
+            raw_entries = payload.get("entries", payload if isinstance(payload, list) else [])
+            entries = list(raw_entries)[:max_n] if max_n > 0 else list(raw_entries)
+        except Exception as e:
+            logger.error("epoch_cosim: failed to load structured entries JSON: %s", e)
+            return
+        if len(entries) < 2:
+            logger.warning("epoch_cosim: structured entries need at least 2, got %d", len(entries))
+            return
+    else:
+        try:
+            indices = load_subset_indices(subset_path, max_n, task)
+        except Exception as e:
+            logger.error("epoch_cosim: failed to load subset: %s", e)
+            return
+
+        if len(indices) < 2:
+            logger.warning("epoch_cosim: need at least 2 indices, got %d", len(indices))
+            return
 
     save_dir = trainer.cfg.checkpoint.save_dir
     out_dir = os.path.join(save_dir, subdir)
     os.makedirs(out_dir, exist_ok=True)
 
     try:
-        inputs, fes, embs = collect_cosim_arrays(trainer, task, indices, micro)
+        if entries is not None:
+            inputs, fes, embs = collect_cosim_arrays_structured(trainer, task, entries, micro)
+        else:
+            inputs, fes, embs = collect_cosim_arrays(trainer, task, indices, micro)
     except Exception as e:
         logger.exception("epoch_cosim: collection failed: %s", e)
         return
@@ -212,10 +381,14 @@ def maybe_run_epoch_cosim(
     ms_fe = upper_triangle_mean_std(sim_fe)
     ms_emb = upper_triangle_mean_std(sim_emb)
 
+    n_plot = len(entries) if entries is not None else len(indices)  # type: ignore[arg-type]
+    struct_suffix = f"_n{n_plot}_structured" if entries is not None else ""
     if step_label is not None:
-        png_path = os.path.join(out_dir, f"step_{step_label:07d}_cosim_triple.png")
+        png_path = os.path.join(
+            out_dir, f"step_{step_label:07d}_cosim_triple{struct_suffix}.png"
+        )
     else:
-        png_path = os.path.join(out_dir, f"epoch_{epoch:03d}_cosim_triple.png")
+        png_path = os.path.join(out_dir, f"epoch_{epoch:03d}_cosim_triple{struct_suffix}.png")
     try:
         plot_three_cosim_panels(sim_in, sim_fe, sim_emb, png_path, (ms_in, ms_fe, ms_emb))
     except Exception as e:
@@ -233,6 +406,10 @@ def maybe_run_epoch_cosim(
                     "epoch_cosim/fe_std": ms_fe[1],
                     "epoch_cosim/embedding_mean": ms_emb[0],
                     "epoch_cosim/embedding_std": ms_emb[1],
+                    "epoch_cosim/num_samples": float(n_plot),
+                    "epoch_cosim/is_structured_multi_dataset": 1.0
+                    if entries is not None
+                    else 0.0,
                     "epoch_cosim/triple_heatmap": wandb.Image(png_path),
                 },
                 step=trainer.get_num_updates(),
