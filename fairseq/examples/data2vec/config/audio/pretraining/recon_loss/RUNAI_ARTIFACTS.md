@@ -2,6 +2,17 @@
 
 `artifacts/` at repo root is **gitignored**; use it to store `kubectl cp` pulls so PNGs/logs stay local.
 
+## Working directory for `hydra_train.py`
+
+The trainer is **`fairseq/fairseq_cli/hydra_train.py`**, not `SpectralFM/fairseq_cli/...`. Always:
+
+```bash
+cd /storage/noy/SpectralFM/fairseq
+python fairseq_cli/hydra_train.py --config-dir examples/data2vec/config/...
+```
+
+If you run from `/storage/noy/SpectralFM` (repo root), Python will look for a non-existent `fairseq_cli/` next to it and fail with “No such file or directory”.
+
 ## Pull smoke / verification outputs from the shell pod
 
 Replace `<NS>` / `<POD>` (e.g. `runai-raja`, `spectralfm-shell-0-6`).
