@@ -1,0 +1,127 @@
+# @package _group_
+# Reconstruction loss — defaults match RunAI PVC (/storage/...). Local: override task.data, common.user_dir, model.epoch_cosim_subset_path, hydra.run.dir.
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 50
+  tensorboard_logdir: tb
+  user_dir: /storage/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm_recon_loss"
+  wandb_run_name: "recon-fe${model.lambda_recon_fe}_recon-tr${model.lambda_recon_trans}_frozen-enc${model.freeze_encoder}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 2000
+  keep_interval_updates: 2
+  no_epoch_checkpoints: false
+
+task:
+  _name: audio_pretraining
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_all
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 512
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  valid_subset: train
+  required_batch_size_multiple: 1
+  disable_validation: true
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - ema_decay
+    - target_var
+    - pred_var
+
+optimization:
+  max_update: 20000
+  max_epoch: 50
+  lr: [0.00001]
+  update_freq: [4]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 1000
+  max_update: 20000
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.0
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  require_same_masks: true
+  mask_dropout: 0
+
+  train_only_fe: false
+
+  lambda_var: 0.0
+  lambda_cov: 0.0
+  lambda_uniform: 0.0
+
+  fe_mode: train
+  freeze_encoder: false
+  # Exp1 defaults; Exp2: override lambda_recon_trans=1; Exp3: override freeze_encoder=true
+  lambda_recon_fe: 1.0
+  lambda_recon_trans: 0.0
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+  model_path: /storage/noy/SpectralFM/fairseq/base_libri_official.pt
+  skip_pretrained_weights: false
+
+  # Cosine heatmaps (input vs FE vs embedding); WandB epoch_cosim/* + PNGs under save_dir/cosim_epoch/
+  # RunAI: sync examples/data2vec/models/data2vec_audio.py to PVC first or Hydra merge fails (missing dataclass fields).
+  epoch_cosim_enable: true
+  # Every N optimizer steps (not each epoch). Set 0 for legacy once-per-epoch at task.end_epoch only.
+  epoch_cosim_interval_updates: 1000
+  # Precomputed structured-similarity panel for task.data (see build_structured_similarity_subset → remapped train indices)
+  epoch_cosim_subset_path: /storage/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
+  epoch_cosim_max_samples: 100
+  epoch_cosim_output_subdir: cosim_epoch
+  epoch_cosim_micro_batch: 8
+
+hydra:
+  run:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_recon-fe${model.lambda_recon_fe}_recon-tr${model.lambda_recon_trans}_frozen-enc${model.freeze_encoder}
+  sweep:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}
