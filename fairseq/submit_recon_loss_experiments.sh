@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # RunAI — Reconstruction loss experiments. Shared settings: recon_loss/spectralfm_recon_loss.yaml
+#
 #   bash submit_recon_loss_experiments.sh
+#
+# Logs:
+#   - RunAI:  runai logs -f <job-name>   (stdout/stderr from fairseq json logs)
+#   - W&B:    project spectralfm_recon_loss (common.wandb_* in YAML); ensure WANDB_API_KEY in the cluster/image
+#
+# GPU: 40G per job (--gpu-memory 40G). Node pools: faculty,raja
 #
 IMAGE="noyhassid/spectralfm-lean:v6"
 PVC="storage"
@@ -10,9 +17,9 @@ CONDA_ENV="spectralfm"
 CONFIG_DIR="examples/data2vec/config/audio/pretraining/recon_loss"
 CONFIG_NAME="spectralfm_recon_loss"
 
-# Epoch cosim: enable via YAML model.epoch_cosim_* only when PVC data2vec_audio.py dataclass includes those fields.
-# Override stale PVC: skip dry-run over full train-as-valid; recon λ if YAML on /storage is old.
-RUNAI_DEFAULTS="dataset.disable_validation=true model.lambda_recon_fe=1.0"
+# Epoch cosim: full structured panel (~100 samples, same as short_smoke_struct100_wandb / HOW_TO_RUN mode B).
+# Requires structured_similarity_full.json on PVC (precompute_epoch_cosim_indices.py --structured_entries_json).
+RUNAI_DEFAULTS="dataset.disable_validation=true model.lambda_recon_fe=1.0 model.epoch_cosim_structured_entries_path=/storage/noy/SpectralFM/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json"
 
 BASE_CMD="cd ${FAIRSEQ_ROOT} && conda run --no-capture-output -n ${CONDA_ENV} \
   python fairseq_cli/hydra_train.py \
@@ -48,7 +55,7 @@ submit_job() {
     echo ""
 }
 
-echo "=== Submitting reconstruction loss experiments Exp1–Exp4 (batch=512, update_freq=4) ==="
+echo "=== Submitting reconstruction loss experiments Exp1–Exp3 (batch=512, update_freq=4), 40G GPU ==="
 echo ""
 
 # Exp1: YAML defaults (λ_fe=1, λ_trans=0, freeze_encoder=false)
@@ -61,9 +68,9 @@ submit_job "sfm-recon-exp2-fe-tr" "40G" \
 submit_job "sfm-recon-exp3-frozen" "40G" \
   "model.freeze_encoder=true common.wandb_run_name=recon_exp3_fe-recon_frozen-trans"
 
-# Exp4: train feature extractor stack only (transformer frozen by train_only_fe); FE + trans recon λ unchanged
-submit_job "sfm-recon-exp4-train-fe-only" "40G" \
-  "model.train_only_fe=true common.wandb_run_name=recon_exp4_train-fe-only_lambda-fe1"
+# Exp4 (optional): train FE only — uncomment to submit a 4th job
+# submit_job "sfm-recon-exp4-train-fe-only" "40G" \
+#   "model.train_only_fe=true common.wandb_run_name=recon_exp4_train-fe-only_lambda-fe1"
 
 echo "=== Done ==="
-echo "WandB: spectralfm_recon_loss"
+echo "WandB project: spectralfm_recon_loss  |  watch jobs:  watch -n 30 'runai list jobs'"

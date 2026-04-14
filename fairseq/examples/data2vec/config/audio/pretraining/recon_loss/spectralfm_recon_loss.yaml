@@ -114,11 +114,11 @@ model:
   epoch_cosim_enable: true
   # Every N optimizer steps (not each epoch). Set 0 for legacy once-per-epoch at task.end_epoch only.
   epoch_cosim_interval_updates: 1000
-  # Precomputed structured-similarity panel for task.data (see build_structured_similarity_subset → remapped train indices)
+  # Fallback .npy: train indices for task.data only (~30 for single_channel_all). Cosim prefers structured JSON when present.
   epoch_cosim_subset_path: /storage/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
-  # Optional: full ~100-sample panel (single + multi + sampled + labeled). If set, overrides subset_path for cosim only.
-  # Generate: python code/precompute_epoch_cosim_indices.py --nova_data_dir ... --task_data ... --structured_entries_json .../structured_similarity_full.json
-  # epoch_cosim_structured_entries_path: /storage/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_full.json
+  # Full ~100-sample panel (same as eval / short_smoke_struct100_wandb). Shipped next to this YAML so git pull updates RunAI PVC.
+  # Regenerate: python code/precompute_epoch_cosim_indices.py --nova_data_dir .../nova_data --structured_entries_json fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json
+  epoch_cosim_structured_entries_path: /storage/noy/SpectralFM/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json
   epoch_cosim_max_samples: 100
   epoch_cosim_output_subdir: cosim_epoch
   epoch_cosim_micro_batch: 8
