@@ -109,6 +109,7 @@ model:
   lambda_recon_trans: 0.0
   recon_output_dim: 245
   recon_decoder_hidden: "512"
+  recon_decoder_type: mlp    # mlp | conv1d | interp | flat
   model_path: /mnt5/noy/SpectralFM/fairseq/base_libri_official.pt
   skip_pretrained_weights: false
 
