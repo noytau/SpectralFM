@@ -48,7 +48,7 @@ criterion:
 optimization:
   max_update: 20000
   max_epoch: 50
-  lr: [0.00001]
+  lr: [0.0001]
   update_freq: [4]
   clip_norm: 1.0
 
