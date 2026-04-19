@@ -1,137 +1,100 @@
-# Reconstruction loss experiments
+# Reconstruction Loss — How to Run
 
-**Defaults are in `spectralfm_recon_loss.yaml`** (RunAI `/storage/...` paths). Submit script only sets WandB name and experiment-specific knobs (`lambda_recon_trans`, `freeze_encoder`).
+## Quick Start: `recon_only` mode (FE reconstruction only)
 
-**Batching:** `dataset.batch_size=512`, `optimization.update_freq=[4]` → **effective batch = 512 × 4** samples per optimizer step (single GPU).
+The default YAML (`spectralfm_recon_loss.yaml`) runs **FE-only reconstruction**:
+- Transformer, EMA, masking, and regression loss are all **skipped**
+- Only the CNN feature extractor and `fe_recon_decoder` are trainable
+- Loss: L1 (configurable to L2 via CLI)
 
-## Paths
-
-| Environment | Override on CLI |
-|-------------|-----------------|
-| **RunAI** | None (YAML already uses `/storage/noy/SpectralFM/...`) |
-| **Local** | `task.data`, `common.user_dir`, `model.epoch_cosim_subset_path`, `model.model_path`, `hydra.run.dir` → `/mnt5/noy/SpectralFM/...` |
-
-## Cosine similarity maps (what actually runs)
-
-When `model.epoch_cosim_enable=true` and a subset is configured:
-
-**A — Single-dataset panel (default)** — `model.epoch_cosim_subset_path` = `.npy` of train indices for **`task.data` only** (~30 samples for `single_channel_all`).
-
-**B — Full structured panel (~100 samples, same as offline eval)** — set `model.epoch_cosim_structured_entries_path` to a JSON file with `{"entries": [...]}` produced by `build_structured_similarity_subset` (single + multi + sampled + labeled). **Overrides** the `.npy` path for cosim only; training still uses `task.data`. Generate once:
-
-```bash
-cd /mnt5/noy/SpectralFM/code
-python precompute_epoch_cosim_indices.py \
-  --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data \
-  --structured_entries_json /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_full.json
-```
-(`--task_data` / `--out` are only needed for the filtered `.npy`; not for `--structured_entries_json` alone.)
-
-Then in Hydra: `model.epoch_cosim_structured_entries_path=/.../structured_similarity_full.json`.
-
-1. **When:** If `model.epoch_cosim_interval_updates` **> 0** (default **1000**), rank 0 runs after each successful `train_step` when `num_updates % N == 0`. If **0**, the same pipeline runs **once per training epoch** in `task.end_epoch` instead (no mid-training maps).
-2. **Data:** (A) capped indices from `.npy` / filtered JSON; collate from `task.dataset("train")`. (B) walk each entry’s dataset root + manifest line index; one `FileAudioDataset` per root (same audio settings as the task).
-3. **Forward:** `model.eval()` + `torch.no_grad()`; `extract_cosim_epoch_features` → pooled **input**, **FE**, and **transformer embedding** vectors.
-4. **Metrics:** `sklearn.metrics.pairwise.cosine_similarity` on each representation; mean/std of upper triangle per panel.
-5. **Artifacts:** PNG `step_{updates:07d}_cosim_triple.png` or `..._n{N}_structured.png` for mode (B); WandB `epoch_cosim/*` including `epoch_cosim/num_samples`, `epoch_cosim/is_structured_multi_dataset`.
-
-Implementation: `examples/data2vec/cosim_epoch_utils.py` (logic), `fairseq_cli/train.py` (interval hook), `fairseq/tasks/audio_pretraining.py` (`maybe_run_epoch_cosim_on_interval` + `end_epoch` when interval is 0).
-
-## Epoch cosine subset (precomputed structured panel)
-
-This is **not** “all of train” — it is the **structured similarity subset** from `eval_utils.build_structured_similarity_subset` (e.g. 3×10 stack samples from `single_channel_all`), **filtered to `task.data` and remapped** to indices in the **train** `FileAudioDataset` (`structured_subset_epoch_cosim_train_indices`). The old filename `*_train.npy` only meant “train-split indices,” which was easy to misread.
-
-**Canonical file** (local and RunAI — same relative path under the repo root):
-
-| Environment | Path |
-|-------------|------|
-| Local (`/mnt5`) | `/mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy` |
-| RunAI (`/storage`) | `/storage/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy` |
-
-Training expects this file when `model.epoch_cosim_enable` is true. If it is missing, create it **once** (or copy from a machine that already ran the command):
-
-```bash
-# Local: create directory and write ~30 train indices for single_channel_all
-mkdir -p /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim
-
-cd /mnt5/noy/SpectralFM/code
-python precompute_epoch_cosim_indices.py \
-  --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data \
-  --task_data /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all \
-  --min_sample_size 200 \
-  --prefer_manifest train \
-  --out /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
-```
-
-You should see `[+] Wrote 30 indices to ...`. Verify:
-
-```bash
-ls -la /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
-```
-
-**RunAI — get the `.npy` onto `/storage`**
-
-1. **Avoid `scp` from inside the shell pod** (`scp noy@132.66…:/mnt5/... /storage/...`): that pulls from your workstation over SSH **from the cluster**. It often fails (firewall, SSH not reachable from cluster IPs, no keys). Copy **from** the machine that has the file instead, or use `kubectl cp` below.
-
-2. **One-liner script** (from repo, with `kubectl` configured):
-
-   ```bash
-   cd /mnt5/noy/SpectralFM/fairseq
-   ./copy_epoch_cosim_subset_to_shell.sh
-   ```
-
-   Auto-picks the first **Running** pod whose name contains `spectralfm-shell`. Or pass namespace and pod explicitly:
-
-   ```bash
-   ./copy_epoch_cosim_subset_to_shell.sh runai-raja spectralfm-shell-0-6
-   ```
-
-3. **Manual `kubectl cp`** from your dev machine (same paths):
-
-   ```bash
-   POD=spectralfm-shell-0-6          # your shell pod name
-   NS=runai-raja                     # your namespace if not default
-   DST=/storage/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
-   SRC=/mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
-
-   kubectl exec -n "$NS" "$POD" -- mkdir -p "$(dirname "$DST")"
-   kubectl cp "$SRC" "${POD}:${DST}" -n "$NS"
-   kubectl exec -n "$NS" "$POD" -- ls -la "$DST"
-   ```
-
-4. **Or generate on the cluster** (no copy): in a pod with `/storage` mounted and `nova_data` present, run the same `precompute_epoch_cosim_indices.py` command with `--nova_data_dir` / `--task_data` / `--out` under `/storage/noy/SpectralFM/fairseq/...`.
-
-## Local smoke run (short; paths + Hydra output on `/mnt5`)
+### Local (Geoffrey server)
 
 ```bash
 cd /mnt5/noy/SpectralFM/fairseq
+
 python fairseq_cli/hydra_train.py \
   --config-dir examples/data2vec/config/audio/pretraining/recon_loss \
-  --config-name spectralfm_recon_loss \
-  task.data=/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all \
-  common.user_dir=/mnt5/noy/SpectralFM/fairseq/examples/ \
-  model.model_path=/mnt5/noy/SpectralFM/fairseq/base_libri_official.pt \
-  model.epoch_cosim_subset_path=/mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy \
-  hydra.run.dir=/mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/smoke \
-  optimization.max_update=200
+  --config-name spectralfm_recon_loss
 ```
 
-## Experiment matrix (submit only adds WandB name + one or two overrides)
-
-| Job (RunAI) | Extra overrides |
-|---------------|-----------------|
-| Exp 1 `sfm-recon-exp1-fe` | (YAML default: λ_fe=1, λ_trans=0, train encoder) |
-| Exp 2 `sfm-recon-exp2-fe-tr` | `model.lambda_recon_trans=1.0` |
-| Exp 3 `sfm-recon-exp3-frozen` | `model.freeze_encoder=true` |
-| Exp 4 `sfm-recon-exp4-train-fe-only` | `model.train_only_fe=true` (FE stack trains; transformer not updated) |
-
-## RunAI
+### RunAI
 
 ```bash
-cd /mnt5/noy/SpectralFM/fairseq
 bash submit_recon_loss_experiments.sh
 ```
 
-## WandB
+The submit script overrides `/mnt5/...` paths to `/storage/...` for the PVC.
 
-Project: `spectralfm_recon_loss`. Watch `loss_recon_fe`, `loss_recon_trans`, `loss`, `epoch_cosim/*`.
+## CLI Overrides
+
+### Switch loss to L2
+```bash
+model.recon_loss_type=l2
+```
+
+### Change learning rate
+```bash
+optimization.lr='[0.0001]'
+```
+
+### Enable epoch cosine heatmaps
+```bash
+model.epoch_cosim_enable=true
+```
+
+### Change dataset
+```bash
+task.data=/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all
+```
+
+### Override WandB run name
+```bash
+common.wandb_run_name=my_experiment_name
+```
+
+### Reduce checkpoint frequency (save disk)
+```bash
+checkpoint.no_epoch_checkpoints=true \
+checkpoint.keep_interval_updates=1 \
+checkpoint.save_interval_updates=5000
+```
+
+## What `recon_only` does
+
+When `model.recon_only=true`:
+
+1. **`__init__`**: Sets `final_proj = None` (prevents EMA creation), freezes all parameters except `feature_extractor` and `fe_recon_decoder`
+2. **`forward()`**: Runs FE → layer_norm → mean_pool → `fe_recon_decoder` → L1/L2 loss, then returns immediately (no transformer forward pass)
+3. **`set_num_updates()`**: Skips EMA teacher creation
+
+### Trainable parameters
+
+| Component | Params | Trainable |
+|-----------|--------|-----------|
+| Feature Extractor (5 conv layers) | ~3.8M | Yes |
+| fe_recon_decoder (MLP 512→512→245) | ~265K | Yes |
+| Transformer encoder (12 layers) | ~85M | No (frozen) |
+| trans_recon_decoder | ~460K | No (frozen) |
+| EMA teacher | — | Not created |
+
+## Comparison: `train_only_fe` vs `recon_only`
+
+| Aspect | `train_only_fe` | `recon_only` |
+|--------|-----------------|--------------|
+| FE trainable | Yes | Yes |
+| Transformer runs | Yes (frozen forward) | **No** (skipped) |
+| EMA teacher | Created & updated | **Not created** |
+| Masking | Applied | **Skipped** |
+| Regression loss | Computed | **Skipped** |
+| Recon loss | Optional (lambda > 0) | **Primary loss** |
+| Loss function | Configurable (L1/L2) | Configurable (L1/L2) |
+| Compute | ~3× slower (transformer + EMA) | Fast (FE only) |
+
+## Evaluation
+
+```bash
+python code/eval_fe_decoder.py \
+  --checkpoint checkpoints/runai/recon_only_l1/ \
+  --device cuda \
+  --output_dir code/eval_results/fe_decoder_recon_only
+```

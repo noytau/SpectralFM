@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reconstruction Loss — SpectralFM</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #333; }
+  h1 { border-bottom: 2px solid #2c3e50; padding-bottom: 0.5rem; }
+  h2 { color: #2c3e50; margin-top: 2rem; }
+  h3 { color: #34495e; }
+  code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #2d2d2d; color: #f8f8f2; padding: 1rem; border-radius: 6px; overflow-x: auto; line-height: 1.4; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+  th { background: #2c3e50; color: white; }
+  tr:nth-child(even) { background: #f9f9f9; }
+  .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0; }
+  .info { background: #d1ecf1; border-left: 4px solid #17a2b8; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 4px 4px 0; }
+  .diagram { background: #f8f9fa; border: 1px solid #dee2e6; padding: 1rem; border-radius: 6px; font-family: monospace; white-space: pre; line-height: 1.5; overflow-x: auto; }
+  .arrow { color: #e74c3c; font-weight: bold; }
+  .dim { color: #7f8c8d; font-size: 0.85em; }
+</style>
+</head>
+<body>
+
+<h1>Reconstruction Loss in SpectralFM</h1>
+<p><strong>File:</strong> <code>fairseq/examples/data2vec/models/data2vec_audio.py</code></p>
+
+<h2>1. Architecture Overview</h2>
+
+<div class="diagram">
+Input spectrogram [B, 245]
+    │
+    ▼
+<strong>Feature Extractor</strong> (5 conv layers, valid convolutions)
+    │  conv1: k=3, s=1 → [B, 512, 243]
+    │  conv2: k=3, s=1 → [B, 512, 241]
+    │  conv3: k=3, s=1 → [B, 512, 239]
+    │  conv4: k=3, s=1 → [B, 512, 237]
+    │  conv5: k=5, s=5 → [B, 512, 49]
+    ▼
+transpose + layer_norm → <strong>fe_seq</strong> [B, 49, 512]
+    │
+    ├──────────────────────────────────────┐
+    │                                      │
+    ▼                                      ▼
+<strong>mean_pool</strong> → [B, 512]              (transformer encoder)
+    │                                      │
+    ▼                                      ▼
+<strong>fe_recon_decoder</strong>                  <strong>trans_recon_decoder</strong>
+Linear(512→512)→GELU→              Linear(768→512)→GELU→
+Linear(512→245)                    Linear(512→245)
+    │                                      │
+    ▼                                      ▼
+pred_fe [B, 245]                   pred_trans [B, 245]
+    │                                      │
+    ▼                                      ▼
+<strong>recon_fe loss</strong>                     <strong>recon_trans loss</strong>
+L1/L2(pred_fe, input[:245])        L1/L2(pred_trans, input[:245])
+</div>
+
+<h2>2. Two Reconstruction Paths</h2>
+
+<table>
+<tr><th>Aspect</th><th><code>recon_fe</code></th><th><code>recon_trans</code></th></tr>
+<tr><td>Source</td><td>FE output (post layer_norm), mean-pooled [B, 512]</td><td>Transformer output, mean-pooled [B, 768]</td></tr>
+<tr><td>Decoder</td><td><code>fe_recon_decoder</code></td><td><code>trans_recon_decoder</code></td></tr>
+<tr><td>Weight</td><td><code>lambda_recon_fe</code></td><td><code>lambda_recon_trans</code></td></tr>
+<tr><td>Target</td><td colspan="2"><code>source[:, :245]</code> — first 245 values of the raw input</td></tr>
+<tr><td>Loss</td><td colspan="2">Configurable: L1 (<code>recon_loss_type=l1</code>) or L2 (<code>=l2</code>)</td></tr>
+</table>
+
+<h2>3. Key Code Sections</h2>
+
+<h3>3a. <code>ReconstructionDecoder</code> class (line ~519)</h3>
+<pre><code>class ReconstructionDecoder(nn.Module):
+    """MLP (or linear) mapping pooled embeddings → spectrogram bins."""
+
+    def __init__(self, in_dim, out_dim, hidden_spec):
+        # hidden_spec="512" → Linear(512→512)→GELU→Linear(512→245)
+        # hidden_spec=""    → Linear(512→245) (pure linear)
+
+    def forward(self, x):
+        return self.net(x)</code></pre>
+
+<h3>3b. <code>_mean_pool</code> (line ~1367)</h3>
+<pre><code>def _mean_pool(self, x, padding_mask):
+    """Mean-pool over time; padding_mask True = padded (ignored)."""
+    if padding_mask is None:
+        return x.mean(dim=1)   # [B, T, D] → [B, D]
+    # ...masked mean for variable-length sequences</code></pre>
+
+<div class="info">
+<strong>Fixed-length spectrograms:</strong> All spectrograms in this project are exactly 245 samples.
+After the FE, the sequence is always 49 time steps. <code>padding_mask</code> is <code>None</code> in practice,
+so <code>_mean_pool</code> simply averages all 49 frames into a single 512-d vector. The masked
+path is defensive code for potential future use with variable-length inputs.
+</div>
+
+<h3>3c. <code>_recon_target</code> (line ~1377)</h3>
+<pre><code>def _recon_target(self, source):
+    d = self.cfg.recon_output_dim  # 245
+    x = source.float()
+    return x[:, :d]  # first 245 values of raw input</code></pre>
+
+<h2>4. <code>recon_only</code> Mode</h2>
+
+<p>When <code>model.recon_only=true</code>, the entire transformer/EMA/masking pipeline is bypassed:</p>
+
+<h3>What happens in <code>__init__</code></h3>
+<pre><code>if getattr(cfg, "recon_only", False):
+    self.final_proj = None          # prevents EMA creation
+    for name, p in self.named_parameters():
+        if "feature_extractor" not in name and "fe_recon_decoder" not in name:
+            p.requires_grad = False
+    # → Only FE + fe_recon_decoder are trainable (~4M params)</code></pre>
+
+<h3>What happens in <code>forward()</code></h3>
+<pre><code># After FE + layer_norm:
+if getattr(self.cfg, "recon_only", False):
+    result = {"losses": {}}
+    recon_target = self._recon_target(source)
+    fe_p = self._mean_pool(fe_seq, padding_mask)
+    pred_fe = self.fe_recon_decoder(fe_p)
+    loss_fn = F.mse_loss if cfg.recon_loss_type == "l2" else F.l1_loss
+    result["losses"]["recon_fe"] = loss_fn(pred_fe, recon_target) * lambda_recon_fe
+    return result   # ← early return, no transformer</code></pre>
+
+<h2>5. <code>train_only_fe</code> vs <code>recon_only</code></h2>
+
+<table>
+<tr><th>Aspect</th><th><code>train_only_fe=true</code></th><th><code>recon_only=true</code></th></tr>
+<tr><td>FE trainable</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Transformer forward</td><td>Yes (frozen weights)</td><td><strong>Skipped entirely</strong></td></tr>
+<tr><td>EMA teacher</td><td>Created &amp; updated</td><td><strong>Not created</strong></td></tr>
+<tr><td>Masking</td><td>Applied</td><td><strong>Skipped</strong></td></tr>
+<tr><td>Regression loss</td><td>Computed (EMA targets)</td><td><strong>Skipped</strong></td></tr>
+<tr><td>Reconstruction loss</td><td>Optional (if lambda &gt; 0)</td><td><strong>Primary loss</strong></td></tr>
+<tr><td>Loss function</td><td>Configurable L1/L2</td><td>Configurable L1/L2</td></tr>
+<tr><td>Compute cost</td><td>~3× slower (transformer + EMA)</td><td><strong>Fast</strong> (FE only)</td></tr>
+<tr><td>Trainable params</td><td>~3.8M (FE only)</td><td>~4.1M (FE + decoder)</td></tr>
+</table>
+
+<div class="note">
+<strong>Why <code>recon_only</code> exists:</strong> <code>train_only_fe</code> still runs the full transformer and EMA
+teacher on every forward pass — wasting ~70% of compute on frozen components. <code>recon_only</code>
+skips all of that, making training ~3× faster for the same number of updates.
+</div>
+
+<h2>6. Mean-Pool Bottleneck</h2>
+
+<p>The current reconstruction pipeline has a fundamental information bottleneck:</p>
+
+<div class="diagram">
+FE output: [B, 49, 512]  (49 time steps × 512 channels)
+                │
+        mean over time
+                │
+                ▼
+Pooled:   [B, 512]        (temporal order lost)
+                │
+          MLP decoder
+                │
+                ▼
+Output:   [B, 245]        (must reconstruct 245 ordered values)
+</div>
+
+<p>Mean-pooling collapses 49 time steps into a single vector, discarding all temporal
+ordering. The decoder receives a 512-dim "bag of features" and must reconstruct
+245 ordered spectrogram bins — a fundamentally lossy mapping.</p>
+
+<p>Potential fixes explored in experiments:</p>
+<ul>
+  <li><strong>Conv1D decoder:</strong> Skip mean-pool; use <code>[B, 512, 49] → ConvTranspose1d → [B, 1, 245]</code></li>
+  <li><strong>Interpolate decoder:</strong> Interpolate <code>[B, 49, 512] → [B, 245, 512]</code> then project per-step</li>
+  <li><strong>Flatten decoder:</strong> <code>[B, 49×512] → MLP → [B, 245]</code> (large but preserves position)</li>
+</ul>
+
+<h2>7. Configuration Reference</h2>
+
+<table>
+<tr><th>Field</th><th>Default</th><th>Description</th></tr>
+<tr><td><code>recon_only</code></td><td><code>false</code></td><td>Skip transformer/EMA, FE recon loss only</td></tr>
+<tr><td><code>recon_loss_type</code></td><td><code>l1</code></td><td>Loss function: <code>l1</code> or <code>l2</code></td></tr>
+<tr><td><code>lambda_recon_fe</code></td><td><code>0.0</code></td><td>Weight for FE reconstruction loss</td></tr>
+<tr><td><code>lambda_recon_trans</code></td><td><code>0.0</code></td><td>Weight for transformer reconstruction loss</td></tr>
+<tr><td><code>recon_output_dim</code></td><td><code>245</code></td><td>Target spectrogram dimension</td></tr>
+<tr><td><code>recon_decoder_hidden</code></td><td><code>"512"</code></td><td>Comma-separated hidden dims for MLP decoder</td></tr>
+<tr><td><code>train_only_fe</code></td><td><code>false</code></td><td>Freeze all except FE (transformer still runs)</td></tr>
+<tr><td><code>freeze_encoder</code></td><td><code>false</code></td><td>Freeze transformer encoder parameters</td></tr>
+</table>
+
+</body>
+</html>

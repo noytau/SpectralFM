@@ -373,9 +373,17 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     )
 
     # --- Reconstruction loss (optional; EMA regression unchanged) ---
+    recon_only: bool = field(
+        default=False,
+        metadata={"help": "FE reconstruction only -- skip transformer, EMA, masking, regression loss"},
+    )
+    recon_loss_type: str = field(
+        default="l1",
+        metadata={"help": "Reconstruction loss function: 'l1' or 'l2'"},
+    )
     lambda_recon_fe: float = field(
         default=0.0,
-        metadata={"help": "Weight for L1 recon from pooled FE (post layer_norm) to input spectrogram"},
+        metadata={"help": "Weight for recon from pooled FE (post layer_norm) to input spectrogram"},
     )
     lambda_recon_trans: float = field(
         default=0.0,
@@ -388,6 +396,16 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     recon_decoder_hidden: str = field(
         default="512",
         metadata={"help": "Comma-separated hidden dims for recon MLP, or empty string for linear"},
+    )
+    recon_decoder_type: str = field(
+        default="mlp",
+        metadata={
+            "help": "Decoder architecture for FE reconstruction: "
+                    "'mlp' (mean-pool → MLP, default), "
+                    "'conv1d' (ConvTranspose1d upsampling, no mean-pool), "
+                    "'interp' (interpolate to target len → per-step linear, no mean-pool), "
+                    "'flat' (flatten all timesteps → MLP, no mean-pool)"
+        },
     )
 
     # --- Cosine similarity maps (optional; rank 0; see cosim_epoch_utils + HOW_TO_RUN) ---
@@ -526,8 +544,87 @@ class ReconstructionDecoder(nn.Module):
             layers.append(nn.Linear(prev, out_dim))
             self.net = nn.Sequential(*layers)
 
+    @property
+    def needs_full_sequence(self) -> bool:
+        return False
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class Conv1dReconDecoder(nn.Module):
+    """ConvTranspose1d decoder: [B, C, T'] → [B, 1, out_dim]. No mean-pool needed."""
+
+    def __init__(self, in_channels: int, out_dim: int, fe_time_steps: int = 49):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.ConvTranspose1d(in_channels, 256, kernel_size=4, stride=2, padding=1),  # 49→98
+            nn.GELU(),
+            nn.ConvTranspose1d(256, 64, kernel_size=4, stride=2, padding=1),           # 98→196
+            nn.GELU(),
+            nn.ConvTranspose1d(64, 1, kernel_size=4, stride=2, padding=1),             # 196→392
+        )
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_channels, fe_time_steps)
+            conv_out_len = self.net(dummy).shape[-1]
+        self.proj = nn.Linear(conv_out_len, out_dim)
+
+    @property
+    def needs_full_sequence(self) -> bool:
+        return True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, T', C] (time-last from layer_norm) → [B, out_dim]"""
+        x = x.transpose(1, 2)              # [B, C, T']
+        x = self.net(x)                    # [B, 1, conv_out_len]
+        x = x.squeeze(1)                   # [B, conv_out_len]
+        return self.proj(x)                # [B, out_dim]
+
+
+class InterpReconDecoder(nn.Module):
+    """Interpolate FE sequence to target length, then per-step linear → scalar. No mean-pool."""
+
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.out_dim = out_dim
+        self.fc = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.GELU(),
+            nn.Linear(128, 1),
+        )
+
+    @property
+    def needs_full_sequence(self) -> bool:
+        return True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, T', C] → [B, out_dim]"""
+        x = x.transpose(1, 2)                                # [B, C, T']
+        x = F.interpolate(x, size=self.out_dim, mode="linear", align_corners=False)
+        x = x.transpose(1, 2)                                # [B, out_dim, C]
+        return self.fc(x).squeeze(-1)                         # [B, out_dim]
+
+
+class FlatReconDecoder(nn.Module):
+    """Flatten all timesteps then MLP: [B, T'*C] → [B, out_dim]. No mean-pool."""
+
+    def __init__(self, in_dim: int, out_dim: int, fe_time_steps: int = 49):
+        super().__init__()
+        flat_dim = in_dim * fe_time_steps  # 512*49 = 25088
+        bottleneck = 512
+        self.net = nn.Sequential(
+            nn.Linear(flat_dim, bottleneck),
+            nn.GELU(),
+            nn.Linear(bottleneck, out_dim),
+        )
+
+    @property
+    def needs_full_sequence(self) -> bool:
+        return True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, T', C] → [B, out_dim]"""
+        return self.net(x.reshape(x.shape[0], -1))
 
 
 @register_model("data2vec_audio", dataclass=Data2VecAudioConfig)
@@ -607,7 +704,19 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         hspec = getattr(cfg, "recon_decoder_hidden", "512") or "512"
         out_d = int(getattr(cfg, "recon_output_dim", 245))
-        self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, hspec)
+        dec_type = getattr(cfg, "recon_decoder_type", "mlp")
+        fe_time_steps = 49  # fixed for conv_feature_layers with 245-sample input
+
+        if dec_type == "conv1d":
+            self.fe_recon_decoder = Conv1dReconDecoder(self.extractor_embed, out_d, fe_time_steps)
+        elif dec_type == "interp":
+            self.fe_recon_decoder = InterpReconDecoder(self.extractor_embed, out_d)
+        elif dec_type == "flat":
+            self.fe_recon_decoder = FlatReconDecoder(self.extractor_embed, out_d, fe_time_steps)
+        else:
+            self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, hspec)
+        logger.info(f"[recon] FE decoder type={dec_type}, class={type(self.fe_recon_decoder).__name__}")
+
         self.trans_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
 
         self.num_updates = 0
@@ -635,18 +744,30 @@ class Data2VecAudioModel(BaseFairseqModel):
         if debug_enabled:
             set_debug_plot_mode('train')
 
-        if cfg.train_only_fe and getattr(cfg, "fe_mode", "train") == "train":
+        if getattr(cfg, "recon_only", False):
+            self.final_proj = None
+            for name, p in self.named_parameters():
+                if "feature_extractor" not in name and "fe_recon_decoder" not in name:
+                    p.requires_grad = False
+            logger.info("[recon_only] Only FE + fe_recon_decoder trainable; "
+                        "transformer/EMA/regression skipped in forward()")
+        elif cfg.train_only_fe and getattr(cfg, "fe_mode", "train") == "train":
             self.freeze_all_except_feature_extractor()
+            if getattr(cfg, "lambda_recon_fe", 0.0) > 0:
+                for p in self.fe_recon_decoder.parameters():
+                    p.requires_grad = True
+            if getattr(cfg, "lambda_recon_trans", 0.0) > 0:
+                for p in self.trans_recon_decoder.parameters():
+                    p.requires_grad = True
         elif not cfg.train_only_fe:
             print("[+] Training the entire model (not only Feature-Extractor)")
             logger.info("[+] Training the entire model (not only Feature-Extractor)")
-
-        if getattr(cfg, "lambda_recon_fe", 0.0) > 0:
-            for p in self.fe_recon_decoder.parameters():
-                p.requires_grad = True
-        if getattr(cfg, "lambda_recon_trans", 0.0) > 0:
-            for p in self.trans_recon_decoder.parameters():
-                p.requires_grad = True
+            if getattr(cfg, "lambda_recon_fe", 0.0) > 0:
+                for p in self.fe_recon_decoder.parameters():
+                    p.requires_grad = True
+            if getattr(cfg, "lambda_recon_trans", 0.0) > 0:
+                for p in self.trans_recon_decoder.parameters():
+                    p.requires_grad = True
 
     def freeze_all_except_feature_extractor(self):
         for name, p in self.named_parameters():
@@ -725,7 +846,7 @@ class Data2VecAudioModel(BaseFairseqModel):
     def set_num_updates(self, num_updates):
         super().set_num_updates(num_updates)
 
-        if self.ema is None and self.final_proj is not None:
+        if self.ema is None and self.final_proj is not None and not getattr(self.cfg, "recon_only", False):
             logger.info(f"making ema teacher")
             self.make_ema_teacher()
         elif self.training and self.ema is not None:
@@ -1033,6 +1154,21 @@ class Data2VecAudioModel(BaseFairseqModel):
         features = self.layer_norm(features)
         fe_seq = features  # pre-mask FE for reconstruction loss
 
+        # --- recon_only: early return, skip transformer/EMA/masking ---
+        if getattr(self.cfg, "recon_only", False):
+            result = {"losses": {}}
+            recon_target = self._recon_target(source)
+            if getattr(self.fe_recon_decoder, "needs_full_sequence", False):
+                pred_fe = self.fe_recon_decoder(fe_seq)
+            else:
+                pred_fe = self.fe_recon_decoder(self._mean_pool(fe_seq, padding_mask))
+            loss_fn = F.mse_loss if getattr(self.cfg, "recon_loss_type", "l1") == "l2" else F.l1_loss
+            result["losses"]["recon_fe"] = (
+                loss_fn(pred_fe, recon_target, reduction="mean")
+                * self.cfg.lambda_recon_fe
+            )
+            return result
+
         orig_padding_mask = padding_mask
 
         if padding_mask is not None and padding_mask.any():
@@ -1222,17 +1358,20 @@ class Data2VecAudioModel(BaseFairseqModel):
         x_for_reg = x.reshape(-1, x.shape[-1]).detach()
 
         recon_target = self._recon_target(source)
+        recon_loss_fn = F.mse_loss if getattr(self.cfg, "recon_loss_type", "l1") == "l2" else F.l1_loss
         if getattr(self.cfg, "lambda_recon_fe", 0.0) > 0:
-            fe_p = self._mean_pool(fe_seq, padding_mask)
-            pred_fe = self.fe_recon_decoder(fe_p)
+            if getattr(self.fe_recon_decoder, "needs_full_sequence", False):
+                pred_fe = self.fe_recon_decoder(fe_seq)
+            else:
+                pred_fe = self.fe_recon_decoder(self._mean_pool(fe_seq, padding_mask))
             result["losses"]["recon_fe"] = (
-                F.l1_loss(pred_fe, recon_target, reduction="mean") * self.cfg.lambda_recon_fe
+                recon_loss_fn(pred_fe, recon_target, reduction="mean") * self.cfg.lambda_recon_fe
             )
         if getattr(self.cfg, "lambda_recon_trans", 0.0) > 0:
             tp = self._mean_pool(x, padding_mask)
             pred_t = self.trans_recon_decoder(tp)
             result["losses"]["recon_trans"] = (
-                F.l1_loss(pred_t, recon_target, reduction="mean") * self.cfg.lambda_recon_trans
+                recon_loss_fn(pred_t, recon_target, reduction="mean") * self.cfg.lambda_recon_trans
             )
 
         x = x[mask_indices]
