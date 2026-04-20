@@ -402,6 +402,7 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         metadata={
             "help": "Decoder architecture for FE reconstruction: "
                     "'mlp' (mean-pool → MLP, default), "
+                    "'linear' (mean-pool → Linear(512→245), no hidden layers), "
                     "'conv1d' (ConvTranspose1d upsampling, no mean-pool), "
                     "'interp' (interpolate to target len → per-step linear, no mean-pool), "
                     "'flat' (flatten all timesteps → MLP, no mean-pool)"
@@ -713,6 +714,8 @@ class Data2VecAudioModel(BaseFairseqModel):
             self.fe_recon_decoder = InterpReconDecoder(self.extractor_embed, out_d)
         elif dec_type == "flat":
             self.fe_recon_decoder = FlatReconDecoder(self.extractor_embed, out_d, fe_time_steps)
+        elif dec_type == "linear":
+            self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, "")
         else:
             self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, hspec)
         logger.info(f"[recon] FE decoder type={dec_type}, class={type(self.fe_recon_decoder).__name__}")
