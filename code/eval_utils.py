@@ -11,6 +11,7 @@ Contains:
 Separated from evaluation_runner.py for maintainability.
 """
 
+import json
 import os
 import re
 import numpy as np
@@ -548,6 +549,172 @@ def _load_wav_data_for_index(
         return None
 
 
+def check_nova_layout_for_structured_similarity(nova_data_dir: str) -> None:
+    """
+    Verify ``nova_data_dir`` has the four dataset folders with ``valid.tsv`` or ``train.tsv``.
+
+    Raises:
+        FileNotFoundError: With a message listing what is missing (no audio is loaded).
+    """
+    nova_data_dir = os.path.expanduser(nova_data_dir)
+    required = ("single_channel_all", "multi_channel", "sampled_data", "labeled_data")
+    problems: List[str] = []
+    for name in required:
+        ds_path = os.path.join(nova_data_dir, name)
+        if not os.path.isdir(ds_path):
+            problems.append(f"missing directory: {ds_path}")
+            continue
+        has_manifest = any(
+            os.path.isfile(os.path.join(ds_path, fn)) for fn in ("valid.tsv", "train.tsv")
+        )
+        if not has_manifest:
+            problems.append(f"no valid.tsv or train.tsv in: {ds_path}")
+    if problems:
+        raise FileNotFoundError(
+            "structured_similarity needs the full nova_data tree (four datasets with manifests).\n"
+            "Fix or sync data, or use --eval_methods embedding_similarity for valid-set heatmaps only.\n"
+            + "\n".join(f"  - {p}" for p in problems)
+        )
+
+
+def check_nova_layout_for_structured_entries(entries: List[Dict], nova_data_dir: str) -> None:
+    """
+    Verify each dataset referenced by a frozen entry list has a manifest under ``nova_data_dir``.
+    Used when loading the exact 100-sample panel from ``structured_similarity_full.json``.
+    """
+    nova_data_dir = os.path.normpath(os.path.expanduser(nova_data_dir))
+    seen = set()
+    for e in entries:
+        ds = e.get("dataset")
+        if not ds or ds in seen:
+            continue
+        seen.add(ds)
+        p = os.path.join(nova_data_dir, ds)
+        if not os.path.isdir(p):
+            raise FileNotFoundError(f"structured panel entry needs dataset directory: {p}")
+        if not any(os.path.isfile(os.path.join(p, fn)) for fn in ("valid.tsv", "train.tsv")):
+            raise FileNotFoundError(f"no valid.tsv or train.tsv in {p}")
+
+
+def load_structured_similarity_entries_from_json(path: str) -> Tuple[List[Dict], Optional[str], int]:
+    """
+    Load the canonical 100-entry list from ``structured_similarity_full.json`` (or same schema).
+
+    Returns:
+        entries, prefer_manifest from JSON (often ``\"train\"``), seed field from JSON.
+    """
+    jp = os.path.expanduser(path)
+    with open(jp, "r") as f:
+        data = json.load(f)
+    entries = data["entries"]
+    prefer = data.get("prefer_manifest")
+    seed = int(data.get("seed", 42))
+    if len(entries) != 100:
+        raise ValueError(f"structured similarity JSON must contain exactly 100 entries, got {len(entries)}")
+    return entries, prefer, seed
+
+
+def remap_structured_entries_to_nova_dir(entries: List[Dict], nova_data_dir: str) -> List[Dict]:
+    """Point each entry's ``path`` at ``os.path.join(nova_data_dir, dataset)`` (machine-local roots)."""
+    nova_data_dir = os.path.normpath(os.path.expanduser(nova_data_dir))
+    out: List[Dict] = []
+    for e in entries:
+        ds = e["dataset"]
+        new_path = os.path.join(nova_data_dir, ds)
+        out.append({**e, "path": new_path})
+    return out
+
+
+def _normalize_like_fairseq(arr: np.ndarray) -> np.ndarray:
+    """Per-sample z-score (matches ``F.layer_norm(feats, feats.shape)`` in FileAudioDataset)."""
+    mean = arr.mean(axis=1, keepdims=True)
+    std = arr.std(axis=1, keepdims=True) + 1e-8
+    return ((arr - mean) / std).astype(np.float32)
+
+
+def load_structured_similarity_spectrograms_from_entries(
+    entries: List[Dict],
+    *,
+    prefer_manifest: Optional[str] = None,
+    target_length: int = 245,
+) -> Tuple[np.ndarray, List[Dict]]:
+    """Load the 100 spectrogram rows for a fixed entry list (same order as JSON / offline tools)."""
+    inputs: List[np.ndarray] = []
+    for e in entries:
+        data = _load_wav_data_for_index(
+            e["path"], int(e["index"]), prefer_manifest=prefer_manifest
+        )
+        if data is None:
+            raise RuntimeError(f"Failed to load structured entry: {e}")
+        if len(data) >= target_length:
+            row = data[:target_length].astype(np.float32, copy=False)
+        else:
+            padded = np.zeros(target_length, dtype=np.float32)
+            padded[: len(data)] = data.astype(np.float32, copy=False)
+            row = padded
+        inputs.append(row)
+    arr = np.stack(inputs, axis=0)
+    return _normalize_like_fairseq(arr), entries
+
+
+def check_single_channel_structured_similarity_viable(
+    nova_data_dir: str,
+    *,
+    n_stacks: int = 10,
+) -> None:
+    """
+    ``single_channel_all`` only: need ``n_stacks`` full stacks (10 manifest lines each) → 100 samples.
+    """
+    nova_data_dir = os.path.expanduser(nova_data_dir)
+    sc_path = os.path.join(nova_data_dir, "single_channel_all")
+    if not os.path.isdir(sc_path):
+        raise FileNotFoundError(f"missing directory: {sc_path}")
+    if not any(os.path.isfile(os.path.join(sc_path, fn)) for fn in ("valid.tsv", "train.tsv")):
+        raise FileNotFoundError(f"no valid.tsv or train.tsv in: {sc_path}")
+    sc_rows = _read_tsv_indices(sc_path, prefer_manifest=None)
+    total_stacks = len(sc_rows) // 10
+    if total_stacks < n_stacks:
+        raise FileNotFoundError(
+            f"single_channel_all has only {total_stacks} full stacks (10 lines each); "
+            f"need at least {n_stacks} for a 100-sample structured panel."
+        )
+
+
+def build_structured_similarity_subset_single_channel_only(
+    nova_data_dir: str,
+    seed: int = 42,
+    *,
+    n_stacks: int = 10,
+    prefer_manifest: Optional[str] = None,
+) -> List[Dict]:
+    """
+    Fallback panel when the four-dataset nova tree is incomplete: **n_stacks × 10 = 100**
+    samples from ``single_channel_all`` only (random ``n_stacks`` stacks, same RNG contract as full panel).
+    """
+    rng = np.random.default_rng(seed)
+    sc_name = "single_channel_all"
+    sc_path = os.path.join(nova_data_dir, sc_name)
+    sc_rows = _read_tsv_indices(sc_path, prefer_manifest=prefer_manifest)
+    total_stacks = len(sc_rows) // 10
+    if total_stacks < n_stacks:
+        raise ValueError(
+            f"single_channel_all: need at least {n_stacks} full stacks; have {total_stacks}."
+        )
+    chosen_stacks = sorted(rng.choice(total_stacks, n_stacks, replace=False).tolist())
+    entries: List[Dict] = []
+    for s in chosen_stacks:
+        for i in range(s * 10, s * 10 + 10):
+            idx, fname = sc_rows[i]
+            entries.append({
+                "dataset": sc_name,
+                "path": sc_path,
+                "index": idx,
+                "group": f"stack_{s}",
+                "group_type": "stack",
+            })
+    return entries
+
+
 def build_structured_similarity_subset(
     nova_data_dir: str,
     seed: int = 42,
@@ -634,6 +801,128 @@ def build_structured_similarity_subset(
                 })
 
     return entries
+
+
+def load_structured_similarity_spectrograms(
+    nova_data_dir: str,
+    *,
+    seed: int = 42,
+    target_length: int = 245,
+    prefer_manifest: Optional[str] = None,
+    single_channel_only: bool = False,
+) -> Tuple[np.ndarray, List[Dict]]:
+    """
+    Load the fixed **100-sample** structured-similarity panel as spectrogram rows.
+
+    Same definition as :func:`build_structured_similarity_subset` (used by the
+    evaluation suite's ``structured_similarity`` / epoch-cosim tooling). Order
+    is canonical (not shuffled).
+
+    If ``single_channel_only`` is True, builds the fallback panel from
+    :func:`build_structured_similarity_subset_single_channel_only` (10 stacks × 10).
+    """
+    if single_channel_only:
+        entries = build_structured_similarity_subset_single_channel_only(
+            nova_data_dir, seed=seed, prefer_manifest=prefer_manifest
+        )
+    else:
+        entries = build_structured_similarity_subset(
+            nova_data_dir, seed=seed, prefer_manifest=prefer_manifest
+        )
+    inputs: List[np.ndarray] = []
+    for e in entries:
+        data = _load_wav_data_for_index(
+            e["path"], int(e["index"]), prefer_manifest=prefer_manifest
+        )
+        if data is None:
+            raise RuntimeError(f"Failed to load structured entry: {e}")
+        if len(data) >= target_length:
+            row = data[:target_length].astype(np.float32, copy=False)
+        else:
+            padded = np.zeros(target_length, dtype=np.float32)
+            padded[: len(data)] = data.astype(np.float32, copy=False)
+            row = padded
+        inputs.append(row)
+    arr = np.stack(inputs, axis=0)
+    return _normalize_like_fairseq(arr), entries
+
+
+def structured_numpy_rows_to_samples(inputs: np.ndarray) -> List[Dict]:
+    """
+    Convert the (N, T) structured-similarity spectrogram array into fairseq-style
+    sample dicts so :meth:`EvaluationRunner._load_embeddings_from_checkpoint` and
+    FE extraction use the **same** ordering as ``load_structured_similarity_spectrograms``.
+    """
+    import torch
+
+    out: List[Dict] = []
+    arr = np.asarray(inputs, dtype=np.float32)
+    for i in range(arr.shape[0]):
+        row = arr[i]
+        t = torch.from_numpy(np.ascontiguousarray(row))
+        out.append({"source": t, "id": i})
+    return out
+
+
+def extract_fe_outputs_from_fairseq_checkpoint(
+    checkpoint_path: str,
+    samples: List[Dict],
+    device,
+    *,
+    checkpoint_name: str = "",
+) -> Optional[np.ndarray]:
+    """
+    CNN feature-extractor outputs (pooled over time) for each sample, in order.
+
+    Must use the **same** ``samples`` list as embedding extraction. Used for
+    structured-similarity and comparison plots.
+    """
+    import torch
+    from model_loader import load_fairseq_checkpoint
+
+    try:
+        model, _, _ = load_fairseq_checkpoint(checkpoint_path)
+        model = model.to(device)
+        model.eval()
+
+        fe_outputs: List[np.ndarray] = []
+        with torch.no_grad():
+            for sample in samples:
+                if isinstance(sample, dict):
+                    source = sample.get("source")
+                    if source is None:
+                        ni = sample.get("net_input")
+                        if isinstance(ni, dict):
+                            source = ni.get("source")
+                else:
+                    source = sample
+
+                if source is None:
+                    continue
+
+                if not isinstance(source, torch.Tensor):
+                    source = torch.tensor(source, dtype=torch.float32)
+
+                if source.dim() == 1:
+                    source = source.unsqueeze(0)
+                source = source.to(device)
+
+                fe = model.feature_extractor(source)
+                fe = fe.transpose(1, 2)
+                fe = model.layer_norm(fe)
+                if model.post_extract_proj is not None:
+                    fe = model.post_extract_proj(fe)
+                fe_vec = fe.mean(dim=1)
+                fe_outputs.append(fe_vec.squeeze(0).cpu().numpy())
+
+        if fe_outputs:
+            return np.stack(fe_outputs)
+        return None
+    except Exception as e:
+        print(f"    [!] Error extracting FE outputs from {checkpoint_name or checkpoint_path}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def structured_subset_epoch_cosim_train_indices(

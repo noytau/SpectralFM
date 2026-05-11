@@ -234,35 +234,9 @@ def _plot_all_models(
       Row 0: Input | run1 embed | run2 embed | ...
       Row 1: Input | run1 FE    | run2 FE    | ...
     """
-    has_fe = any(r.get("fe_outputs") is not None for r in run_data)
-    n_rows = 2 if has_fe else 1
-    n_cols = 1 + len(run_data)
+    from eval_plots import plot_structured_similarity_all_models
 
-    fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(5 * n_cols, 5 * n_rows),
-                             squeeze=False)
-    fig.suptitle(title, fontsize=13, fontweight="bold")
-
-    inp_sim = _sim_matrix(inputs)
-
-    # Row 0: input + embeddings
-    _heatmap(axes[0, 0], inp_sim, "Input Space", ylabel="Embeddings")
-    for col, rd in enumerate(run_data, start=1):
-        emb_sim = _sim_matrix(rd["embeddings"])
-        _heatmap(axes[0, col], emb_sim, rd["run_name"],
-                 color=rd.get("color", "#333333"))
-
-    # Row 1: input + FE outputs
-    if has_fe:
-        _heatmap(axes[1, 0], inp_sim, "Input Space", ylabel="FE Output")
-        for col, rd in enumerate(run_data, start=1):
-            fe_sim = _sim_matrix(rd.get("fe_outputs"))
-            _heatmap(axes[1, col], fe_sim, f"{rd['run_name']}\n(FE Output)",
-                     color=rd.get("color", "#333333"))
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    plot_structured_similarity_all_models(run_data, inputs, str(save_path), title=title)
     print(f"[+] Saved: {save_path}")
 
 

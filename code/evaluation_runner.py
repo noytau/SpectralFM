@@ -185,6 +185,14 @@ class CheckpointDiscovery:
                         if ckpt_info:
                             checkpoints.append(ckpt_info)
         
+        # Flat layout: all checkpoints are *.pt files directly under base_dir (no date/ subdirs).
+        # Typical for RunAI exports or manual copies with long stems like
+        # 2026-04-14_07-42-33_recon-fe1.0_recon-tr0.0_frozen-encFalse_3k.pt
+        for ckpt_file in sorted(self.base_dir.glob("*.pt")):
+            ckpt_info = self._parse_flat_named_checkpoint(ckpt_file)
+            if ckpt_info is not None:
+                checkpoints.append(ckpt_info)
+        
         return checkpoints
     
     def find_best_checkpoints(self) -> List[CheckpointInfo]:
@@ -202,6 +210,32 @@ class CheckpointDiscovery:
         """Check if directory name looks like a date (YYYY-MM-DD)."""
         parts = name.split('-')
         return len(parts) == 3 and all(p.isdigit() for p in parts)
+    
+    def _parse_flat_named_checkpoint(self, path: Path) -> Optional[CheckpointInfo]:
+        """
+        Parse a .pt file sitting directly under base_dir.
+
+        Accepts two naming conventions:
+          1. Date-prefixed: ``YYYY-MM-DD_<rest>.pt``  →  date extracted from prefix
+          2. Any other ``.pt``:  →  date/time set to "unknown", stem used as run name
+        """
+        stem = path.stem
+        parts = stem.split("_")
+        if len(parts) >= 2 and self._is_date_dir(parts[0]):
+            date = parts[0]
+            time = "_".join(parts[1:])
+        else:
+            date = "unknown"
+            time = stem
+        config = self._load_run_config(self.base_dir)
+        return CheckpointInfo(
+            path=str(path.resolve()),
+            run_dir=str(self.base_dir.resolve()),
+            date=date,
+            time=time,
+            checkpoint_type="best",
+            config=config,
+        )
     
     def _parse_checkpoint(self, path: Path, date: str, time: str, run_dir: Path) -> Optional[CheckpointInfo]:
         """Parse checkpoint file and extract metadata."""
@@ -314,6 +348,13 @@ class EvaluationRunner:
         # Debug directory for data plots
         self.debug_plots_dir = self.output_dir / "debug_plots"
         self.debug_plots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Structured similarity (100-sample nova panel); set in evaluate_all()
+        self._nova_data_dir: Optional[str] = None
+        self._structured_similarity_seed: int = 42
+        self._structured_similarity_entries_json: Optional[str] = None
+        self._structured_similarity_prefer_manifest: str = "train"
+        self._allow_structured_single_channel_fallback: bool = False
     
     def _plot_spectrogram_with_mask(self, data: np.ndarray, mask_indices: np.ndarray,
                                     run_name: str, sample_id: int, 
@@ -1282,6 +1323,10 @@ class EvaluationRunner:
                     method_metrics = self._eval_noise_robustness(model, device, embedding_samples)
                 elif method == "stack_similarity":
                     method_metrics = self._eval_stack_similarity(inputs, embeddings)
+                elif method == "structured_similarity":
+                    method_metrics = self._eval_structured_similarity(
+                        model, device, checkpoint_info, checkpoint_info.path
+                    )
                 else:
                     print(f"[!] Unknown eval method: {method}")
                     continue
@@ -1330,7 +1375,12 @@ class EvaluationRunner:
                     eval_data_dir: Optional[str] = None,
                     debug: bool = False,
                     include_random_weights: bool = False,
-                    mask_memory_path: Optional[str] = None) -> List[EvalResult]:
+                    mask_memory_path: Optional[str] = None,
+                    nova_data_dir: Optional[str] = None,
+                    structured_similarity_seed: int = 42,
+                    structured_similarity_entries_json: Optional[str] = None,
+                    structured_similarity_prefer_manifest: str = "train",
+                    structured_similarity_allow_single_channel_fallback: bool = False) -> List[EvalResult]:
         """
         Evaluate multiple checkpoints.
         
@@ -1342,9 +1392,20 @@ class EvaluationRunner:
             eval_methods: List of evaluation methods to run
             custom_dataset_path: Optional custom dataset path for additional evaluation
             eval_data_dir: Optional evaluation data directory override. Priority: eval_data_dir > self.data_dir > cfg.task.data
+            nova_data_dir: Parent directory of nova datasets; used by ``structured_similarity`` (default in CLI: env or /mnt5/noy/fairseq/data).
+            structured_similarity_seed: RNG seed for :func:`eval_utils.build_structured_similarity_subset` (default 42).
+            structured_similarity_entries_json: Path to ``structured_similarity_full.json`` (100 exact entries); default in CLI is repo file if present.
+            structured_similarity_prefer_manifest: ``train`` or ``valid`` for manifest line indices (default ``train``, matches JSON / epoch cosim).
+            structured_similarity_allow_single_channel_fallback: If True and full layout is missing, use 10×10 stacks from single_channel_all only.
         """
         if not checkpoints:
             return []
+
+        self._nova_data_dir = nova_data_dir
+        self._structured_similarity_seed = structured_similarity_seed
+        self._structured_similarity_entries_json = structured_similarity_entries_json
+        self._structured_similarity_prefer_manifest = structured_similarity_prefer_manifest
+        self._allow_structured_single_channel_fallback = structured_similarity_allow_single_channel_fallback
         
         results = []
         
@@ -1467,6 +1528,9 @@ class EvaluationRunner:
                 mask_memory_path=mask_memory_path  # Pass mask_memory_path
             )
             results.append(result)
+        
+        if "structured_similarity" in (eval_methods or []):
+            self._write_structured_similarity_multi_plot(eval_methods, results, checkpoints)
         
         return results
     
@@ -2180,6 +2244,199 @@ class EvaluationRunner:
         
         return metrics
     
+    def _eval_structured_similarity(
+        self,
+        model,
+        device,
+        checkpoint_info: CheckpointInfo,
+        checkpoint_path: str,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Fixed 100-sample panel: prefer ``structured_similarity_full.json`` (exact indices / groups),
+        else :func:`eval_utils.build_structured_similarity_subset` with seed + prefer_manifest.
+
+        Saves ``inputs_*_structured_similarity.npy``, ``embeddings_*_structured_similarity.npy``,
+        ``fe_outputs_*_structured_similarity.npy`` using the **same** sample list for embeddings
+        and CNN FE outputs (required for comparable heatmaps).
+        """
+        from sklearn.metrics.pairwise import cosine_similarity
+        from eval_utils import (
+            check_nova_layout_for_structured_entries,
+            check_nova_layout_for_structured_similarity,
+            check_single_channel_structured_similarity_viable,
+            extract_fe_outputs_from_fairseq_checkpoint,
+            load_structured_similarity_entries_from_json,
+            load_structured_similarity_spectrograms,
+            load_structured_similarity_spectrograms_from_entries,
+            remap_structured_entries_to_nova_dir,
+            structured_numpy_rows_to_samples,
+        )
+
+        nova = self._nova_data_dir
+        if not nova or not os.path.isdir(nova):
+            print(
+                "[!] structured_similarity: provide --nova_data_dir "
+                "(parent of single_channel_all, multi_channel, …), e.g. /mnt5/noy/fairseq/data"
+            )
+            return None
+
+        prefer = self._structured_similarity_prefer_manifest  # "train" matches JSON / label tooling
+        seed = self._structured_similarity_seed
+        entries_json = self._structured_similarity_entries_json
+        allow_fallback = self._allow_structured_single_channel_fallback
+
+        single_channel_only = False
+        inputs_arr = None
+        panel_entries = None
+
+        if entries_json and os.path.isfile(entries_json):
+            raw_entries, json_prefer, json_seed = load_structured_similarity_entries_from_json(entries_json)
+            pm = json_prefer if json_prefer is not None else prefer
+            panel_entries = remap_structured_entries_to_nova_dir(raw_entries, nova)
+            check_nova_layout_for_structured_entries(panel_entries, nova)
+            print(
+                f"[+] Structured similarity: exact 100-sample panel from {entries_json} "
+                f"(prefer_manifest={pm!r}, json seed={json_seed})."
+            )
+            inputs_arr, _ = load_structured_similarity_spectrograms_from_entries(
+                panel_entries, prefer_manifest=pm
+            )
+        else:
+            if entries_json:
+                print(f"[!] structured_similarity: entries JSON not found: {entries_json}")
+                return None
+            try:
+                check_nova_layout_for_structured_similarity(nova)
+            except FileNotFoundError as exc_full:
+                if not allow_fallback:
+                    raise FileNotFoundError(
+                        f"{exc_full}\n\n"
+                        "Use --structured_similarity_allow_single_channel_fallback for a reduced panel, "
+                        "or provide --structured_similarity_entries_json pointing to structured_similarity_full.json "
+                        "and a --nova_data_dir tree that contains those datasets."
+                    ) from exc_full
+                print("[!] Full nova_data layout not available.")
+                print("[+] Optional fallback: 100 samples from single_channel_all only (10 stacks × 10).")
+                try:
+                    check_single_channel_structured_similarity_viable(nova)
+                except FileNotFoundError as exc_sc:
+                    raise FileNotFoundError(
+                        f"{exc_full}\n\nFallback (single_channel_all only) also failed:\n{exc_sc}"
+                    ) from exc_sc
+                single_channel_only = True
+
+            print(
+                f"[+] Structured similarity: RNG panel seed={seed}, prefer_manifest={prefer!r}"
+                + (" (single_channel_all only)" if single_channel_only else "")
+            )
+            inputs_arr, panel_entries = load_structured_similarity_spectrograms(
+                nova,
+                seed=seed,
+                prefer_manifest=prefer,
+                single_channel_only=single_channel_only,
+            )
+        samples = structured_numpy_rows_to_samples(inputs_arr)
+
+        _, embeddings = self._extract_embeddings_from_samples(model, device, samples)
+        if embeddings is None or len(embeddings) != len(inputs_arr):
+            print("[!] structured_similarity: embedding extraction failed or length mismatch")
+            return None
+
+        fe_outputs = extract_fe_outputs_from_fairseq_checkpoint(
+            checkpoint_path, samples, device, checkpoint_name=checkpoint_info.run_name
+        )
+
+        run_name = checkpoint_info.run_name
+        np.save(self.data_dir_out / f"inputs_{run_name}_structured_similarity.npy", inputs_arr)
+        np.save(self.data_dir_out / f"embeddings_{run_name}_structured_similarity.npy", embeddings)
+        if fe_outputs is not None:
+            np.save(self.data_dir_out / f"fe_outputs_{run_name}_structured_similarity.npy", fe_outputs)
+
+        emb_sim = cosine_similarity(embeddings)
+        triu = np.triu_indices_from(emb_sim, k=1)
+        metrics: Dict[str, float] = {
+            "strsim_num_samples": float(len(embeddings)),
+            "strsim_emb_mean_sim": float(np.mean(emb_sim[triu])),
+            "strsim_emb_std_sim": float(np.std(emb_sim[triu])),
+        }
+        if fe_outputs is not None and len(fe_outputs) >= 2:
+            fe_sim = cosine_similarity(fe_outputs)
+            ft = np.triu_indices_from(fe_sim, k=1)
+            metrics["strsim_fe_mean_sim"] = float(np.mean(fe_sim[ft]))
+            metrics["strsim_fe_std_sim"] = float(np.std(fe_sim[ft]))
+
+        print(f"[+] Structured similarity: saved panel arrays for {run_name}")
+        return metrics
+
+    def _write_structured_similarity_multi_plot(
+        self,
+        eval_methods: Optional[List[str]],
+        results: List[EvalResult],
+        checkpoints: Optional[List[CheckpointInfo]] = None,
+    ) -> None:
+        """Cross-run figure: Input | models (embed row, FE row). Requires saved structured .npy files."""
+        if not eval_methods or "structured_similarity" not in eval_methods:
+            return
+        from eval_plots import plot_structured_similarity_all_models
+
+        order: List[str] = (
+            [c.run_name for c in checkpoints] if checkpoints else [r.run_name for r in results]
+        )
+
+        COLORS = ["#3498DB", "#E74C3C", "#27AE60", "#8E44AD", "#F39C12"]
+        run_data: List[Dict[str, Any]] = []
+        skipped: List[str] = []
+
+        for name in order:
+            r = next((x for x in results if x.run_name == name), None)
+            if r is None:
+                skipped.append(f"{name}: no EvalResult (check run_name / discovery order)")
+                continue
+            if r.metrics.get("error"):
+                skipped.append(f"{name}: checkpoint error — {r.metrics.get('error')}")
+                continue
+            inp_p = self.data_dir_out / f"inputs_{name}_structured_similarity.npy"
+            emb_p = self.data_dir_out / f"embeddings_{name}_structured_similarity.npy"
+            fe_p = self.data_dir_out / f"fe_outputs_{name}_structured_similarity.npy"
+            if not inp_p.exists() or not emb_p.exists():
+                err = r.metrics.get("structured_similarity_error")
+                extra = f" ({err[:200]}…)" if err else ""
+                skipped.append(f"{name}: missing saved arrays{extra}")
+                continue
+            run_data.append(
+                {
+                    "run_name": name,
+                    "inputs": np.load(inp_p),
+                    "embeddings": np.load(emb_p),
+                    "fe_outputs": np.load(fe_p) if fe_p.exists() else None,
+                    "color": COLORS[len(run_data) % len(COLORS)],
+                }
+            )
+
+        if skipped:
+            print("[!] structured_similarity multi-plot: skipped run(s):")
+            for line in skipped:
+                print(f"    - {line}")
+
+        if not run_data:
+            print("[!] structured_similarity: no saved panel data for multi-run plot — skipping")
+            return
+
+        inputs_ref = run_data[0]["inputs"]
+        for rd in run_data[1:]:
+            if not np.array_equal(inputs_ref, rd["inputs"]):
+                print(
+                    f"[!] Warning: inputs differ between {run_data[0]['run_name']} and {rd['run_name']}; "
+                    "cosine maps are not directly comparable."
+                )
+
+        out_path = self.plots_dir / "all_models_structured_similarity_with_fe.png"
+        plot_structured_similarity_all_models(run_data, inputs_ref, str(out_path))
+        print(
+            f"[+] Saved {out_path} ({len(run_data)} model column(s) + Input; "
+            f"{len(order)} checkpoint(s) in evaluation order)"
+        )
+
     def _print_embedding_quality_summary(self, valid_metrics: Dict[str, float],
                                          custom_metrics: Optional[Dict[str, float]] = None,
                                          dataset_trained: str = "N/A",
@@ -4617,6 +4874,15 @@ class ReportGenerator:
         print("="*80 + "\n")
 
 
+def _default_structured_similarity_json_path() -> Optional[str]:
+    """Repo ``structured_similarity_full.json`` if present (100 exact manifest indices)."""
+    p = (
+        Path(__file__).resolve().parent.parent
+        / "fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json"
+    )
+    return str(p) if p.is_file() else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="SpectralFM Evaluation Runner")
     
@@ -4625,6 +4891,8 @@ def main():
                        help="Base directory for fairseq outputs")
     parser.add_argument("--checkpoint", type=str, default=None,
                        help="Path to specific checkpoint file")
+    parser.add_argument("--extra_checkpoints", type=str, nargs="*", default=None,
+                       help="Additional checkpoint .pt files to include (from any directory)")
     parser.add_argument("--output_dir", type=str, 
                        default="/mnt5/noy/SpectralFM/code/eval_results",
                        help="Directory to save evaluation results")
@@ -4635,7 +4903,44 @@ def main():
                        help="Evaluation data directory override. Priority: --eval_data_dir > --data_dir > checkpoint's cfg.task.data")
     parser.add_argument("--eval_methods", type=str, nargs="+",
                        default=["embedding_similarity"],
-                       help="Evaluation methods to run: embedding_similarity, noise_robustness, stack_similarity, signal_completion, validation_loss")
+                       help="Evaluation methods: embedding_similarity, structured_similarity, noise_robustness, stack_similarity, signal_completion, validation_loss")
+    parser.add_argument(
+        "--nova_data_dir",
+        type=str,
+        default=None,
+        help="Parent of nova datasets (single_channel_all, multi_channel, …). "
+        "Defaults to $SPECTRALFM_NOVA_DATA_DIR or /mnt5/noy/fairseq/data. Required for structured_similarity.",
+    )
+    parser.add_argument(
+        "--structured_similarity_seed",
+        type=int,
+        default=42,
+        help="RNG seed for build_structured_similarity_subset (default 42; must match offline tools).",
+    )
+    parser.add_argument(
+        "--structured_similarity_entries_json",
+        type=str,
+        default=None,
+        help="Path to 100-entry JSON (e.g. structured_similarity_full.json). "
+        "Default: repo file under fairseq/.../recon_loss/ if it exists.",
+    )
+    parser.add_argument(
+        "--structured_similarity_ignore_entries_json",
+        action="store_true",
+        help="Do not load default structured_similarity_full.json; build the panel with RNG + seed instead.",
+    )
+    parser.add_argument(
+        "--structured_similarity_prefer_manifest",
+        type=str,
+        default="train",
+        choices=("train", "valid"),
+        help="Manifest for RNG-built panel line indices (default train). JSON panel uses prefer_manifest from the file.",
+    )
+    parser.add_argument(
+        "--structured_similarity_allow_single_channel_fallback",
+        action="store_true",
+        help="If the full nova tree is incomplete, fall back to 10×10 stacks from single_channel_all only.",
+    )
     parser.add_argument("--best_only", action="store_true",
                        help="Only evaluate checkpoint_best.pt files")
     parser.add_argument("--latest_only", action="store_true",
@@ -4719,6 +5024,21 @@ def main():
                 found_names = {c.run_name for c in checkpoints}
                 missing_names = run_names_set - found_names
                 print(f"[!] Warning: Some specified run names were not found: {missing_names}")
+
+    if args.extra_checkpoints:
+        for cp_path in args.extra_checkpoints:
+            cp = Path(cp_path)
+            if not cp.exists():
+                print(f"[!] Warning: extra checkpoint not found: {cp_path}")
+                continue
+            checkpoints.append(CheckpointInfo(
+                path=str(cp.resolve()),
+                run_dir=str(cp.parent.resolve()),
+                date="unknown",
+                time=cp.stem,
+                checkpoint_type="manual",
+            ))
+            print(f"    [+] Added extra checkpoint: {cp.stem}")
     
     if not checkpoints:
         print("[!] No checkpoints found!")
@@ -4730,6 +5050,17 @@ def main():
     
     print(f"[+] Running evaluation methods: {args.eval_methods}")
     
+    nova_resolved = args.nova_data_dir
+    if nova_resolved is None:
+        nova_resolved = os.environ.get("SPECTRALFM_NOVA_DATA_DIR", "/mnt5/noy/fairseq/data")
+
+    if args.structured_similarity_ignore_entries_json:
+        resolved_struct_json = None
+    elif args.structured_similarity_entries_json:
+        resolved_struct_json = os.path.expanduser(args.structured_similarity_entries_json)
+    else:
+        resolved_struct_json = _default_structured_similarity_json_path()
+    
     # Run evaluations
     runner = EvaluationRunner(args.output_dir, args.data_dir)
     results = runner.evaluate_all(checkpoints, args.eval_methods, 
@@ -4737,7 +5068,12 @@ def main():
                                   eval_data_dir=args.eval_data_dir,
                                   debug=args.debug,
                                   include_random_weights=args.include_random_weights,
-                                  mask_memory_path=args.mask_memory_path)
+                                  mask_memory_path=args.mask_memory_path,
+                                  nova_data_dir=nova_resolved,
+                                  structured_similarity_seed=args.structured_similarity_seed,
+                                  structured_similarity_entries_json=resolved_struct_json,
+                                  structured_similarity_prefer_manifest=args.structured_similarity_prefer_manifest,
+                                  structured_similarity_allow_single_channel_fallback=args.structured_similarity_allow_single_channel_fallback)
     
     # Create lookup for best_loss by run_name
     loss_lookup = {r.run_name: r.metrics.get("best_loss") for r in results}

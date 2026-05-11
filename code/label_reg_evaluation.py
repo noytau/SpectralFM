@@ -44,12 +44,34 @@ CACHE_BASE   = "/mnt5/noy/fairseq/data/single_channel_1m"
 LAYER_CACHE  = CACHE_BASE + "/tasks/{run}/task1_layer_sweep/layer_cache"
 PATTERN      = re.compile(r"dataset(\d+)_comp(\d+)_spec_(\d+)\.wav")
 
+_CKPT_DIR = "/mnt5/noy/SpectralFM/checkpoints/runai/recon_loss_experiment_3"
+
+# (checkpoint_path_or_run, display_label, best_layer_or_None)
+# When best_layer is None the script extracts embeddings on-the-fly from the .pt file.
 CHECKPOINTS = [
-    ("2026-01-07_21-50-07",       "Jan-07\nsingle-ch 9k",    1),
-    ("2026-02-25_13-46-46",       "Feb-25\nsingle-ch 18.5k", 1),
-    ("2026-03-03_17-45-36-multi", "Mar-03\nmulti-ch 17.4k",  0),
+    (f"{_CKPT_DIR}/recon-fe1.0_recon-tr0.0_frozen-encFalse_5k.pt",
+     "fe-recon\n5k", None),
+    (f"{_CKPT_DIR}/recon-fe1.0_recon-tr1.0_frozen-encFalse_5k.pt",
+     "fe+tr-recon\n5k", None),
+    (f"{_CKPT_DIR}/recon-fe1.0_recon-tr0.0_frozen-encTrue_5k.pt",
+     "fe-recon\nfrozen-enc 5k", None),
 ]
 COLORS = ["dimgray", "steelblue", "darkorange", "mediumseagreen"]
+
+
+def _extract_embeddings(inputs: np.ndarray, checkpoint_path: str) -> np.ndarray:
+    """Extract mean-pooled transformer embeddings [N, 768] from a checkpoint."""
+    import torch
+    import sys, os
+    _fairseq = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fairseq")
+    if _fairseq not in sys.path:
+        sys.path.insert(0, _fairseq)
+    from eval_fe_decoder import extract_embeddings_from_inputs
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    emb = extract_embeddings_from_inputs(inputs, checkpoint_path, device_str=device, batch_size=64)
+    if emb is None:
+        raise RuntimeError(f"Failed to extract embeddings from {checkpoint_path}")
+    return emb
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,8 +437,12 @@ def run_label_reg_plots(output_dir: str) -> str:
     inputs = np.load(f"{CACHE_BASE}/label_reg_emb_cache_2026-01-07_21-50-07.npz")["inputs"]
     layer_embs = {}
     for run_name, title, best_layer in CHECKPOINTS:
-        layer_embs[run_name] = np.load(
-            LAYER_CACHE.format(run=run_name) + f"/layer_{best_layer}.npz")["embeddings"]
+        if best_layer is not None:
+            layer_embs[run_name] = np.load(
+                LAYER_CACHE.format(run=run_name) + f"/layer_{best_layer}.npz")["embeddings"]
+        else:
+            print(f"    Extracting embeddings from {Path(run_name).name} …")
+            layer_embs[run_name] = _extract_embeddings(inputs, run_name)
     _, y2 = _build_merged(inputs, y_cache, spec_comp_to_row, comps=(0, 1))
     rng_idx = np.random.default_rng(SEED).permutation(len(y2))
 
@@ -441,7 +467,12 @@ def run_label_reg_plots(output_dir: str) -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate label_regression diagnostic plots")
-    parser.add_argument("--output_dir", required=True,
-                        help="Evaluation run root dir (e.g. code/eval_results/20260322_120000)")
+    parser.add_argument("--output_dir", default="eval_results",
+                        help="Base output directory (a timestamped subdir is created automatically)")
     args = parser.parse_args()
-    run_label_reg_plots(args.output_dir)
+
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(args.output_dir, f"label_reg_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    run_label_reg_plots(run_dir)

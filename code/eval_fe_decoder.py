@@ -64,6 +64,15 @@ python code/eval_fe_decoder.py \\
     --eval_data_dir fairseq/data/nova_data/single_channel_10k \\
     --max_eval_samples 2000
 
+# Default data = same fixed 100-sample panel (omit --eval_data_dir / --inputs_npy)
+python code/eval_fe_decoder.py \\
+    --checkpoint_dir /path/to/checkpoints
+
+# Override nova root if needed
+python code/eval_fe_decoder.py \\
+    --checkpoint_dir /path/to/checkpoints \\
+    --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data
+
 Checkpoint directory structures supported
 -----------------------------------------
 1. Flat .pt files (e.g. compare-single-to-multi style):
@@ -115,6 +124,52 @@ from eval_plots import (
     plot_fe_vs_transformer_by_architecture,
     plot_fe_vs_transformer_by_architecture_multi_model,
 )
+
+# Structured 100-sample panel (same as ``build_structured_similarity_subset`` in
+# eval_utils — aligns with ``structured_similarity`` in the evaluation suite).
+# Output subdirs prefer ``cfg.common.wandb_run_name`` when present in the ckpt.
+
+_DEFAULT_NOVA_DATA_DIR = os.environ.get(
+    "SPECTRALFM_NOVA_DATA_DIR",
+    "/mnt5/noy/SpectralFM/fairseq/data/nova_data",
+)
+
+
+def _safe_run_dir_name(name: str) -> str:
+    """Filesystem-safe folder name for a wandb run or fallback label."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name)).strip()
+    return s if s else "run"
+
+
+def _wandb_run_name_from_checkpoint(checkpoint_path: str) -> Optional[str]:
+    """Return ``cfg.common.wandb_run_name`` if present in a fairseq checkpoint."""
+    try:
+        from fairseq import checkpoint_utils
+
+        state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
+        cfg = state.get("cfg")
+        if cfg is None or not hasattr(cfg, "get"):
+            return None
+        com = cfg.get("common")
+        if com is None or not hasattr(com, "get"):
+            return None
+        wn = com.get("wandb_run_name")
+        if wn:
+            return str(wn).strip()
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_output_labels(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """Map (fallback_name, path) → (wandb name or fallback, path) for per-run output dirs."""
+    out: List[Tuple[str, str]] = []
+    for fallback, ckpt_path in pairs:
+        wn = _wandb_run_name_from_checkpoint(ckpt_path)
+        label = _safe_run_dir_name(wn) if wn else fallback
+        out.append((label, ckpt_path))
+    return out
+
 
 # Pattern that matches the date-time prefix (with optional short tag) used as
 # the run name in SpectralFM checkpoint filenames.
@@ -849,6 +904,26 @@ def main(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Data source validation ───────────────────────────────────────────────
+    # Default: structured 100-sample panel under --nova_data_dir (or SPECTRALFM_NOVA_DATA_DIR).
+    # Opt out by passing --eval_data_dir or --inputs_npy.
+    use_structured = not (bool(args.eval_data_dir) or bool(args.inputs_npy))
+    if use_structured:
+        nd = args.nova_data_dir or _DEFAULT_NOVA_DATA_DIR
+        if not os.path.isdir(nd):
+            print(
+                f"[!] Structured subset: directory not found: {nd}\n"
+                f"    Set --nova_data_dir or SPECTRALFM_NOVA_DATA_DIR, or use --eval_data_dir."
+            )
+            sys.exit(1)
+        args.nova_data_dir = nd
+    else:
+        has_ed = bool(args.eval_data_dir)
+        has_npy = bool(args.inputs_npy)
+        if has_ed == has_npy:
+            print("[!] Provide exactly one of: --eval_data_dir or --inputs_npy")
+            sys.exit(1)
+
     # ── Build checkpoint list ────────────────────────────────────────────────
     checkpoints: List[Tuple[str, str]] = []   # [(run_name, path), ...]
 
@@ -887,15 +962,63 @@ def main(args: argparse.Namespace) -> None:
         print("[!] No checkpoints found. Use --checkpoint or --checkpoint_dir.")
         sys.exit(1)
 
+    checkpoints = _resolve_output_labels(checkpoints)
+    print("[+] Per-checkpoint output directories (wandb run name when present in ckpt):")
+    for label, ckpt_path in checkpoints:
+        print(f"    {label}")
+        print(f"        {ckpt_path}")
+
     # ── Load data once (shared across checkpoints for fair comparison) ───────
-    train_inputs, eval_inputs = load_and_split_inputs(
-        eval_data_dir=args.eval_data_dir,
-        inputs_npy=getattr(args, "inputs_npy", None),
-        max_eval_samples=args.max_eval_samples,
-        n_train=getattr(args, "n_train", None),
-        target_length=getattr(args, "target_length", 245),
-        seed=args.seed,
-    )
+    if use_structured:
+        from eval_utils import load_structured_similarity_spectrograms
+
+        inputs, subset_entries = load_structured_similarity_spectrograms(
+            args.nova_data_dir,
+            seed=args.seed,
+            target_length=getattr(args, "target_length", 245),
+            prefer_manifest=None,
+        )
+        n_total = len(inputs)
+        split = args.n_train if args.n_train is not None else n_total // 2
+        split = min(split, n_total - 1)
+        train_inputs = inputs[:split]
+        eval_inputs = inputs[split:]
+        print(
+            f"[+] Structured similarity subset: {n_total} samples "
+            f"(same panel as structured_similarity eval; seed={args.seed}). "
+            f"No shuffle. Split: {len(train_inputs)} train / {len(eval_inputs)} eval."
+        )
+        meta_path = output_dir / "structured_subset_meta.json"
+        with open(meta_path, "w") as f:
+            json.dump(
+                {
+                    "nova_data_dir": os.path.abspath(args.nova_data_dir),
+                    "seed": args.seed,
+                    "n_samples": n_total,
+                    "prefer_manifest": None,
+                    "entries": [
+                        {
+                            "dataset": e["dataset"],
+                            "index": int(e["index"]),
+                            "group": e.get("group"),
+                            "group_type": e.get("group_type"),
+                        }
+                        for e in subset_entries
+                    ],
+                },
+                f,
+                indent=2,
+            )
+        print(f"[+] Wrote subset manifest: {meta_path}")
+    else:
+        train_inputs, eval_inputs = load_and_split_inputs(
+            eval_data_dir=args.eval_data_dir,
+            inputs_npy=getattr(args, "inputs_npy", None),
+            max_eval_samples=args.max_eval_samples,
+            n_train=getattr(args, "n_train", None),
+            target_length=getattr(args, "target_length", 245),
+            seed=args.seed,
+        )
 
     # ── Evaluate ─────────────────────────────────────────────────────────────
     all_metrics = []
@@ -1089,21 +1212,31 @@ if __name__ == "__main__":
     )
 
     # ── Data source (mirrors evaluation_runner.py) ─────────────────────────
-    data_grp = parser.add_mutually_exclusive_group(required=True)
-    data_grp.add_argument(
-        "--eval_data_dir", metavar="DIR",
+    parser.add_argument(
+        "--eval_data_dir", metavar="DIR", default=None,
         help="Directory with WAV files used for both decoder training and evaluation.",
     )
-    data_grp.add_argument(
-        "--inputs_npy", metavar="NPY",
+    parser.add_argument(
+        "--inputs_npy", metavar="NPY", default=None,
         help="Pre-saved inputs .npy (shape [N, D]); skips WAV loading.",
+    )
+    parser.add_argument(
+        "--nova_data_dir", metavar="DIR", default=None,
+        help=(
+            "Parent nova_data directory (contains single_channel_all, multi_channel, …). "
+            "Used for the default structured 100-sample panel when neither "
+            "--eval_data_dir nor --inputs_npy is set. "
+            "If omitted: env SPECTRALFM_NOVA_DATA_DIR or "
+            "/mnt5/noy/SpectralFM/fairseq/data/nova_data."
+        ),
     )
 
     # ── Sample counts (mirrors evaluation_runner.py) ───────────────────────
     parser.add_argument(
         "--max_eval_samples", type=int, default=2000,
         help=(
-            "Total samples to load. Split 50/50 into train/eval by default. "
+            "Total samples to load (ignored when using default structured panel; fixed 100). "
+            "Split 50/50 into train/eval by default. "
             "Set to 2000 for the recommended 1k-train / 1k-eval setup."
         ),
     )

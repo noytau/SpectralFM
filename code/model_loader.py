@@ -100,13 +100,47 @@ def load_fairseq_checkpoint(checkpoint_path, device=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     print(f"[+] Loading fairseq checkpoint from: {checkpoint_path}")
-    
-    # Use fairseq's built-in method to load model, config, and task
-    # This handles all the proper initialization (EMA, set_num_updates, etc.)
+
+    # RunAI checkpoints store /storage/noy/...; on a dev machine use /mnt5/noy/... when present.
+    _RUNAI_PREFIX = "/storage/noy"
+    _LOCAL_PREFIX = "/mnt5/noy"
+    # fairseq's overwrite_args_by_name() matches nested cfg keys, not dotted names like "model.skip_pretrained_weights".
+    arg_overrides = {}
+    model_overrides = {}
+    try:
+        state0 = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
+        cfg0 = state0.get("cfg")
+        if cfg0 is not None:
+            from omegaconf import OmegaConf
+
+            flat = OmegaConf.to_container(cfg0, resolve=True)
+            mod = flat.get("model") if isinstance(flat, dict) else {}
+            if isinstance(mod, dict):
+                for key in ("model_path", "epoch_cosim_subset_path", "epoch_cosim_structured_entries_path"):
+                    p = mod.get(key)
+                    if p and str(p).startswith(_RUNAI_PREFIX):
+                        alt = str(p).replace(_RUNAI_PREFIX, _LOCAL_PREFIX, 1)
+                        if os.path.isfile(alt):
+                            model_overrides[key] = alt
+                            print(f"[+] Path remap for eval: {key} -> {alt}")
+                # If pretrained path is under /storage but no local copy exists, skip base load (weights are in ckpt).
+                mp = mod.get("model_path")
+                if mp and str(mp).startswith(_RUNAI_PREFIX):
+                    alt_mp = str(mp).replace(_RUNAI_PREFIX, _LOCAL_PREFIX, 1)
+                    if not os.path.isfile(alt_mp):
+                        model_overrides["skip_pretrained_weights"] = True
+                        print(
+                            "[+] model.skip_pretrained_weights=True (no local base at remapped path; using finetuned weights only)"
+                        )
+            if model_overrides:
+                arg_overrides["model"] = model_overrides
+    except Exception as exc:
+        print(f"[!] Optional path remap skipped: {exc}")
+
     models, cfg, task = checkpoint_utils.load_model_ensemble_and_task(
         [checkpoint_path],
-        arg_overrides={},
-        strict=False,  # Allow missing/unexpected keys for backward compatibility
+        arg_overrides=arg_overrides,
+        strict=False,
     )
     
     # Extract the first model from ensemble (usually just one model)
@@ -127,7 +161,7 @@ def load_fairseq_checkpoint(checkpoint_path, device=None):
                 print(f"[+] Added missing config key: {key}={default_val}")
     
     # Load checkpoint state separately to extract checkpoint info
-    state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides={})
+    state = checkpoint_utils.load_checkpoint_to_cpu(checkpoint_path, arg_overrides=arg_overrides)
     
     # Move model to device
     # Note: model.eval() is NOT called here - it's handled by fairseq's trainer.valid_step()

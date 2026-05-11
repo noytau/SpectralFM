@@ -38,13 +38,13 @@ set -euo pipefail
 CKPT_DIR="${1:-/mnt5/noy/SpectralFM/checkpoints/runai/fe_vs_transformer_collapse_with_var_loss}"
 OUTPUT_DIR="/mnt5/noy/SpectralFM/code/eval_results/var_loss_eval"
 NOVA_DATA="/mnt5/noy/SpectralFM/fairseq/data/nova_data"
-EVAL_DATA="$NOVA_DATA/single_channel_10k"      # used by reconstruction (1k train / 1k eval)
+EVAL_DATA="$NOVA_DATA/single_channel_10k"      # legacy default; comprehensive script uses structured 100 for FE decoder
 LABELED_DATA="$NOVA_DATA/labeled_data"         # used by label_regression
 CODE_DIR="/mnt5/noy/SpectralFM/code"
 
 # ── Decoder settings ─────────────────────────────────────────────────────────
 DECODER_VARIANTS="0 512 512:256"               # Linear, MLP-512, MLP-512-256
-MAX_RECON_SAMPLES=2000                         # 1k train / 1k eval split
+MAX_RECON_SAMPLES=2000                         # unused when step 1 uses --use_structured_subset (fixed 100)
 RECON_EPOCHS=200
 
 # ── Create timestamped root ───────────────────────────────────────────────────
@@ -64,10 +64,10 @@ echo "  Output root    : $ROOT"
 echo "  Timestamp      : $TIMESTAMP"
 echo ""
 echo "  Methods:"
-echo "    [1] reconstruction         → $ROOT/reconstruction/"
-echo "    [2] structured_similarity  ┐"
-echo "    [3] label_regression       ├→ $ROOT/runner/"
-echo "    [4] noise_robustness       ┘"
+echo "    [1]  reconstruction         → $ROOT/reconstruction/"
+echo "    [2]  structured_similarity  ┐"
+echo "    [3]  noise_robustness       ┘→ $ROOT/runner/"
+echo "    [3b] label_regression       → $ROOT/plots/label_reg_plots/"
 echo ""
 
 # ── Helper: print step header ─────────────────────────────────────────────────
@@ -88,8 +88,7 @@ mkdir -p "$RECON_DIR"
 
 python "$CODE_DIR/eval_fe_decoder.py" \
     --checkpoint_dir "$CKPT_DIR" \
-    --eval_data_dir  "$EVAL_DATA" \
-    --max_eval_samples "$MAX_RECON_SAMPLES" \
+    --nova_data_dir "$NOVA_DATA" \
     --decoder_variants $DECODER_VARIANTS \
     --include_embedding_decoder \
     --epochs "$RECON_EPOCHS" \
@@ -103,7 +102,7 @@ echo "[✓] Reconstruction done → $RECON_DIR"
 # evaluation_runner.py creates its own timestamped subdir inside --output_dir,
 # so we point it at $ROOT/runner/ which keeps it separate from reconstruction/.
 # ─────────────────────────────────────────────────────────────────────────────
-step "2–4/4  Structured similarity + Label regression + Noise robustness"
+step "2–3/4  Structured similarity + Noise robustness (evaluation_runner.py)"
 
 RUNNER_DIR="$ROOT/runner"
 mkdir -p "$RUNNER_DIR"
@@ -111,12 +110,21 @@ mkdir -p "$RUNNER_DIR"
 python "$CODE_DIR/evaluation_runner.py" \
     --checkpoint_dir  "$CKPT_DIR" \
     --output_dir      "$RUNNER_DIR" \
-    --eval_methods    structured_similarity label_regression noise_robustness \
+    --eval_methods    structured_similarity noise_robustness \
     --nova_data_dir   "$NOVA_DATA" \
-    --labeled_data_dir "$LABELED_DATA" \
     --best_only
 
 echo "[✓] Runner methods done → $RUNNER_DIR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3b — Label regression plots (standalone, uses pre-computed layer caches)
+# ─────────────────────────────────────────────────────────────────────────────
+step "3b/4  Label regression plots (label_reg_evaluation.py)"
+
+python "$CODE_DIR/label_reg_evaluation.py" \
+    --output_dir "$ROOT"
+
+echo "[✓] Label regression plots done → $ROOT/plots/label_reg_plots/"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

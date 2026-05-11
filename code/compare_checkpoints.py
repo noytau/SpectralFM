@@ -214,50 +214,11 @@ def _extract_fe_outputs_from_checkpoint(
     post-CNN layer norm, and optionally post_extract_proj, then mean-pools over
     the time dimension.  Returns an array of shape (N, D).
     """
-    from model_loader import load_fairseq_checkpoint
-    import torch
+    from eval_utils import extract_fe_outputs_from_fairseq_checkpoint
 
-    try:
-        model, _, _ = load_fairseq_checkpoint(checkpoint_path)
-        model = model.to(device)
-        model.eval()
-
-        fe_outputs = []
-        with torch.no_grad():
-            for sample in samples:
-                if isinstance(sample, dict):
-                    source = sample.get("source") or (
-                        sample.get("net_input", {}).get("source")
-                    )
-                else:
-                    source = sample
-
-                if source is None:
-                    continue
-
-                if not isinstance(source, torch.Tensor):
-                    source = torch.tensor(source, dtype=torch.float32)
-
-                if source.dim() == 1:
-                    source = source.unsqueeze(0)  # [1, T]
-                source = source.to(device)
-
-                fe = model.feature_extractor(source)   # [1, 512, T']
-                fe = fe.transpose(1, 2)                # [1, T', 512]
-                fe = model.layer_norm(fe)              # [1, T', 512]
-                if model.post_extract_proj is not None:
-                    fe = model.post_extract_proj(fe)   # [1, T', D]
-                fe_vec = fe.mean(dim=1)                # [1, D]
-                fe_outputs.append(fe_vec.squeeze(0).cpu().numpy())
-
-        if fe_outputs:
-            return np.stack(fe_outputs)
-        return None
-    except Exception as e:
-        print(f"    [!] Error extracting FE outputs from {checkpoint_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+    return extract_fe_outputs_from_fairseq_checkpoint(
+        checkpoint_path, samples, device, checkpoint_name=checkpoint_name
+    )
 
 
 def create_side_by_side_plots(checkpoint_infos: List[CheckpointInfo], runner: EvaluationRunner, 

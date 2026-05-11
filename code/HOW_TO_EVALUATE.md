@@ -18,9 +18,10 @@ cd /mnt5/noy/SpectralFM/code
 6. [Data selection](#6-data-selection)
 7. [Multi-checkpoint side-by-side comparison](#7-multi-checkpoint-side-by-side-comparison)
 8. [Outlier / inlier analysis](#8-outlier--inlier-analysis)
-9. [Full CLI reference — evaluation_runner.py](#9-full-cli-reference--evaluation_runnerpy)
-10. [Full CLI reference — run_full_evaluation.py](#10-full-cli-reference--run_full_evaluationpy)
-11. [Common recipes](#11-common-recipes)
+9. [Label regression plot suite — `label_reg_evaluation.py`](#9-label-regression-plot-suite--label_reg_evaluationpy)
+10. [Full CLI reference — evaluation_runner.py](#10-full-cli-reference--evaluation_runnerpy)
+11. [Full CLI reference — run_full_evaluation.py](#11-full-cli-reference--run_full_evaluationpy)
+12. [Common recipes](#12-common-recipes)
 
 ---
 
@@ -92,6 +93,7 @@ python run_full_evaluation.py \
 |---|---|
 | `evaluation_runner.py` | **Main workhorse.** Multi-checkpoint comparison, full plot suite, outlier analysis. |
 | `run_full_evaluation.py` | Single-checkpoint deep dives, scaling-law sweeps, training-dynamics trajectories. |
+| `label_reg_evaluation.py` | **Label regression scatter-plot suite.** True-vs-predicted grids across train sizes, models, and probe types. Uses pre-computed embedding caches. |
 
 Both scripts create a **timestamped subdirectory** inside `--output_dir` automatically, so re-running the same command never overwrites previous results.
 
@@ -392,7 +394,79 @@ Plots land in `<output_dir>/plots/<run_name>/`.
 
 ---
 
-## 9. Full CLI reference — `evaluation_runner.py`
+## 9. Label regression plot suite — `label_reg_evaluation.py`
+
+A standalone script that generates five diagnostic scatter-plot figures from **pre-computed embedding caches**. Unlike `evaluation_runner.py` (which extracts embeddings on-the-fly from `.pt` checkpoints), this script reads cached `.npz` files that were produced by a prior layer-sweep run.
+
+### Quick run
+
+```bash
+cd /mnt5/noy/SpectralFM/code
+python label_reg_evaluation.py
+```
+
+A timestamped directory is created automatically under `eval_results/` (e.g. `eval_results/label_reg_20260415_010741/`).
+
+### What it produces
+
+All plots are saved to `<run_dir>/plots/label_reg_plots/`:
+
+| File | Description |
+|---|---|
+| `comparison_train_size.png` | **Main diagnostic.** Grid: rows = train sizes (100 / 1k / 2k), columns = raw input + 3 models. Each cell: True-vs-Predicted scatter with R², r, MAE. Best cell highlighted. |
+| `comparison_linear_vs_mlp.png` | Linear (L-BFGS) vs MLP probe at train=100 and train=1000 for all models. |
+| `comparison_n_components.png` | 1 vs 2 vs 3 spectral components (controls embedding dimension). |
+| `param0_distributions.png` | Full `parameter_0` distribution + per-model True-vs-Predicted KDE overlays. |
+| `merged_comp_comparison_1000.png` | Single-row scatter: raw 490-dim vs 1536-dim embeddings, train=1000. |
+
+### How to read the scatter plots
+
+- **Diagonal red line** = perfect prediction. Points closer to the line = better.
+- **R²** = coefficient of determination (1.0 = perfect, 0.0 = predicting the mean).
+- **r** = Pearson correlation between true and predicted.
+- **MAE** = mean absolute error.
+- **★ BEST** = cell with the highest R² in that plot.
+- A collapsed model shows a flat horizontal band (all predictions ≈ mean, R² ≈ 0).
+
+### Checkpoints and caches
+
+The script uses three hardcoded checkpoints (edit `CHECKPOINTS` at the top of the file to change):
+
+```python
+CHECKPOINTS = [
+    ("2026-01-07_21-50-07",       "Jan-07\nsingle-ch 9k",    1),
+    ("2026-02-25_13-46-46",       "Feb-25\nsingle-ch 18.5k", 1),
+    ("2026-03-03_17-45-36-multi", "Mar-03\nmulti-ch 17.4k",  0),
+]
+```
+
+It reads from:
+- **Input cache:** `/mnt5/noy/fairseq/data/single_channel_1m/label_reg_emb_cache_2026-01-07_21-50-07.npz` → key `"inputs"`
+- **Layer caches:** `/mnt5/noy/fairseq/data/single_channel_1m/tasks/<run>/task1_layer_sweep/layer_cache/layer_<L>.npz` → key `"embeddings"`
+- **Labels:** `/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data/labels.tsv` and `valid.tsv`
+
+### CLI reference
+
+```
+python label_reg_evaluation.py [OPTIONS]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output_dir PATH` | `eval_results` | Base output directory (a `label_reg_<timestamp>/` subdir is created automatically) |
+
+### Programmatic usage
+
+```python
+from label_reg_evaluation import run_label_reg_plots
+run_label_reg_plots(output_dir="/path/to/eval_run_dir")
+```
+
+This is also called automatically by `run_full_evaluation.py --mode full` when `label_regression` is in the method list.
+
+---
+
+## 10. Full CLI reference — `evaluation_runner.py`
 
 ```
 python evaluation_runner.py [OPTIONS]
@@ -422,7 +496,7 @@ python evaluation_runner.py [OPTIONS]
 
 ---
 
-## 10. Full CLI reference — `run_full_evaluation.py`
+## 11. Full CLI reference — `run_full_evaluation.py`
 
 ```
 python run_full_evaluation.py --mode MODE [OPTIONS]
@@ -449,7 +523,7 @@ python run_full_evaluation.py --mode MODE [OPTIONS]
 
 ---
 
-## 11. Common recipes
+## 12. Common recipes
 
 ### Track a single checkpoint thoroughly
 

@@ -178,7 +178,106 @@ ordering. The decoder receives a 512-dim "bag of features" and must reconstruct
   <li><strong>Flatten decoder:</strong> <code>[B, 49×512] → MLP → [B, 245]</code> (large but preserves position)</li>
 </ul>
 
-<h2>7. Configuration Reference</h2>
+<h2>7. Interpolation Decoder (InterpReconDecoder) — Deep Dive</h2>
+
+<p>The interpolation decoder bypasses mean-pooling entirely. It preserves temporal structure
+by upsampling the FE sequence from 47 time steps back to 245, then reduces each position's
+512 channels to a single scalar.</p>
+
+<h3>Step-by-step forward pass</h3>
+
+<div class="diagram">
+<strong>Step 1:</strong> Input from FE
+  fe_seq = [B, 47, 512]        (47 time steps, 512 channels each)
+
+<strong>Step 2:</strong> Transpose to channels-first (required by F.interpolate)
+  x.transpose(1,2) → [B, 512, 47]
+
+<strong>Step 3:</strong> Linear interpolation — stretch 47 → 245
+  F.interpolate(x, size=245, mode="linear") → [B, 512, 245]
+  Each of the 512 channels is independently resampled from 47 to 245 points.
+  This is like stretching a signal — intermediate values are linearly blended
+  from their nearest neighbors.
+
+<strong>Step 4:</strong> Transpose back to time-first
+  x.transpose(1,2) → [B, 245, 512]
+
+<strong>Step 5:</strong> Per-position MLP (shared weights across all 245 positions)
+  fc: Linear(512→128) → GELU → Linear(128→1)
+  At each of the 245 positions, the 512-dim vector is compressed to 1 scalar.
+  fc(x).squeeze(-1) → [B, 245]
+</div>
+
+<h3>Architecture diagram</h3>
+
+<div class="diagram">
+fe_seq [B, 47, 512]
+    │
+    │  transpose → [B, 512, 47]
+    │
+    │  F.interpolate(mode="linear", size=245)
+    │  ┌─────────────────────────────────────────┐
+    │  │  ch₀: ──●──●──●──...──●──  (47 pts)    │
+    │  │         ↓  ↓  ↓       ↓                 │
+    │  │  ch₀: ─●─●─●─●─●─...─●─●─ (245 pts)   │
+    │  │  (× 512 channels, independently)        │
+    │  └─────────────────────────────────────────┘
+    │
+    │  transpose → [B, 245, 512]
+    │
+    │  per-position MLP (shared weights):
+    │  ┌───────────────────────────────┐
+    │  │ pos₁: [512] → [128] → [1]   │
+    │  │ pos₂: [512] → [128] → [1]   │
+    │  │  ...                          │
+    │  │ pos₂₄₅: [512] → [128] → [1] │
+    │  └───────────────────────────────┘
+    │
+    ▼
+pred_fe [B, 245]
+</div>
+
+<h3>Code (<code>data2vec_audio.py</code>, line ~585)</h3>
+<pre><code>class InterpReconDecoder(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.out_dim = out_dim          # 245
+        self.fc = nn.Sequential(
+            nn.Linear(in_dim, 128),     # 512 → 128
+            nn.GELU(),
+            nn.Linear(128, 1),          # 128 → 1
+        )
+
+    @property
+    def needs_full_sequence(self) -> bool:
+        return True                     # no mean-pool needed
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.transpose(1, 2)          # [B, 47, 512] → [B, 512, 47]
+        x = F.interpolate(x, size=self.out_dim, mode="linear",
+                          align_corners=False)   # [B, 512, 245]
+        x = x.transpose(1, 2)          # [B, 245, 512]
+        return self.fc(x).squeeze(-1)   # [B, 245]</code></pre>
+
+<h3>Why interpolation works well</h3>
+<ul>
+  <li><strong>Preserves temporal ordering</strong> — unlike mean-pool, each output position corresponds to a specific region of the input.</li>
+  <li><strong>Lightweight</strong> — only ~66K trainable parameters (vs ~4M for the MLP decoder).</li>
+  <li><strong>Smooth upsampling</strong> — linear interpolation produces smooth transitions between the 47 FE frames, which matches the smooth nature of spectrograms.</li>
+</ul>
+
+<h3>All decoder types comparison</h3>
+
+<table>
+<tr><th>Decoder</th><th>Mean-pool?</th><th>Input shape</th><th>Method</th><th>Params</th></tr>
+<tr><td><code>linear</code></td><td>Yes</td><td>[B, 512]</td><td>Linear(512→245)</td><td>~125K</td></tr>
+<tr><td><code>mlp</code></td><td>Yes</td><td>[B, 512]</td><td>Linear(512→512)→GELU→Linear(512→245)</td><td>~390K</td></tr>
+<tr><td><code>interp</code></td><td><strong>No</strong></td><td>[B, 47, 512]</td><td>Interpolate 47→245, per-step MLP 512→1</td><td>~66K</td></tr>
+<tr><td><code>conv1d</code></td><td><strong>No</strong></td><td>[B, 47, 512]</td><td>ConvTranspose1d upsampling</td><td>~687K</td></tr>
+<tr><td><code>flat</code></td><td><strong>No</strong></td><td>[B, 47, 512]</td><td>Flatten(47×512)→MLP→245</td><td>~13M</td></tr>
+</table>
+
+<h2>8. Configuration Reference</h2>
 
 <table>
 <tr><th>Field</th><th>Default</th><th>Description</th></tr>
@@ -187,6 +286,7 @@ ordering. The decoder receives a 512-dim "bag of features" and must reconstruct
 <tr><td><code>lambda_recon_fe</code></td><td><code>0.0</code></td><td>Weight for FE reconstruction loss</td></tr>
 <tr><td><code>lambda_recon_trans</code></td><td><code>0.0</code></td><td>Weight for transformer reconstruction loss</td></tr>
 <tr><td><code>recon_output_dim</code></td><td><code>245</code></td><td>Target spectrogram dimension</td></tr>
+<tr><td><code>recon_decoder_type</code></td><td><code>mlp</code></td><td>Decoder type: <code>mlp</code>, <code>linear</code>, <code>interp</code>, <code>conv1d</code>, <code>flat</code></td></tr>
 <tr><td><code>recon_decoder_hidden</code></td><td><code>"512"</code></td><td>Comma-separated hidden dims for MLP decoder</td></tr>
 <tr><td><code>train_only_fe</code></td><td><code>false</code></td><td>Freeze all except FE (transformer still runs)</td></tr>
 <tr><td><code>freeze_encoder</code></td><td><code>false</code></td><td>Freeze transformer encoder parameters</td></tr>

@@ -1627,3 +1627,125 @@ def plot_all_decoder_variants(
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return save_path
+
+
+# ------------------------------------------------------------------ #
+#  Structured similarity (100-sample nova panel)                     #
+# ------------------------------------------------------------------ #
+
+STRUCTURED_SIMILARITY_ALL_MODELS_TITLE = (
+    "Structured Similarity Comparison — All Models "
+    "(top row: transformer embeddings | bottom row: CNN FE outputs)"
+)
+
+
+def _structured_similarity_annotate(ax, sim_matrix: np.ndarray) -> None:
+    triu = np.triu_indices_from(sim_matrix, k=1)
+    vals = sim_matrix[triu]
+    ax.text(
+        0.02,
+        0.98,
+        f"Mean: {vals.mean():.3f}\nStd:  {vals.std():.3f}",
+        transform=ax.transAxes,
+        fontsize=8,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+    )
+
+
+def _structured_similarity_heatmap(
+    ax,
+    sim_matrix: Optional[np.ndarray],
+    title: str,
+    color: str = "#333333",
+    ylabel: Optional[str] = None,
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    cmap: str = "viridis",
+) -> None:
+    """
+    Cosine-similarity heatmap with mean/std annotation (upper triangle, k=1).
+    Matches standalone ``plot_structured_similarity_with_fe.py`` styling.
+    """
+    if sim_matrix is not None and sim_matrix.shape[0] > 1:
+        sns.heatmap(
+            sim_matrix,
+            ax=ax,
+            cmap=cmap,
+            xticklabels=False,
+            yticklabels=False,
+            vmin=vmin,
+            vmax=vmax,
+            cbar_kws={"label": "Cosine Similarity", "shrink": 0.8},
+        )
+        _structured_similarity_annotate(ax, sim_matrix)
+    else:
+        ax.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=12, color="#E74C3C")
+        ax.axis("off")
+
+    ax.set_title(title, fontsize=10, fontweight="bold", color=color)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_xlabel("Sample Index", fontsize=9)
+
+
+def _structured_similarity_cosine_matrix(vectors: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if vectors is None or len(vectors) < 2:
+        return None
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    return cosine_similarity(vectors)
+
+
+def plot_structured_similarity_all_models(
+    run_data: List[Dict[str, Any]],
+    inputs: np.ndarray,
+    save_path: str,
+    title: Optional[str] = None,
+) -> str:
+    """
+    Multi-model 2-row comparison (Input column + one column per checkpoint):
+      Row 0: Input space | embedding cos-sim per run
+      Row 1: Input space | FE cos-sim per run (identical input panels in col 0)
+
+    ``run_data`` entries: ``run_name``, ``embeddings``, ``fe_outputs`` (optional),
+    ``color`` (optional hex).
+
+    Returns:
+        Path to saved figure.
+    """
+    has_fe = any(r.get("fe_outputs") is not None for r in run_data)
+    n_rows = 2 if has_fe else 1
+    n_cols = 1 + len(run_data)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+    fig.suptitle(title or STRUCTURED_SIMILARITY_ALL_MODELS_TITLE, fontsize=13, fontweight="bold")
+
+    inp_sim = _structured_similarity_cosine_matrix(inputs)
+    assert inp_sim is not None
+
+    _structured_similarity_heatmap(axes[0, 0], inp_sim, "Input Space", ylabel="Embeddings")
+    for col, rd in enumerate(run_data, start=1):
+        emb_sim = _structured_similarity_cosine_matrix(rd["embeddings"])
+        _structured_similarity_heatmap(
+            axes[0, col],
+            emb_sim,
+            rd["run_name"],
+            color=rd.get("color", "#333333"),
+        )
+
+    if has_fe:
+        _structured_similarity_heatmap(axes[1, 0], inp_sim, "Input Space", ylabel="FE Output")
+        for col, rd in enumerate(run_data, start=1):
+            fe_sim = _structured_similarity_cosine_matrix(rd.get("fe_outputs"))
+            _structured_similarity_heatmap(
+                axes[1, col],
+                fe_sim,
+                f"{rd['run_name']}\n(FE Output)",
+                color=rd.get("color", "#333333"),
+            )
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    return save_path
