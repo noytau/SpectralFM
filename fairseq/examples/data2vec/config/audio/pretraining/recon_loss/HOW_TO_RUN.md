@@ -59,6 +59,26 @@ checkpoint.keep_interval_updates=1 \
 checkpoint.save_interval_updates=5000
 ```
 
+### FE→transformer projection (`post_extract_proj`)
+
+SpectralFM maps CNN width **512** → transformer width **768** with `post_extract_proj` in
+`examples/data2vec/models/data2vec_audio.py` (`build_post_extract_proj`, used from `__init__`).
+Same role as wav2vec2’s conditional `post_extract_proj` in `fairseq/models/wav2vec/wav2vec2.py`
+when `embed != encoder_embed_dim`.
+
+- **Linear (default):** single `Linear(512, 768)`.
+- **MLP + GELU:** two linear layers with a hidden width (default 1536).
+
+```bash
+model.post_extract_proj_type=mlp_gelu \
+model.post_extract_proj_mlp_hidden=2048
+```
+
+When `model.recon_only=true`, the forward path returns after FE reconstruction and **does not**
+run `post_extract_proj`; the scalars `post_extract_*` are then absent from `net_output` (criterion
+skips missing `log_keys`). For full data2vec training (`spectralfm_full_train.yaml`), they are
+logged every step if listed under `criterion.log_keys`.
+
 ## What `recon_only` does
 
 When `model.recon_only=true`:

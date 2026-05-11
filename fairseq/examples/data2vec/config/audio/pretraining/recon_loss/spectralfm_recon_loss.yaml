@@ -44,6 +44,10 @@ criterion:
     - ema_decay
     - target_var
     - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
 
 optimization:
   max_update: 20000
@@ -93,6 +97,10 @@ model:
 
   require_same_masks: true
   mask_dropout: 0
+
+  # FE→transformer projection (used when recon_only=false); recon_only skips forward past FE
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
 
   # --- FE reconstruction only (transformer/EMA/masking skipped) ---
   recon_only: true

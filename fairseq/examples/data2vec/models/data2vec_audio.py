@@ -33,6 +33,30 @@ from fairseq import checkpoint_utils
 
 logger = logging.getLogger(__name__)
 
+
+def build_post_extract_proj(
+    in_dim: int, out_dim: int, proj_type: str, mlp_hidden: int
+) -> nn.Module:
+    """FE channel space → transformer embed dim (cf. wav2vec2 post_extract_proj).
+
+    See fairseq/models/wav2vec/wav2vec2.py (conditional Linear when embed !=
+    encoder_embed_dim) and Data2VecAudioModel below.
+    """
+    t = (proj_type or "linear").strip().lower()
+    if t == "mlp_gelu":
+        h = max(1, int(mlp_hidden))
+        return nn.Sequential(
+            nn.Linear(in_dim, h),
+            nn.GELU(),
+            nn.Linear(h, out_dim),
+        )
+    if t != "linear":
+        logger.warning(
+            "Unknown post_extract_proj_type=%r; using linear", proj_type
+        )
+    return nn.Linear(in_dim, out_dim)
+
+
 # Debug plotting configuration
 _DEBUG_PLOT_DIR = None
 _DEBUG_PLOT_MODE = None  # 'train' or 'eval'
@@ -355,6 +379,17 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=False,
         metadata={"help": "Freeze all transformer encoder parameters"},
     )
+    post_extract_proj_type: str = field(
+        default="linear",
+        metadata={
+            "help": "FE→transformer map: 'linear' (single Linear) or "
+            "'mlp_gelu' (Linear → GELU → Linear to encoder_embed_dim)"
+        },
+    )
+    post_extract_proj_mlp_hidden: int = field(
+        default=1536,
+        metadata={"help": "Hidden size when post_extract_proj_type=mlp_gelu"},
+    )
     lambda_var: float = field(
         default=0.0,
         metadata={"help": "Weight for variance regularization loss (VICReg-style)"},
@@ -665,7 +700,12 @@ class Data2VecAudioModel(BaseFairseqModel):
             self.feature_grad_mult = 0.0
             logger.info("[Tier1] FE frozen (feature_grad_mult=0, weights from cfg.model_path)")
 
-        self.post_extract_proj = nn.Linear(self.extractor_embed, cfg.encoder_embed_dim)
+        self.post_extract_proj = build_post_extract_proj(
+            self.extractor_embed,
+            cfg.encoder_embed_dim,
+            getattr(cfg, "post_extract_proj_type", "linear"),
+            int(getattr(cfg, "post_extract_proj_mlp_hidden", 1536)),
+        )
 
         self.mask_prob = cfg.mask_prob
         self.mask_selection = cfg.mask_selection
@@ -1201,8 +1241,17 @@ class Data2VecAudioModel(BaseFairseqModel):
         else:
             padding_mask = None
 
+        post_extract_stats = {}
         if self.post_extract_proj is not None:
+            pe_in = features.detach().float()
             features = self.post_extract_proj(features)
+            pe_out = features.detach().float()
+            post_extract_stats = {
+                "post_extract_in_mean": pe_in.mean(),
+                "post_extract_in_std": pe_in.std(),
+                "post_extract_out_mean": pe_out.mean(),
+                "post_extract_out_std": pe_out.std(),
+            }
 
         pre_encoder_features = None
         if self.cfg.ema_transformer_only:
@@ -1233,15 +1282,18 @@ class Data2VecAudioModel(BaseFairseqModel):
         )
 
         if features_only:
-            return {
+            out = {
                 "x": x,
                 "padding_mask": padding_mask,
                 "layer_results": layer_results,
             }
+            out.update(post_extract_stats)
+            return out
 
         result = {
             "losses": {},
         }
+        result.update(post_extract_stats)
 
         # Check if EMA is initialized (fallback for edge cases)
         # EMA should be initialized via set_num_updates() when loading checkpoints.

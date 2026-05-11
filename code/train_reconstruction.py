@@ -1,16 +1,21 @@
 """
-Reconstruction training and analysis for FE (and future: FE + Transformer).
+Reconstruction training and analysis for SpectralFM.
 
-Currently supports:
-  - train:   Train FE autoencoder with MirrorDecoder (ConvTranspose1d)
-  - analyze: Load checkpoint, evaluate on multiple datasets, plot stats
-  - interp:  Inference with pretrained interpolation decoder (full fairseq model)
+  - train --recon_path fe:          FE + MirrorDecoder (ConvTranspose1d), optional FE init from --ckpt
+  - train --recon_path transformer: Frozen ``Data2VecAudioModel`` (SpectralFM cfg) + weights merged from
+                                      ``--ckpt`` like Fairseq ``build_model`` (not ``load_model_ensemble``), so
+                                      ``base_libri_official.pt``-style tensors (e.g. ``feature_extractor.*``) load
+                                      into the audio skeleton; remaining layers stay init unless keys match.
+  - analyze:                        Load AE ckpt; for transformer also pass --ckpt (fairseq backbone)
+  - interp:                         Pretrained interp decoder (full fairseq model)
 
 Usage:
-    python code/train_reconstruction.py --mode train --lr 1e-4 --n_samples 1000 --steps 10000
-    python code/train_reconstruction.py --mode train --ckpt none --manifest fairseq/data/nova_data/single_channel_all/train.tsv --n_samples 100000 --steps 50000 --warmup 15
-    python code/train_reconstruction.py --mode analyze --ckpt_ae autoencoder_experiments/ckpt_lr0.0001_n10000_s50000_w15.pt --datasets single_channel_10k,multi_channel,labeled_data
-    python code/train_reconstruction.py --mode interp --ckpt <fairseq_checkpoint>
+    python code/train_reconstruction.py --mode train --recon_path fe --lr 1e-4 --n_samples 1000 --steps 10000
+    python code/train_reconstruction.py --mode train --recon_path transformer --ckpt none --n_samples 1000 --steps 2000
+    # Default: --batch_size 512 --grad_accum_steps 4 (micro-batch 128 per forward; effective 512 per optimizer step)
+    python code/train_reconstruction.py --mode train --recon_path transformer --ckpt /path/to/checkpoint_best.pt ...
+    python code/train_reconstruction.py --mode analyze --ckpt_ae path/to/ckpt_tr_....pt --ckpt path/to/checkpoint_best.pt \\
+        --recon_path transformer --datasets single_channel_10k
 """
 import sys, os, warnings, logging, math, torch, argparse
 import numpy as np
@@ -56,19 +61,33 @@ def build_fe_standalone(device, ckpt_path=None):
     layer_norm = nn.LayerNorm(512)
 
     if ckpt_path and ckpt_path.lower() != "none" and os.path.isfile(ckpt_path):
-        state = torch.load(ckpt_path, map_location="cpu")
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model_state = state.get("model", state)
+        if not isinstance(model_state, dict):
+            model_state = {}
         fe_state = {k.replace("feature_extractor.", "", 1): v
                     for k, v in model_state.items() if k.startswith("feature_extractor.")}
+        if not fe_state:
+            _pref = "modality_encoders.AUDIO.local_encoder."
+            fe_state = {k[len(_pref):]: v for k, v in model_state.items()
+                        if k.startswith(_pref)}
+        tgt_enc = encoder.state_dict()
+        fe_ok = {k: v for k, v in fe_state.items()
+                 if k in tgt_enc and v.shape == tgt_enc[k].shape}
+        if len(fe_ok) < len(fe_state):
+            print(f"[!] FE init: skipped {len(fe_state) - len(fe_ok)} tensors (shape mismatch vs SpectralFM FE)")
+        if fe_ok:
+            encoder.load_state_dict(fe_ok, strict=False)
+            print(f"[+] Loaded FE weights from {ckpt_path} ({len(fe_ok)} tensors applied)")
+        else:
+            print(f"[!] No compatible FE tensors in {ckpt_path} — using random init")
         ln_state = {k.replace("layer_norm.", "", 1): v
                     for k, v in model_state.items() if k.startswith("layer_norm.")}
-        if fe_state:
-            encoder.load_state_dict(fe_state, strict=False)
-            print(f"[+] Loaded FE weights from {ckpt_path} ({len(fe_state)} keys)")
-        else:
-            print(f"[!] No feature_extractor.* keys in {ckpt_path} — using random init")
-        if ln_state:
-            layer_norm.load_state_dict(ln_state, strict=False)
+        tgt_ln = layer_norm.state_dict()
+        ln_ok = {k: v for k, v in ln_state.items()
+                 if k in tgt_ln and v.shape == tgt_ln[k].shape}
+        if ln_ok:
+            layer_norm.load_state_dict(ln_ok, strict=False)
     else:
         print("[+] FE random init (no checkpoint)")
 
@@ -135,6 +154,170 @@ class MirrorDecoder(nn.Module):
         return x, intermediates
 
 
+class TransformerMirrorDecoder(nn.Module):
+    """Map transformer encoder output [B, C, T] → spectrogram [B, 1, 245] without mean-pooling.
+
+    Projects channels C→512 with a 1×1 conv, then reuses ``MirrorDecoder`` (same temporal upsampling
+    as the FE autoencoder). T must match the subsampled FE length (47 for the default 245-bin conv stack).
+    """
+
+    def __init__(self, encoder_embed_dim: int = 768, mid_channels: int = 512):
+        super().__init__()
+        self.encoder_embed_dim = int(encoder_embed_dim)
+        self.stem = nn.Conv1d(self.encoder_embed_dim, mid_channels, kernel_size=1, bias=True)
+        self.decoder = MirrorDecoder()
+
+    def forward(self, x_bt_c):
+        """x_bt_c: [B, T, C] from fairseq ``features_only`` encoder output."""
+        x = x_bt_c.transpose(1, 2).contiguous()
+        x = self.stem(x)
+        return self.decoder(x)
+
+
+def _spectralfm_data2vec_audio_cfg():
+    """OmegaConf for ``Data2VecAudioModel`` matching SpectralFM FE conv stack (245 bins → 47 steps)."""
+    from omegaconf import OmegaConf, open_dict
+    from data2vec.models.data2vec_audio import Data2VecAudioConfig
+
+    sc = OmegaConf.structured(Data2VecAudioConfig)
+    with open_dict(sc):
+        sc.max_update = 21000
+        sc.ema_anneal_end_step = 21000
+        sc.conv_feature_layers = (
+            "[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]"
+        )
+        sc.skip_pretrained_weights = True
+        sc.model_path = None
+        sc.recon_only = False
+        sc.train_only_fe = False
+        sc.encoder_layerdrop = 0.0
+        sc.dropout_input = 0.0
+        sc.dropout_features = 0.0
+        sc.extractor_mode = "layer_norm"
+        sc.encoder_embed_dim = 768
+    return sc
+
+
+def build_data2vec_audio_backbone(device, ckpt_path=None):
+    """Build ``Data2VecAudioModel`` (fixed SpectralFM cfg), optionally merge weights like Fairseq ``build_model``.
+
+    Always constructs the **audio** architecture from YAML-equivalent config, then loads tensors from
+    ``ckpt_path`` via ``load_checkpoint_to_cpu`` + ``load_state_dict(..., strict=False)``, plus an explicit
+    ``feature_extractor.*`` / ``layer_norm.*`` pass (same idea as ``Data2VecAudioModel.build_model`` when
+    ``model_path`` is set). This matches Hydra training, which never restores a ``data2vec_multi`` graph from
+    ``base_libri_official.pt`` — it only copies compatible keys into ``data2vec_audio``.
+
+    Args:
+        device: Torch device.
+        ckpt_path: Fairseq ``.pt`` with ``state["model"]`` dict, or ``None`` / ``"none"`` for random init.
+
+    Returns:
+        ``Data2VecAudioModel`` on ``device``.
+    """
+    from fairseq import checkpoint_utils
+    from data2vec.models.data2vec_audio import Data2VecAudioModel
+
+    cfg = _spectralfm_data2vec_audio_cfg()
+    model = Data2VecAudioModel(cfg).to(device)
+
+    ck = (ckpt_path or "").strip()
+    if not ck or ck.lower() == "none":
+        print("[+] Data2VecAudio backbone: random init (no checkpoint)")
+        return model
+
+    if not os.path.isfile(ck):
+        raise FileNotFoundError(f"checkpoint not found: {ck}")
+
+    state = checkpoint_utils.load_checkpoint_to_cpu(ck, arg_overrides={})
+    raw = state.get("model", state)
+    if not isinstance(raw, dict):
+        raw = {}
+    raw.pop("_ema", None)
+
+    fe_sd = {
+        k[len("feature_extractor.") :]: v
+        for k, v in raw.items()
+        if k.startswith("feature_extractor.")
+    }
+    fe_src = "feature_extractor.*"
+    if not fe_sd:
+        # data2vec_multi / base_libri_official: conv stack lives under AUDIO modality encoder
+        _multi_fe = "modality_encoders.AUDIO.local_encoder."
+        fe_sd = {
+            k[len(_multi_fe) :]: v
+            for k, v in raw.items()
+            if k.startswith(_multi_fe)
+        }
+        if fe_sd:
+            fe_src = "modality_encoders.AUDIO.local_encoder.* → feature_extractor"
+    if fe_sd:
+        tgt = model.feature_extractor.state_dict()
+        # Shape-safe merge: base_libri (data2vec_multi) uses a different conv spec than SpectralFM;
+        # strict=False still errors on same-key shape mismatch, so drop incompatible tensors.
+        compatible = {
+            k: v
+            for k, v in fe_sd.items()
+            if k in tgt and v.shape == tgt[k].shape
+        }
+        n_skip = len(fe_sd) - len(compatible)
+        if n_skip:
+            print(
+                f"[!] Skipped {n_skip} FE checkpoint tensors (shape mismatch vs SpectralFM FE; "
+                f"e.g. multi AudioEncoder vs 245-bin conv stack)"
+            )
+        if compatible:
+            fe_incomp = model.feature_extractor.load_state_dict(compatible, strict=False)
+            n_fe = len(tgt)
+            n_ok = n_fe - len(fe_incomp.missing_keys)
+            print(
+                f"[+] Merged feature_extractor from {fe_src}: {len(compatible)} tensors applied, "
+                f"{n_ok}/{n_fe} submodule keys matched "
+                f"({len(fe_incomp.unexpected_keys)} unexpected)"
+            )
+        elif fe_sd:
+            print("[!] No compatible FE tensors to load (all shapes differ); FE stays at init")
+
+    ln_sd = {
+        k[len("layer_norm.") :]: v
+        for k, v in raw.items()
+        if k.startswith("layer_norm.")
+    }
+    if ln_sd:
+        model.layer_norm.load_state_dict(ln_sd, strict=False)
+        print(f"[+] Merged layer_norm.* ({len(ln_sd)} tensors from checkpoint)")
+
+    full_incomp = model.load_state_dict(raw, strict=False)
+    print(
+        f"[+] Full-model strict=False merge: {len(full_incomp.missing_keys)} missing keys, "
+        f"{len(full_incomp.unexpected_keys)} unexpected"
+    )
+    print(f"[+] Data2VecAudio backbone weights sourced from {ck}")
+    return model
+
+
+def build_random_data2vec_audio(device):
+    """Randomly initialized ``Data2VecAudioModel`` (SpectralFM 245-bin conv stack, no base checkpoint)."""
+    return build_data2vec_audio_backbone(device, None)
+
+
+def _freeze_module_params(module: nn.Module):
+    for p in module.parameters():
+        p.requires_grad = False
+
+
+@torch.no_grad()
+def _transformer_latent_btc(model, source_245: torch.Tensor):
+    """Encoder stack with ``mask=False``, ``features_only=True`` → [B, T, C]."""
+    model.eval()
+    out = model(
+        source_245,
+        padding_mask=None,
+        mask=False,
+        features_only=True,
+    )
+    return out["x"]
+
+
 def load_data(data_dir, n_samples, device):
     import torchaudio
     wavs = sorted(Path(data_dir).glob("*.wav"))[:n_samples]
@@ -170,10 +353,19 @@ class LazyWavDataset(torch.utils.data.Dataset):
 
 
 def exp_tag(args):
-    base = f"lr{args.lr}_n{args.n_samples}_s{args.steps}"
+    rp = getattr(args, "recon_path", "fe")
+    prefix = "tr_" if rp == "transformer" else ""
+    base = f"{prefix}lr{args.lr}_n{args.n_samples}_s{args.steps}"
     if args.warmup > 0:
         base += f"_w{args.warmup}"
+    suf = getattr(args, "run_suffix", None)
+    if suf:
+        base += f"_{str(suf).strip().replace(' ', '_')}"
     return base
+
+
+def _wandb_display_name(args, tag: str) -> str:
+    return (getattr(args, "wandb_run_name", None) or "").strip() or tag
 
 
 def cosine_lr(step, total_steps, warmup_steps, peak_lr):
@@ -184,11 +376,226 @@ def cosine_lr(step, total_steps, warmup_steps, peak_lr):
     return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
+def _configure_single_gpu(device: str) -> None:
+    """Pin the default CUDA device for single-GPU training (no DataParallel / DDP)."""
+    if not str(device).startswith("cuda") or not torch.cuda.is_available():
+        return
+    rest = str(device)[len("cuda") :]
+    idx = int(rest[1:]) if rest.startswith(":") else 0
+    if idx < 0 or idx >= torch.cuda.device_count():
+        raise ValueError(
+            f"--device {device!r} invalid: {torch.cuda.device_count()} CUDA device(s) visible"
+        )
+    torch.cuda.set_device(idx)
+    if torch.cuda.device_count() > 1:
+        print(
+            f"[i] Single-GPU: default CUDA device = {idx} "
+            f"({torch.cuda.get_device_name(idx)}); "
+            f"{torch.cuda.device_count()} GPU(s) visible — use CUDA_VISIBLE_DEVICES to hide others."
+        )
+
+
+def resolve_micro_batch_accum(n, batch_size, grad_accum_steps):
+    """Effective batch per optimizer step = micro_batch * accum (<= batch_size, capped by n).
+
+    Requires ``batch_size % grad_accum_steps == 0`` so micro-batch is integral.
+    """
+    ga = max(1, int(grad_accum_steps))
+    bs = int(batch_size)
+    if bs % ga != 0:
+        raise ValueError(
+            f"batch_size ({bs}) must be divisible by grad_accum_steps ({ga}); "
+            f"e.g. 512 and 4 → micro-batch 128"
+        )
+    micro = bs // ga
+    if n < micro:
+        return n, 1, n
+    # Largest effective batch <= min(bs, n) using full micro-batches only
+    max_full = (min(bs, n) // micro) * micro
+    if max_full == 0:
+        return n, 1, n
+    if max_full < micro * ga:
+        ga_adj = max(1, max_full // micro)
+        return micro, ga_adj, micro * ga_adj
+    return micro, ga, bs
+
+
 # ═══════════════════════════════════════════════════════
 #  MODE: train — train autoencoder, save checkpoint
 # ═══════════════════════════════════════════════════════
 
+def _run_train_transformer_mirror(args):
+    """Train 1×1 stem + MirrorDecoder on frozen (or random) data2vec_audio encoder outputs."""
+    tag = exp_tag(args)
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    ckpt_arg = (args.ckpt or "").strip()
+    if not ckpt_arg or ckpt_arg.lower() == "none":
+        backbone = build_data2vec_audio_backbone(args.device, None)
+        ckpt_label = "random_backbone"
+    else:
+        if not os.path.isfile(ckpt_arg):
+            raise FileNotFoundError(f"--ckpt not found: {ckpt_arg}")
+        backbone = build_data2vec_audio_backbone(args.device, ckpt_arg)
+        ckpt_label = ckpt_arg
+
+    _freeze_module_params(backbone)
+
+    enc_dim = int(backbone.cfg.encoder_embed_dim)
+    decoder = TransformerMirrorDecoder(encoder_embed_dim=enc_dim).to(args.device)
+    for p in decoder.parameters():
+        p.requires_grad = True
+
+    dec_params = sum(p.numel() for p in decoder.parameters())
+    print(f"\n{'='*60}")
+    print(f"TRAIN transformer+mirror  [{tag}]")
+    print(f"Decoder (stem+mirror) params: {dec_params:,}")
+    print(f"{'='*60}")
+
+    optimizer = torch.optim.Adam(decoder.parameters(), lr=args.lr)
+    use_cosine = args.warmup > 0
+    if use_cosine:
+        print(f"LR schedule: cosine (warmup={args.warmup}, peak={args.lr}, decay to 0)")
+
+    use_lazy = args.manifest is not None
+    if use_lazy:
+        ds = LazyWavDataset(args.manifest, max_samples=args.n_samples)
+        n = len(ds)
+        micro_bs, accum_steps, eff_bs = resolve_micro_batch_accum(
+            n, args.batch_size, args.grad_accum_steps
+        )
+        loader = torch.utils.data.DataLoader(
+            ds, batch_size=micro_bs, shuffle=True,
+            num_workers=4, pin_memory=True, drop_last=(n >= micro_bs * accum_steps),
+        )
+        loader_iter = iter(loader)
+        print(f"Lazy loader: {n} samples from {args.manifest}")
+    else:
+        source_all, _ = load_data(args.data_dir, args.n_samples, args.device)
+        target_all = source_all[:, :245].float()
+        n = source_all.shape[0]
+        micro_bs, accum_steps, eff_bs = resolve_micro_batch_accum(
+            n, args.batch_size, args.grad_accum_steps
+        )
+
+    print(
+        f"Samples: {n}  micro_batch={micro_bs}  grad_accum={accum_steps}  "
+        f"effective_batch={eff_bs}  optimizer_steps: {args.steps}  LR: {args.lr}\n"
+    )
+    if eff_bs != args.batch_size:
+        print(
+            f"[!] effective_batch {eff_bs} < requested {args.batch_size} "
+            f"(dataset or n too small for 512 with accum {args.grad_accum_steps})\n"
+        )
+
+    wb_run = None
+    if args.wandb_project:
+        import wandb
+        wb_run = wandb.init(
+            project=args.wandb_project,
+            name=_wandb_display_name(args, tag),
+            config={
+                "lr": args.lr, "warmup": args.warmup,
+                "n_samples": n, "steps": args.steps,
+                "batch_size": args.batch_size,
+                "grad_accum_steps": args.grad_accum_steps,
+                "micro_batch_size": micro_bs,
+                "effective_batch_size": eff_bs,
+                "loss_fn": "L2 (MSE)",
+                "schedule": "cosine" if use_cosine else "constant",
+                "dec_params": dec_params,
+                "recon_path": "transformer",
+                "backbone_ckpt": ckpt_label,
+                "encoder_embed_dim": enc_dim,
+                "manifest": getattr(args, "manifest", None),
+                "data_dir": getattr(args, "data_dir", None),
+                "exp_tag": tag,
+            },
+        )
+
+    decoder.train()
+    log_interval = max(1, args.steps // 20)
+    losses, lrs = [], []
+
+    def _next_lazy_batch():
+        nonlocal loader_iter
+        try:
+            b = next(loader_iter)
+        except StopIteration:
+            loader_iter = iter(loader)
+            b = next(loader_iter)
+        return b.to(args.device)
+
+    for step in range(1, args.steps + 1):
+        if use_cosine:
+            lr_now = cosine_lr(step, args.steps, args.warmup, args.lr)
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr_now
+        else:
+            lr_now = args.lr
+        lrs.append(lr_now)
+
+        optimizer.zero_grad()
+        loss_sum = 0.0
+        for _ in range(accum_steps):
+            if use_lazy:
+                source_batch = _next_lazy_batch()
+            else:
+                idx = torch.randint(0, n, (micro_bs,), device=args.device)
+                source_batch = source_all[idx]
+            target = source_batch[:, :245].float()
+            with torch.no_grad():
+                lat = _transformer_latent_btc(backbone, source_batch)
+            lat = lat.detach()
+            recon, _ = decoder(lat)
+            loss = F.mse_loss(recon.squeeze(1), target) / accum_steps
+            loss.backward()
+            loss_sum += loss.item() * accum_steps
+        optimizer.step()
+        losses.append(loss_sum)
+
+        epoch = step * eff_bs / n
+        if wb_run:
+            log_d = {"train/loss": loss_sum, "train/lr": lr_now,
+                     "train/epoch": epoch, "step": step}
+            if step % 100 == 0 or step == 1:
+                gn = sum(p.grad.norm().item() ** 2 for p in decoder.parameters()
+                         if p.grad is not None) ** 0.5
+                log_d["train/grad_norm"] = gn
+            wb_run.log(log_d, step=step)
+
+        if step % log_interval == 0 or step == 1:
+            print(f"  step {step:5d}/{args.steps}  L2 = {loss_sum:.6f}  lr = {lr_now:.2e}  epoch = {epoch:.1f}")
+
+    ckpt_path = str(Path(args.out_dir) / f"ckpt_{tag}.pt")
+    torch.save({
+        "recon_path": "transformer",
+        "encoder_embed_dim": enc_dim,
+        "transformer_mirror": decoder.state_dict(),
+        "losses": losses,
+        "lrs": lrs,
+        "tag": tag,
+        "lr": args.lr,
+        "warmup": args.warmup,
+        "n_samples": args.n_samples,
+        "steps": args.steps,
+        "backbone_ckpt": ckpt_label,
+        "batch_size": args.batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "micro_batch_size": micro_bs,
+        "effective_batch_size": eff_bs,
+    }, ckpt_path)
+    print(f"\nCheckpoint saved to {ckpt_path}")
+    print(f"Final train L2: {losses[-1]:.6f}")
+    if wb_run:
+        wb_run.log({"train/final_loss": losses[-1]})
+        wb_run.finish()
+
+
 def run_train_mode(args):
+    if getattr(args, "recon_path", "fe") == "transformer":
+        return _run_train_transformer_mirror(args)
+
     tag = exp_tag(args)
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -213,10 +620,12 @@ def run_train_mode(args):
     if use_lazy:
         ds = LazyWavDataset(args.manifest, max_samples=args.n_samples)
         n = len(ds)
-        batch_size = min(n, 64)
+        micro_bs, accum_steps, eff_bs = resolve_micro_batch_accum(
+            n, args.batch_size, args.grad_accum_steps
+        )
         loader = torch.utils.data.DataLoader(
-            ds, batch_size=batch_size, shuffle=True,
-            num_workers=4, pin_memory=True, drop_last=True,
+            ds, batch_size=micro_bs, shuffle=True,
+            num_workers=4, pin_memory=True, drop_last=(n >= micro_bs * accum_steps),
         )
         loader_iter = iter(loader)
         print(f"Lazy loader: {n} samples from {args.manifest}")
@@ -224,24 +633,42 @@ def run_train_mode(args):
         source_all, _ = load_data(args.data_dir, args.n_samples, args.device)
         target_all = source_all[:, :245].float()
         n = source_all.shape[0]
-        batch_size = min(n, 64)
+        micro_bs, accum_steps, eff_bs = resolve_micro_batch_accum(
+            n, args.batch_size, args.grad_accum_steps
+        )
 
-    print(f"Samples: {n}  Batch: {batch_size}  Steps: {args.steps}  LR: {args.lr}\n")
+    print(
+        f"Samples: {n}  micro_batch={micro_bs}  grad_accum={accum_steps}  "
+        f"effective_batch={eff_bs}  optimizer_steps: {args.steps}  LR: {args.lr}\n"
+    )
+    if eff_bs != args.batch_size:
+        print(
+            f"[!] effective_batch {eff_bs} < requested {args.batch_size} "
+            f"(dataset or n too small)\n"
+        )
 
     wb_run = None
     if args.wandb_project:
         import wandb
         wb_run = wandb.init(
             project=args.wandb_project,
-            name=tag,
+            name=_wandb_display_name(args, tag),
             config={
                 "lr": args.lr, "warmup": args.warmup,
                 "n_samples": n, "steps": args.steps,
-                "batch_size": batch_size, "loss_fn": "L2 (MSE)",
+                "batch_size": args.batch_size,
+                "grad_accum_steps": args.grad_accum_steps,
+                "micro_batch_size": micro_bs,
+                "effective_batch_size": eff_bs,
+                "loss_fn": "L2 (MSE)",
                 "schedule": "cosine" if use_cosine else "constant",
                 "enc_params": enc_params, "dec_params": dec_params,
                 "ckpt_init": args.ckpt or "random",
                 "loader": "lazy" if use_lazy else "preload",
+                "recon_path": "fe",
+                "manifest": getattr(args, "manifest", None),
+                "data_dir": getattr(args, "data_dir", None),
+                "exp_tag": tag,
             },
         )
 
@@ -251,6 +678,16 @@ def run_train_mode(args):
     log_interval = max(1, args.steps // 20)
     losses = []
     lrs = []
+
+    def _next_lazy_batch_fe():
+        nonlocal loader_iter
+        try:
+            b = next(loader_iter)
+        except StopIteration:
+            loader_iter = iter(loader)
+            b = next(loader_iter)
+        return b.to(args.device)
+
     for step in range(1, args.steps + 1):
         if use_cosine:
             lr_now = cosine_lr(step, args.steps, args.warmup, args.lr)
@@ -260,32 +697,28 @@ def run_train_mode(args):
             lr_now = args.lr
         lrs.append(lr_now)
 
-        if use_lazy:
-            try:
-                batch = next(loader_iter)
-            except StopIteration:
-                loader_iter = iter(loader)
-                batch = next(loader_iter)
-            source_batch = batch.to(args.device)
-            target = source_batch[:, :245].float()
-        else:
-            idx = torch.randint(0, n, (batch_size,), device=args.device)
-            source_batch = source_all[idx]
-            target = target_all[idx]
-
         optimizer.zero_grad()
-        fe_out = encoder(source_batch)
-        fe_normed = layer_norm(fe_out.transpose(1, 2)).transpose(1, 2)
-        recon, _ = decoder(fe_normed)
-        loss = F.mse_loss(recon.squeeze(1), target)
-        loss.backward()
+        loss_sum = 0.0
+        for _ in range(accum_steps):
+            if use_lazy:
+                source_batch = _next_lazy_batch_fe()
+            else:
+                idx = torch.randint(0, n, (micro_bs,), device=args.device)
+                source_batch = source_all[idx]
+            target = source_batch[:, :245].float()
+            fe_out = encoder(source_batch)
+            fe_normed = layer_norm(fe_out.transpose(1, 2)).transpose(1, 2)
+            recon, _ = decoder(fe_normed)
+            loss = F.mse_loss(recon.squeeze(1), target) / accum_steps
+            loss.backward()
+            loss_sum += loss.item() * accum_steps
         optimizer.step()
-        losses.append(loss.item())
+        losses.append(loss_sum)
 
-        epoch = step * batch_size / n
+        epoch = step * eff_bs / n
 
         if wb_run:
-            log_d = {"train/loss": loss.item(), "train/lr": lr_now,
+            log_d = {"train/loss": loss_sum, "train/lr": lr_now,
                      "train/epoch": epoch, "step": step}
             if step % 100 == 0 or step == 1:
                 grad_norm = sum(p.grad.norm().item() ** 2
@@ -294,7 +727,7 @@ def run_train_mode(args):
             wb_run.log(log_d, step=step)
 
         if step % log_interval == 0 or step == 1:
-            print(f"  step {step:5d}/{args.steps}  L2 = {loss.item():.6f}  lr = {lr_now:.2e}  epoch = {epoch:.1f}")
+            print(f"  step {step:5d}/{args.steps}  L2 = {loss_sum:.6f}  lr = {lr_now:.2e}  epoch = {epoch:.1f}")
 
     ckpt_path = str(Path(args.out_dir) / f"ckpt_{tag}.pt")
     torch.save({
@@ -308,6 +741,10 @@ def run_train_mode(args):
         "warmup": args.warmup,
         "n_samples": args.n_samples,
         "steps": args.steps,
+        "batch_size": args.batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "micro_batch_size": micro_bs,
+        "effective_batch_size": eff_bs,
     }, ckpt_path)
     print(f"\nCheckpoint saved to {ckpt_path}")
     print(f"Final train L2: {losses[-1]:.6f}")
@@ -363,8 +800,102 @@ def _eval_on_samples(encoder, layer_norm, decoder, source, device):
     return per_sample_l2, pred, target, fe_out, fe_normed, intermediates
 
 
+def _load_transformer_mirror_from_ckpt(ckpt_ae_path, device):
+    """Load ``TransformerMirrorDecoder`` weights from a train-mode transformer checkpoint."""
+    ckpt = torch.load(ckpt_ae_path, map_location=device)
+    enc_dim = int(ckpt.get("encoder_embed_dim", 768))
+    decoder = TransformerMirrorDecoder(encoder_embed_dim=enc_dim).to(device)
+    decoder.load_state_dict(ckpt["transformer_mirror"])
+    decoder.eval()
+    return decoder, ckpt
+
+
+def _eval_transformer_mirror_on_samples(backbone, decoder, source, device):
+    """Backbone (fairseq) + stem+mirror decoder; same return shape tuple as ``_eval_on_samples``."""
+    target = source[:, :245].float()
+    with torch.no_grad():
+        lat = _transformer_latent_btc(backbone, source)
+        recon, intermediates = decoder(lat)
+        pred = recon.squeeze(1)
+        per_sample_l2 = ((pred - target) ** 2).mean(dim=1)
+    fe_dummy = torch.zeros(source.shape[0], 512, 47, device=source.device, dtype=source.dtype)
+    fe_norm_dummy = fe_dummy.transpose(1, 2)
+    return per_sample_l2, pred, target, fe_dummy, fe_norm_dummy, intermediates
+
+
+def _run_analyze_transformer_mirror(args):
+    """Analyze datasets using frozen fairseq backbone + trained ``TransformerMirrorDecoder``."""
+    ck = (args.ckpt or "").strip()
+    if not ck or ck.lower() == "none" or not os.path.isfile(ck):
+        print("ERROR: --recon_path transformer analyze requires existing --ckpt (fairseq .pt tensor dict)")
+        sys.exit(1)
+
+    decoder, ckpt = _load_transformer_mirror_from_ckpt(args.ckpt_ae, args.device)
+    backbone = build_data2vec_audio_backbone(args.device, ck)
+    _freeze_module_params(backbone)
+
+    tag = ckpt["tag"]
+
+    print(f"\n{'='*60}")
+    print(f"ANALYZE transformer+mirror  [{tag}]  decoder={args.ckpt_ae}  backbone={ck}")
+    print(f"{'='*60}")
+
+    nova_root = _resolve_nova_root()
+    datasets_to_eval = args.datasets.split(",") if args.datasets else ["single_channel_10k"]
+    n_stat = args.n_stat
+    all_dataset_stats = {}
+
+    for ds_name in datasets_to_eval:
+        ds_name = ds_name.strip()
+        if ds_name in _NOVA_DATASETS:
+            wav_dir = os.path.join(nova_root, _NOVA_DATASETS[ds_name]) if nova_root else None
+        else:
+            wav_dir = ds_name if os.path.isdir(ds_name) else None
+
+        if not wav_dir or not os.path.isdir(wav_dir):
+            print(f"\n[!] Dataset '{ds_name}' not found at {wav_dir}, skipping")
+            continue
+
+        print(f"\n── Dataset: {ds_name} ({wav_dir}) ──")
+        source_stat, wavs_stat = load_data(wav_dir, n_stat, args.device)
+        per_l2, pred_stat, target_stat, _, _, _ = _eval_transformer_mirror_on_samples(
+            backbone, decoder, source_stat, args.device)
+        l2_arr = per_l2.cpu().numpy()
+
+        stats = {
+            "n": len(l2_arr),
+            "mean": float(np.mean(l2_arr)),
+            "std": float(np.std(l2_arr)),
+            "median": float(np.median(l2_arr)),
+            "min": float(np.min(l2_arr)),
+            "max": float(np.max(l2_arr)),
+            "p5": float(np.percentile(l2_arr, 5)),
+            "p95": float(np.percentile(l2_arr, 95)),
+        }
+        all_dataset_stats[ds_name] = (stats, l2_arr)
+        print(f"  N={stats['n']}  Mean L2={stats['mean']:.6f}  Std={stats['std']:.6f}")
+        print(f"  Median={stats['median']:.6f}  Min={stats['min']:.6f}  Max={stats['max']:.6f}")
+        print(f"  P5={stats['p5']:.6f}  P95={stats['p95']:.6f}")
+
+        k = min(args.k, len(l2_arr))
+        sorted_idx = np.argsort(l2_arr)
+        best_idx = sorted_idx[:k]
+        worst_idx = sorted_idx[-k:][::-1]
+        print(f"  Best  {k}: indices {best_idx.tolist()}, L2={l2_arr[best_idx].tolist()}")
+        print(f"  Worst {k}: indices {worst_idx.tolist()}, L2={l2_arr[worst_idx].tolist()}")
+        plot_best_worst(target_stat, pred_stat, per_l2, wavs_stat,
+                        best_idx, worst_idx, ds_name, tag, args.out_dir)
+
+    if all_dataset_stats:
+        plot_stats(all_dataset_stats, tag, args.out_dir)
+
+
 def run_analyze_mode(args):
     os.makedirs(args.out_dir, exist_ok=True)
+    if getattr(args, "recon_path", "fe") == "transformer":
+        _run_analyze_transformer_mirror(args)
+        return
+
     encoder, layer_norm, decoder, ckpt = _load_ae_model(args.ckpt_ae, args.device)
     tag = ckpt["tag"]
     losses = ckpt["losses"]
@@ -637,15 +1168,37 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Reconstruction training and evaluation for SpectralFM FE")
     parser.add_argument("--mode", choices=["train", "analyze", "interp"], default="train")
+    parser.add_argument(
+        "--recon_path",
+        choices=["fe", "transformer"],
+        default="fe",
+        help="fe: CNN+MirrorDecoder; transformer: frozen data2vec_audio latent + stem+MirrorDecoder",
+    )
     parser.add_argument("--ckpt", default="checkpoints/runai/recon_only_l1/20k/recon_interp_lr1e-4_20k.pt",
-                        help="Base model checkpoint (for FE init)")
+                        help="fe train: FE weights from data2vec ckpt or 'none'. "
+                             "transformer train/analyze: weight dict merged into SpectralFM Data2VecAudio "
+                             "(Fairseq-style; e.g. base_libri FE keys + random transformer where no match) "
+                             "or 'none' for random backbone. "
+                             "interp mode: still uses ensemble checkpoint restore via model_loader.")
     parser.add_argument("--ckpt_ae", default=None, help="Autoencoder checkpoint (for analyze mode)")
     parser.add_argument("--data_dir", default="fairseq/data/nova_data/single_channel_10k/wav")
     parser.add_argument("--manifest", default=None,
                         help="Path to fairseq manifest TSV (lazy loading, overrides --data_dir)")
     parser.add_argument("--n_samples", type=int, default=100)
     parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=512,
+        help="Target effective batch size per optimizer step (must be divisible by --grad_accum_steps).",
+    )
+    parser.add_argument(
+        "--grad_accum_steps",
+        type=int,
+        default=4,
+        help="Gradient accumulation micro-steps (micro-batch = batch_size / this).",
+    )
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--warmup", type=int, default=0,
                         help="Linear warmup steps for cosine LR schedule (0=constant LR)")
     parser.add_argument("--k", type=int, default=5, help="Number of samples to plot in analyze mode")
@@ -656,8 +1209,23 @@ if __name__ == "__main__":
                         help="Number of samples for statistical evaluation per dataset")
     parser.add_argument("--out_dir", default="autoencoder_experiments")
     parser.add_argument("--wandb_project", default=None, help="W&B project name (omit to disable)")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--wandb_run_name",
+        default=None,
+        help="W&B run display name (default: exp tag from lr/n/steps/warmup/run_suffix)",
+    )
+    parser.add_argument(
+        "--run_suffix",
+        default=None,
+        help="Appended to checkpoint exp tag (e.g. random vs pretrained_base_libri) so runs do not collide",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Single-GPU only: cuda or cuda:N (pins default device; no multi-GPU).",
+    )
     args = parser.parse_args()
+    _configure_single_gpu(args.device)
 
     if args.mode == "train":
         run_train_mode(args)
@@ -665,6 +1233,11 @@ if __name__ == "__main__":
         if args.ckpt_ae is None:
             print("ERROR: --ckpt_ae required for analyze mode")
             sys.exit(1)
+        if getattr(args, "recon_path", "fe") == "transformer":
+            ck = (args.ckpt or "").strip()
+            if not ck or ck.lower() == "none" or not os.path.isfile(ck):
+                print("ERROR: transformer analyze needs a real fairseq checkpoint path via --ckpt")
+                sys.exit(1)
         run_analyze_mode(args)
     else:
         run_interp_mode(args)

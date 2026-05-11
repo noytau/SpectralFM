@@ -146,14 +146,18 @@ Each checkpoint contains: encoder state, layer_norm state, decoder state, traini
 ### Main script: `code/train_reconstruction.py`
 
 Modes:
-- `--mode train` — Train FE + MirrorDecoder autoencoder (future: FE + Transformer)
-- `--mode analyze` — Load checkpoint, evaluate on multiple datasets, generate stats + best/worst plots
+- `--mode train --recon_path fe` — Train FE + `MirrorDecoder` (ConvTranspose1d), optional FE init from `--ckpt`
+- `--mode train --recon_path transformer` — Frozen fairseq `data2vec_audio` backbone (or `ckpt none` for a random backbone); train a **1×1 conv (768→512) + same `MirrorDecoder`** on full encoder sequence `[B, T, 768]` with **no mean-pooling** (aligned with the FE mirror style, not with fairseq’s pooled `trans_recon_decoder` when `lambda_recon_trans` is used)
+- `--mode analyze` — Load `ckpt_ae`; for `--recon_path transformer` also pass `--ckpt` to the fairseq `.pt` used as backbone
 - `--mode interp` — Inference with pretrained interpolation decoder (requires full fairseq model)
 
 Key arguments:
 ```
---ckpt              Path to data2vec checkpoint for FE init (or "none" for random)
---ckpt_ae           Path to autoencoder checkpoint (for analyze mode)
+--recon_path        fe | transformer (default: fe)
+--ckpt              fe train: data2vec ckpt for FE weights or "none"
+                     transformer train: full fairseq ckpt or "none" (random backbone)
+                     transformer analyze: required fairseq backbone .pt
+--ckpt_ae           Autoencoder checkpoint (analyze); transformer saves `transformer_mirror` state_dict
 --data_dir          Directory with .wav files
 --manifest          Fairseq-style manifest TSV (for lazy loading)
 --datasets          Comma-separated dataset names for analyze (e.g. "single_channel_10k,multi_channel,labeled_data")
@@ -165,6 +169,10 @@ Key arguments:
 --k                 Number of samples to visualize
 --wandb_project     W&B project name for logging
 ```
+
+**Fairseq note:** In `data2vec_audio.py`, `lambda_recon_trans` still uses **mean-pooled** transformer states and a small MLP/linear head. The standalone `--recon_path transformer` path is intentionally different (sequence + mirror decoder) and does not change that fairseq loss unless you extend the model separately.
+
+**FE→transformer projection (full pretrain):** Hydra fields `model.post_extract_proj_type` (`linear` \| `mlp_gelu`) and `model.post_extract_proj_mlp_hidden` live on `Data2VecAudioModel.post_extract_proj` (512→768 for SpectralFM). Defaults and `criterion.log_keys` scalars are in `spectralfm_full_train.yaml` and `recon_loss/HOW_TO_RUN.md`.
 
 ### Dataset paths
 Resolved automatically via `_resolve_nova_root()`:

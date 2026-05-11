@@ -57,6 +57,10 @@ criterion:
     - ema_decay
     - target_var
     - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
 
 optimization:
   max_update: 21000
@@ -111,3 +115,8 @@ model:
 
   require_same_masks: true
   mask_dropout: 0
+
+  # FE (512-d) → transformer (encoder_embed_dim): single Linear, or 2-layer MLP+GELU
+  # (fairseq: wav2vec2.py post_extract_proj; SpectralFM: data2vec_audio.build_post_extract_proj)
+  post_extract_proj_type: linear   # linear | mlp_gelu
+  post_extract_proj_mlp_hidden: 1536

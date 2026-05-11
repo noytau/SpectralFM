@@ -19,9 +19,10 @@ CONFIG_NAME="spectralfm_recon_loss"
 
 # Epoch cosim: full structured panel (~100 samples, same as short_smoke_struct100_wandb / HOW_TO_RUN mode B).
 # Requires structured_similarity_full.json on PVC (precompute_epoch_cosim_indices.py --structured_entries_json).
-RUNAI_DEFAULTS="dataset.disable_validation=true model.lambda_recon_fe=1.0 model.epoch_cosim_structured_entries_path=/storage/noy/SpectralFM/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json"
+RUNAI_DEFAULTS="dataset.disable_validation=true model.lambda_recon_fe=1.0 model.epoch_cosim_structured_entries_path=/storage/noy/SpectralFM/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json distributed_training.distributed_world_size=1"
 
-BASE_CMD="cd ${FAIRSEQ_ROOT} && conda run --no-capture-output -n ${CONDA_ENV} \
+# One physical GPU per job (Fairseq DDP disabled via world_size=1 above).
+BASE_CMD="cd ${FAIRSEQ_ROOT} && export CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ${CONDA_ENV} \
   python fairseq_cli/hydra_train.py \
   --config-dir ${CONFIG_DIR} \
   --config-name ${CONFIG_NAME}"
