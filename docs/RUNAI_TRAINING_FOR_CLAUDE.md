@@ -53,12 +53,15 @@ Full command template: `.cursor/rules/copy-runai-checkpoints.mdc`.
 
 All use **`runai submit`** with a Docker **image** (commonly `noyhassid/spectralfm-lean:v6`), **`--gpu-memory 40G`**, **`--node-pools faculty,raja`**, conda env **`spectralfm`**, and `conda run -n spectralfm python fairseq_cli/hydra_train.py ...`.
 
+**`code/train_reconstruction.py` — `--recon_path transformer` (signal recon AE):** treat this like other transformer workloads: **schedule only on A5000 or A6000** (default micro-batch / attention memory is not aimed at consumer GPUs). Use node pools your operator maps to those SKUs, and set **`RUNAI_NODE_TYPE=A6000`** or **`A5000`** in `fairseq/submit_tr_recon_short_feb25_fe.sh` when `--node-type` is needed so mixed pools cannot land the job on the wrong GPU class.
+
 | Script | Purpose |
 |--------|---------|
 | `submit_collapse_experiments.sh` | **FE vs transformer collapse** ablations (`fe_vs_transformer_collapse` / `spectralfm_collapse_ablation`). Short (1k) and long (20k) runs; dataset often `single_channel_one`; comments document FE-identity `max_sample_size=47` for fair memory vs FE-train. |
 | `submit_variance_experiments.sh` | **Variance / uniformity** regularization long runs (20k), same config family as collapse. |
 | `submit_recon_loss_experiments.sh` | **Reconstruction loss** experiments (`recon_loss/spectralfm_recon_loss.yaml`). Jobs `sfm-recon-exp1-fe`, `exp2`, `exp3` (optional exp4 commented). WandB project **`spectralfm_recon_loss`**. |
 | `submit_recon_decoder_experiments.sh` | Recon **decoder architecture** grid (~1k steps each). |
+| `submit_signal_recon_100k_grid_runai.sh` | **`train_reconstruction.py`** grid: transformer (frozen FE + Feb‑25 `fe_ckpt`) vs **FE** path; 100k samples × {10k, 100k} steps × {1e‑4, 5e‑4} LR (8 jobs). Requires **`code/`** + Feb‑25 `.pt` + manifest on PVC; set **`RUNAI_NODE_TYPE`** for transformer jobs. |
 
 Common **monitoring:** `watch -n 30 'runai list jobs'`, `runai logs -f <job-name>`, `runai delete job <name>` before resubmit if stale.
 
