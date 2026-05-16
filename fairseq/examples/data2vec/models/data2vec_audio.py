@@ -34,6 +34,119 @@ from fairseq import checkpoint_utils
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Per-component init / freeze / param-group tagging  (this PR)
+#
+#  Defers to ``code/recon_components.py`` for the actual shape-safe loaders
+#  (auto-detects fairseq_audio / data2vec_multi / apr28_fe_recon layouts and
+#  remaps ViT ``blocks.X.*`` → fairseq ``layers.X.*`` with QKV split).
+#
+#  The module is imported lazily so this file stays importable even when run
+#  outside the SpectralFM workspace (e.g. clean fairseq install). Add the repo's
+#  ``code/`` directory to ``PYTHONPATH`` (or pass it via runai submit env) to
+#  enable the per-component init/freeze/tagging fields.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Top-level dotted-name prefix → composite-optimizer group name. Encoder and
+# decoder of the same modality share a group per user spec; LN / proj are their
+# own groups so they can run at a higher LR than the pretrained backbone.
+_PARAM_GROUP_MAP: Dict[str, str] = {
+    "feature_extractor":    "fe",
+    "fe_recon_decoder":     "fe",
+    "layer_norm":           "ln",
+    "post_extract_proj":    "proj",
+    "encoder":              "transformer",
+    "trans_recon_decoder":  "transformer",
+}
+
+
+def _try_import_recon_components():
+    try:
+        import recon_components as rc  # type: ignore
+        return rc
+    except Exception as e:
+        logger.warning(
+            "recon_components could not be imported (%s); "
+            "init_*_ckpt / freeze_*_v2 / tag_param_groups will be no-ops.", e,
+        )
+        return None
+
+
+def _maybe_apply_recon_components(model, cfg) -> None:
+    """Apply the per-component init / freeze / param-group tagging requested in cfg.
+
+    No-op when no field is set, so this PR is fully back-compat with existing
+    YAML configs (every new field defaults to None/False).
+    """
+    any_init = any(
+        bool(getattr(cfg, k, None))
+        for k in ("init_fe_ckpt", "init_ln_ckpt", "init_proj_ckpt",
+                  "init_transformer_ckpt", "init_fe_recon_decoder_ckpt",
+                  "init_trans_recon_decoder_ckpt")
+    )
+    any_freeze = any(
+        bool(getattr(cfg, k, False))
+        for k in ("freeze_fe_v2", "freeze_ln", "freeze_proj",
+                  "freeze_transformer_v2", "freeze_fe_recon_decoder",
+                  "freeze_trans_recon_decoder")
+    )
+    tag = bool(getattr(cfg, "tag_param_groups", False))
+    if not (any_init or any_freeze or tag):
+        return
+
+    rc = _try_import_recon_components() if any_init else None
+
+    if any_init and rc is not None:
+        logger.info("[recon_components] per-component init from cfg.init_*_ckpt:")
+        for name, attr, loader_name, target in (
+            ("fe",                  "init_fe_ckpt",                  "load_fe_from_ckpt",                 model),
+            ("ln",                  "init_ln_ckpt",                  "load_layer_norm_from_ckpt",         model),
+            ("proj",                "init_proj_ckpt",                "load_post_extract_proj_from_ckpt",  model),
+            ("transformer",         "init_transformer_ckpt",         "load_transformer_from_ckpt",        model),
+            ("fe_recon_decoder",    "init_fe_recon_decoder_ckpt",    "load_head_from_ckpt",               model.fe_recon_decoder),
+            ("trans_recon_decoder", "init_trans_recon_decoder_ckpt", "load_head_from_ckpt",               model.trans_recon_decoder),
+        ):
+            p = (getattr(cfg, attr, None) or "").strip()
+            if not p or p.lower() == "none":
+                continue
+            getattr(rc, loader_name)(target, p)
+
+    if any_freeze:
+        logger.info("[recon_components] per-component freeze:")
+        freezes = {
+            "feature_extractor":    getattr(cfg, "freeze_fe_v2", False),
+            "layer_norm":           getattr(cfg, "freeze_ln", False),
+            "post_extract_proj":    getattr(cfg, "freeze_proj", False),
+            "encoder":              getattr(cfg, "freeze_transformer_v2", False),
+            "fe_recon_decoder":     getattr(cfg, "freeze_fe_recon_decoder", False),
+            "trans_recon_decoder":  getattr(cfg, "freeze_trans_recon_decoder", False),
+        }
+        for attr, do_freeze in freezes.items():
+            if not do_freeze:
+                continue
+            mod = getattr(model, attr, None)
+            if mod is None:
+                continue
+            n = 0
+            for p in mod.parameters():
+                if p.requires_grad:
+                    p.requires_grad = False
+                    n += p.numel()
+            logger.info(f"  {attr}: froze {n:,} params")
+            if attr == "feature_extractor":
+                model.feature_grad_mult = 0.0
+                logger.info("  feature_extractor: also set feature_grad_mult=0")
+
+    if tag:
+        n_tagged: Dict[str, int] = {}
+        for name, p in model.named_parameters():
+            top = name.split(".", 1)[0]
+            group = _PARAM_GROUP_MAP.get(top, "other")
+            p.param_group = group  # consumed by fairseq.optim.composite
+            n_tagged[group] = n_tagged.get(group, 0) + 1
+        logger.info(f"[recon_components] tagged param_group → tensor counts: {n_tagged}")
+
+
 def build_post_extract_proj(
     in_dim: int, out_dim: int, proj_type: str, mlp_hidden: int
 ) -> nn.Module:
@@ -440,7 +553,72 @@ class Data2VecAudioConfig(Wav2Vec2Config):
                     "'linear' (mean-pool → Linear(512→245), no hidden layers), "
                     "'conv1d' (ConvTranspose1d upsampling, no mean-pool), "
                     "'interp' (interpolate to target len → per-step linear, no mean-pool), "
-                    "'flat' (flatten all timesteps → MLP, no mean-pool)"
+                    "'flat' (flatten all timesteps → MLP, no mean-pool), "
+                    "'mirror' (ConvTranspose1d MirrorDecoder; sample-aligned upsampling; "
+                    "needs_full_sequence=True; mirrors train_reconstruction.py heads)"
+        },
+    )
+
+    # --- Per-component init (this PR; ``recon_components.py`` loaders) ---
+    init_fe_ckpt: Optional[str] = field(
+        default=None,
+        metadata={"help": "Per-component override: conv feature_extractor source ckpt path."},
+    )
+    init_ln_ckpt: Optional[str] = field(
+        default=None,
+        metadata={"help": "Per-component override: post-FE LayerNorm (512-d) source ckpt path."},
+    )
+    init_proj_ckpt: Optional[str] = field(
+        default=None,
+        metadata={"help": "Per-component override: post_extract_proj source ckpt path."},
+    )
+    init_transformer_ckpt: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Per-component override: TransformerEncoder source ckpt path. "
+                    "Supports fairseq ``encoder.*`` and data2vec_multi ``blocks.*`` (ViT QKV remap)."
+        },
+    )
+    init_fe_recon_decoder_ckpt: Optional[str] = field(
+        default=None,
+        metadata={"help": "Per-component override: fe_recon_decoder source ckpt path "
+                          "(Apr-28 FE-AE decoder key or train_reconstruction.py fe_mirror.*)."},
+    )
+    init_trans_recon_decoder_ckpt: Optional[str] = field(
+        default=None,
+        metadata={"help": "Per-component override: trans_recon_decoder source ckpt path "
+                          "(train_reconstruction.py transformer_mirror.decoder.*)."},
+    )
+
+    # --- Per-component freezing (this PR) ---
+    freeze_fe_v2: bool = field(
+        default=False,
+        metadata={"help": "Freeze conv feature_extractor only (also sets feature_grad_mult=0)."},
+    )
+    freeze_ln: bool = field(
+        default=False, metadata={"help": "Freeze post-FE LayerNorm (512-d)."},
+    )
+    freeze_proj: bool = field(
+        default=False, metadata={"help": "Freeze post_extract_proj."},
+    )
+    freeze_transformer_v2: bool = field(
+        default=False, metadata={"help": "Freeze TransformerEncoder (alternative to existing freeze_encoder)."},
+    )
+    freeze_fe_recon_decoder: bool = field(
+        default=False, metadata={"help": "Freeze fe_recon_decoder head."},
+    )
+    freeze_trans_recon_decoder: bool = field(
+        default=False, metadata={"help": "Freeze trans_recon_decoder head."},
+    )
+
+    # --- Param-group tagging for composite optimizer (per-component LR) ---
+    tag_param_groups: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, set ``p.param_group`` on every parameter to its natural component name "
+                    "({fe, ln, proj, transformer, other}; fe_recon_decoder joins 'fe', "
+                    "trans_recon_decoder joins 'transformer'). Required for ``optimizer._name: composite`` "
+                    "with per-group LR; fully no-op when using a single Adam optimizer."
         },
     )
 
@@ -641,6 +819,55 @@ class InterpReconDecoder(nn.Module):
         return self.fc(x).squeeze(-1)                         # [B, out_dim]
 
 
+class MirrorReconDecoder(nn.Module):
+    """ConvTranspose1d 5-layer decoder mirroring the SpectralFM FE in reverse.
+
+    Same architecture as :class:`code.train_reconstruction.MirrorDecoder`. Operates on
+    the **full FE sequence** (``needs_full_sequence=True``) → ``[B, 245]`` output,
+    so it gives sample-aligned reconstructions instead of the data2vec MLP's
+    mean-pooled-from-pooled-features output.
+
+    Designed for ``conv_feature_layers='[(512, 3, 1)×4, (512, 5, 5)]'`` (245 → 47).
+    """
+
+    needs_full_sequence = True
+
+    def __init__(self, in_channels: int = 512, out_dim: int = 245):
+        super().__init__()
+        self.in_channels = int(in_channels)
+        self.out_dim = int(out_dim)
+        self.layers = nn.ModuleList([
+            nn.Sequential(
+                nn.ConvTranspose1d(self.in_channels, 512, kernel_size=5, stride=5, output_padding=2),
+                nn.LayerNorm(237),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1),
+                nn.LayerNorm(239),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1),
+                nn.LayerNorm(241),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1),
+                nn.LayerNorm(243),
+                nn.GELU(),
+            ),
+            nn.ConvTranspose1d(512, 1, kernel_size=3, stride=1),
+        ])
+
+    def forward(self, fe_seq):
+        """``fe_seq``: ``[B, T, C]`` (post-LN FE features) → ``[B, out_dim]``."""
+        x = fe_seq.transpose(1, 2).contiguous()  # [B, C, T]
+        for layer in self.layers:
+            x = layer(x)
+        return x.squeeze(1)  # [B, out_dim]
+
+
 class FlatReconDecoder(nn.Module):
     """Flatten all timesteps then MLP: [B, T'*C] → [B, out_dim]. No mean-pool."""
 
@@ -756,11 +983,31 @@ class Data2VecAudioModel(BaseFairseqModel):
             self.fe_recon_decoder = FlatReconDecoder(self.extractor_embed, out_d, fe_time_steps)
         elif dec_type == "linear":
             self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, "")
+        elif dec_type == "mirror":
+            self.fe_recon_decoder = MirrorReconDecoder(self.extractor_embed, out_d)
         else:
             self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, hspec)
         logger.info(f"[recon] FE decoder type={dec_type}, class={type(self.fe_recon_decoder).__name__}")
 
-        self.trans_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
+        # trans_recon_decoder: 'mirror' upsamples from transformer output (768→512 stem first).
+        if dec_type == "mirror":
+            # Wrap a stem 1×1 conv (embed→512) so transformer features feed the same
+            # MirrorReconDecoder used for the FE branch, with sample-aligned output.
+            class _TransMirrorWrap(nn.Module):
+                needs_full_sequence = True
+                def __init__(self, in_dim, mid_dim, out_dim):
+                    super().__init__()
+                    self.stem = nn.Conv1d(in_dim, mid_dim, kernel_size=1)
+                    self.pre_ln = nn.LayerNorm(mid_dim)
+                    self.body = MirrorReconDecoder(mid_dim, out_dim)
+                def forward(self, x_btc):
+                    x = x_btc.transpose(1, 2).contiguous()
+                    x = self.stem(x)
+                    x = self.pre_ln(x.transpose(1, 2))
+                    return self.body(x)
+            self.trans_recon_decoder = _TransMirrorWrap(self.embed, 512, out_d)
+        else:
+            self.trans_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
 
         self.num_updates = 0
         
@@ -955,6 +1202,8 @@ class Data2VecAudioModel(BaseFairseqModel):
                 model.load_state_dict(ckpt, strict=False)
                 logger.info(f"Loaded full pretrained checkpoint (strict=False)")
 
+        # ── Per-component init / freeze / param-group tagging (this PR) ──
+        _maybe_apply_recon_components(model, cfg)
         return model
 
     def apply_mask(
@@ -1423,8 +1672,11 @@ class Data2VecAudioModel(BaseFairseqModel):
                 recon_loss_fn(pred_fe, recon_target, reduction="mean") * self.cfg.lambda_recon_fe
             )
         if getattr(self.cfg, "lambda_recon_trans", 0.0) > 0:
-            tp = self._mean_pool(x, padding_mask)
-            pred_t = self.trans_recon_decoder(tp)
+            if getattr(self.trans_recon_decoder, "needs_full_sequence", False):
+                pred_t = self.trans_recon_decoder(x)
+            else:
+                tp = self._mean_pool(x, padding_mask)
+                pred_t = self.trans_recon_decoder(tp)
             result["losses"]["recon_trans"] = (
                 recon_loss_fn(pred_t, recon_target, reduction="mean") * self.cfg.lambda_recon_trans
             )

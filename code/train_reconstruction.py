@@ -1,12 +1,14 @@
 """
 Reconstruction training and analysis for SpectralFM.
 
-  - train --recon_path fe:          FE + MirrorDecoder (ConvTranspose1d), optional FE init from --ckpt
-  - train --recon_path transformer: Frozen ``Data2VecAudioModel`` (SpectralFM cfg) + weights merged from
-                                      ``--ckpt`` like Fairseq ``build_model`` (not ``load_model_ensemble``), so
-                                      ``base_libri_official.pt``-style tensors (e.g. ``feature_extractor.*``) load
-                                      into the audio skeleton; remaining layers stay init unless keys match.
-  - analyze:                        Load AE ckpt; for transformer also pass --ckpt (fairseq backbone)
+  - train --recon_path fe:          FE + LayerNorm + MirrorDecoder (ConvTranspose1d), optional FE init from ``--ckpt``.
+  - train --recon_path transformer: **End-to-end** ``Data2VecAudioModel`` (FE + transformer) + head mirroring the FE
+                                      path (stem ``C→512``, ``LayerNorm(512)``, ``MirrorDecoder``). Init via ``--ckpt``.
+                                      ``--freeze_fe`` freezes conv FE + Fairseq extractor ``layer_norm`` and sets
+                                      ``feature_grad_mult=0``; still trains ``post_extract_proj``, encoder, head.
+                                      ``--fe_ckpt`` optionally reloads FE+LN from a second Fairseq ``.pt`` after ``--ckpt``.
+  - analyze:                        FE: ``--ckpt_ae`` only. Transformer: if checkpoint contains ``data2vec_audio``,
+                                      no ``--ckpt`` needed; else legacy ``--ckpt`` or embedded ``backbone`` (v1).
   - interp:                         Pretrained interp decoder (full fairseq model)
 
 Usage:
@@ -14,10 +16,12 @@ Usage:
     python code/train_reconstruction.py --mode train --recon_path transformer --ckpt none --n_samples 1000 --steps 2000
     # Default: --batch_size 512 --grad_accum_steps 4 (micro-batch 128 per forward; effective 512 per optimizer step)
     python code/train_reconstruction.py --mode train --recon_path transformer --ckpt /path/to/checkpoint_best.pt ...
-    python code/train_reconstruction.py --mode analyze --ckpt_ae path/to/ckpt_tr_....pt --ckpt path/to/checkpoint_best.pt \\
-        --recon_path transformer --datasets single_channel_10k
+    # Libri FE frozen + random transformer init: --ckpt none --fe_ckpt fairseq/base_libri_official.pt --freeze_fe
+    python code/train_reconstruction.py --mode analyze --recon_path transformer --ckpt_ae path/to/ckpt_tr_....pt
+    # add --ckpt fairseq.pt only for older checkpoints without ``data2vec_audio``
 """
-import sys, os, warnings, logging, math, torch, argparse
+import sys, os, warnings, logging, math, torch, argparse, json
+from typing import List, Tuple
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -26,6 +30,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
 from importlib import util as _ilu
+
+# Per-component init/freeze/audit/LR helpers (sibling module under code/)
+import recon_components as rc  # type: ignore  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -61,33 +68,31 @@ def build_fe_standalone(device, ckpt_path=None):
     layer_norm = nn.LayerNorm(512)
 
     if ckpt_path and ckpt_path.lower() != "none" and os.path.isfile(ckpt_path):
-        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        model_state = state.get("model", state)
-        if not isinstance(model_state, dict):
-            model_state = {}
-        fe_state = {k.replace("feature_extractor.", "", 1): v
-                    for k, v in model_state.items() if k.startswith("feature_extractor.")}
-        if not fe_state:
-            _pref = "modality_encoders.AUDIO.local_encoder."
-            fe_state = {k[len(_pref):]: v for k, v in model_state.items()
-                        if k.startswith(_pref)}
-        tgt_enc = encoder.state_dict()
-        fe_ok = {k: v for k, v in fe_state.items()
-                 if k in tgt_enc and v.shape == tgt_enc[k].shape}
-        if len(fe_ok) < len(fe_state):
-            print(f"[!] FE init: skipped {len(fe_state) - len(fe_ok)} tensors (shape mismatch vs SpectralFM FE)")
-        if fe_ok:
-            encoder.load_state_dict(fe_ok, strict=False)
-            print(f"[+] Loaded FE weights from {ckpt_path} ({len(fe_ok)} tensors applied)")
+        # Use the shared flat-keys reader so apr28-style nested ``encoder``/``layer_norm``
+        # dicts also resolve (alongside fairseq audio and data2vec_multi layouts).
+        sd = rc._read_state_dict(ckpt_path)
+        fe_sub, src_pref = rc._fe_subdict(sd)
+        if fe_sub:
+            tgt_enc = encoder.state_dict()
+            fe_ok = {k: v for k, v in fe_sub.items()
+                     if k in tgt_enc and v.shape == tgt_enc[k].shape}
+            if len(fe_ok) < len(fe_sub):
+                print(f"[!] FE init: skipped {len(fe_sub) - len(fe_ok)} tensors (shape mismatch vs SpectralFM FE)")
+            if fe_ok:
+                encoder.load_state_dict(fe_ok, strict=False)
+                print(f"[+] Loaded FE weights from {ckpt_path} via '{src_pref}' ({len(fe_ok)} tensors applied)")
+            else:
+                print(f"[!] No compatible FE tensors in {ckpt_path} — using random init")
         else:
-            print(f"[!] No compatible FE tensors in {ckpt_path} — using random init")
-        ln_state = {k.replace("layer_norm.", "", 1): v
-                    for k, v in model_state.items() if k.startswith("layer_norm.")}
-        tgt_ln = layer_norm.state_dict()
-        ln_ok = {k: v for k, v in ln_state.items()
-                 if k in tgt_ln and v.shape == tgt_ln[k].shape}
-        if ln_ok:
-            layer_norm.load_state_dict(ln_ok, strict=False)
+            print(f"[!] No FE keys recognised in {ckpt_path} — using random init")
+        ln_sub, ln_src = rc._ln_subdict(sd)
+        if ln_sub:
+            tgt_ln = layer_norm.state_dict()
+            ln_ok = {k: v for k, v in ln_sub.items()
+                     if k in tgt_ln and v.shape == tgt_ln[k].shape}
+            if ln_ok:
+                layer_norm.load_state_dict(ln_ok, strict=False)
+                print(f"[+] Loaded LayerNorm from {ckpt_path} via '{ln_src}' ({len(ln_ok)} tensors applied)")
     else:
         print("[+] FE random init (no checkpoint)")
 
@@ -155,22 +160,35 @@ class MirrorDecoder(nn.Module):
 
 
 class TransformerMirrorDecoder(nn.Module):
-    """Map transformer encoder output [B, C, T] → spectrogram [B, 1, 245] without mean-pooling.
+    """Map transformer encoder output ``[B, T, C]`` → spectrogram ``[B, 1, 245]``.
 
-    Projects channels C→512 with a 1×1 conv, then reuses ``MirrorDecoder`` (same temporal upsampling
-    as the FE autoencoder). T must match the subsampled FE length (47 for the default 245-bin conv stack).
+    Mirrors the FE reconstruction head layout: **1×1 conv ``C→512``** → **``LayerNorm(512)`` over time** (optional
+    for checkpoints from the older frozen-decoder format) → **``MirrorDecoder``** (same upsampling as the FE path).
+    ``T`` must match the subsampled FE length (47 for the default 245-bin conv stack).
     """
 
-    def __init__(self, encoder_embed_dim: int = 768, mid_channels: int = 512):
+    def __init__(
+        self,
+        encoder_embed_dim: int = 768,
+        mid_channels: int = 512,
+        *,
+        use_pre_decoder_ln: bool = True,
+    ):
         super().__init__()
         self.encoder_embed_dim = int(encoder_embed_dim)
-        self.stem = nn.Conv1d(self.encoder_embed_dim, mid_channels, kernel_size=1, bias=True)
+        self.mid_channels = int(mid_channels)
+        self.stem = nn.Conv1d(self.encoder_embed_dim, self.mid_channels, kernel_size=1, bias=True)
+        self.pre_decoder_ln = (
+            nn.LayerNorm(self.mid_channels) if use_pre_decoder_ln else None
+        )
         self.decoder = MirrorDecoder()
 
     def forward(self, x_bt_c):
-        """x_bt_c: [B, T, C] from fairseq ``features_only`` encoder output."""
+        """``x_bt_c``: ``[B, T, C]`` from ``Data2VecAudioModel`` ``features_only`` encoder output."""
         x = x_bt_c.transpose(1, 2).contiguous()
         x = self.stem(x)
+        if self.pre_decoder_ln is not None:
+            x = self.pre_decoder_ln(x.transpose(1, 2)).transpose(1, 2)
         return self.decoder(x)
 
 
@@ -295,6 +313,74 @@ def build_data2vec_audio_backbone(device, ckpt_path=None):
     return model
 
 
+def merge_feature_extractor_and_extractor_ln_from_pt(model, ckpt_path: str) -> None:
+    """Merge only ``feature_extractor.*`` and ``layer_norm.*`` (512-d post-conv LN) from a Fairseq ``.pt``.
+
+    Used for ``--fe_ckpt`` after ``build_data2vec_audio_backbone`` so the conv FE (+ its LayerNorm) can come from a
+    different checkpoint than the main ``--ckpt`` (e.g. Libri FE + random transformer init).
+    """
+    from fairseq import checkpoint_utils
+
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"--fe_ckpt not found: {ckpt_path}")
+    state = checkpoint_utils.load_checkpoint_to_cpu(ckpt_path, arg_overrides={})
+    raw = state.get("model", state)
+    if not isinstance(raw, dict):
+        print(f"[!] fe_ckpt has no model dict: {ckpt_path}")
+        return
+    raw.pop("_ema", None)
+
+    fe_sd = {
+        k[len("feature_extractor.") :]: v
+        for k, v in raw.items()
+        if k.startswith("feature_extractor.")
+    }
+    fe_src = "feature_extractor.*"
+    if not fe_sd:
+        _multi_fe = "modality_encoders.AUDIO.local_encoder."
+        fe_sd = {
+            k[len(_multi_fe) :]: v
+            for k, v in raw.items()
+            if k.startswith(_multi_fe)
+        }
+        if fe_sd:
+            fe_src = "modality_encoders.AUDIO.local_encoder.* → feature_extractor"
+    if fe_sd:
+        tgt = model.feature_extractor.state_dict()
+        compatible = {k: v for k, v in fe_sd.items() if k in tgt and v.shape == tgt[k].shape}
+        n_skip = len(fe_sd) - len(compatible)
+        if n_skip:
+            print(
+                f"[!] fe_ckpt: skipped {n_skip} FE tensors (shape mismatch vs SpectralFM FE)"
+            )
+        if compatible:
+            model.feature_extractor.load_state_dict(compatible, strict=False)
+            print(f"[+] fe_ckpt merged feature_extractor from {fe_src} ({len(compatible)} tensors)")
+        else:
+            print("[!] fe_ckpt: no compatible FE tensors")
+
+    ln_sd = {
+        k[len("layer_norm.") :]: v
+        for k, v in raw.items()
+        if k.startswith("layer_norm.")
+    }
+    if ln_sd:
+        model.layer_norm.load_state_dict(ln_sd, strict=False)
+        print(f"[+] fe_ckpt merged layer_norm.* ({len(ln_sd)} tensors)")
+
+
+def _freeze_data2vec_conv_fe_and_extractor_ln(model) -> int:
+    """Freeze conv FE + Fairseq ``layer_norm`` on extractor dim; return frozen param count."""
+    n = 0
+    for p in model.feature_extractor.parameters():
+        p.requires_grad = False
+        n += p.numel()
+    for p in model.layer_norm.parameters():
+        p.requires_grad = False
+        n += p.numel()
+    return n
+
+
 def build_random_data2vec_audio(device):
     """Randomly initialized ``Data2VecAudioModel`` (SpectralFM 245-bin conv stack, no base checkpoint)."""
     return build_data2vec_audio_backbone(device, None)
@@ -303,19 +389,6 @@ def build_random_data2vec_audio(device):
 def _freeze_module_params(module: nn.Module):
     for p in module.parameters():
         p.requires_grad = False
-
-
-@torch.no_grad()
-def _transformer_latent_btc(model, source_245: torch.Tensor):
-    """Encoder stack with ``mask=False``, ``features_only=True`` → [B, T, C]."""
-    model.eval()
-    out = model(
-        source_245,
-        padding_mask=None,
-        mask=False,
-        features_only=True,
-    )
-    return out["x"]
 
 
 def load_data(data_dir, n_samples, device):
@@ -358,6 +431,8 @@ def exp_tag(args):
     base = f"{prefix}lr{args.lr}_n{args.n_samples}_s{args.steps}"
     if args.warmup > 0:
         base += f"_w{args.warmup}"
+    if rp == "transformer" and getattr(args, "freeze_fe", False):
+        base += "_freezeFE"
     suf = getattr(args, "run_suffix", None)
     if suf:
         base += f"_{str(suf).strip().replace(' ', '_')}"
@@ -424,11 +499,22 @@ def resolve_micro_batch_accum(n, batch_size, grad_accum_steps):
 #  MODE: train — train autoencoder, save checkpoint
 # ═══════════════════════════════════════════════════════
 
-def _run_train_transformer_mirror(args):
-    """Train 1×1 stem + MirrorDecoder on frozen (or random) data2vec_audio encoder outputs."""
+def _run_train_transformer_autoencoder(args):
+    """Train ``Data2VecAudioModel`` + reconstruction head (MSE on first 245 samples).
+
+    Per-component setup is driven by ``--init_{fe,ln,proj,transformer,head}_ckpt`` and the
+    matching ``--freeze_*`` and ``--lr_*`` flags (default LR = ``--lr`` for all groups).
+    Back-compat: ``--ckpt`` seeds the full backbone via the old fairseq merge, ``--fe_ckpt``
+    additionally re-merges FE+LN, and ``--freeze_fe`` freezes the conv FE + extractor LN.
+
+    Forward uses ``features_only=True, mask=False`` so ``mask_emb``, ``final_proj``,
+    ``fe_recon_decoder``, ``trans_recon_decoder``, and EMA never receive gradients;
+    those are explicitly frozen and reported by the audit step below.
+    """
     tag = exp_tag(args)
     os.makedirs(args.out_dir, exist_ok=True)
 
+    # ── 1) Build backbone (legacy --ckpt path keeps current Feb-25 / random behavior) ──
     ckpt_arg = (args.ckpt or "").strip()
     if not ckpt_arg or ckpt_arg.lower() == "none":
         backbone = build_data2vec_audio_backbone(args.device, None)
@@ -439,23 +525,133 @@ def _run_train_transformer_mirror(args):
         backbone = build_data2vec_audio_backbone(args.device, ckpt_arg)
         ckpt_label = ckpt_arg
 
-    _freeze_module_params(backbone)
+    fe_extra = (getattr(args, "fe_ckpt", None) or "").strip()
+    if fe_extra:
+        merge_feature_extractor_and_extractor_ln_from_pt(backbone, fe_extra)
 
     enc_dim = int(backbone.cfg.encoder_embed_dim)
-    decoder = TransformerMirrorDecoder(encoder_embed_dim=enc_dim).to(args.device)
-    for p in decoder.parameters():
-        p.requires_grad = True
+    head_trans = TransformerMirrorDecoder(enc_dim, use_pre_decoder_ln=True).to(args.device)
 
-    dec_params = sum(p.numel() for p in decoder.parameters())
+    # ── 2a) Resolve init paths (back-compat: --init_head_ckpt -> --init_head_trans_ckpt) ──
+    init_head_trans_path = (
+        (getattr(args, "init_head_trans_ckpt", None) or "").strip()
+        or (getattr(args, "init_head_ckpt", None) or "").strip()
+    )
+    init_head_fe_path = (getattr(args, "init_head_fe_ckpt", None) or "").strip()
+
+    # ── 2b) Decide if head_fe is needed (Option B: enable when user opts in) ──
+    user_set_lambda_fe = getattr(args, "lambda_recon_fe", None) is not None
+    user_set_lambda_trans = getattr(args, "lambda_recon_trans", None) is not None
+    want_head_fe = (
+        bool(init_head_fe_path and init_head_fe_path.lower() != "none")
+        or (user_set_lambda_fe and float(args.lambda_recon_fe) > 0)
+    )
+    head_fe = MirrorDecoder().to(args.device) if want_head_fe else None
+
+    # ── 2c) Per-component init from explicit ``--init_*_ckpt`` overrides ──
+    init_manifest: dict = {}
+    print("\n[init] Per-component pretrained-weight loading:")
+    init_specs: List[Tuple[str, str, object]] = [
+        ("fe",          init_fe := (getattr(args, "init_fe_ckpt", None) or "").strip(),          (rc.load_fe_from_ckpt,                backbone)),
+        ("ln",          init_ln := (getattr(args, "init_ln_ckpt", None) or "").strip(),          (rc.load_layer_norm_from_ckpt,        backbone)),
+        ("proj",        init_pj := (getattr(args, "init_proj_ckpt", None) or "").strip(),        (rc.load_post_extract_proj_from_ckpt, backbone)),
+        ("transformer", init_tr := (getattr(args, "init_transformer_ckpt", None) or "").strip(), (rc.load_transformer_from_ckpt,       backbone)),
+        ("head_trans",  init_head_trans_path,                                                    (rc.load_head_from_ckpt,              head_trans)),
+    ]
+    if head_fe is not None:
+        init_specs.append(("head_fe", init_head_fe_path, (rc.load_head_from_ckpt, head_fe)))
+    for name, path, (loader, target) in init_specs:
+        if not path or path.lower() == "none":
+            continue
+        init_manifest[name] = loader(target, path)
+
+    # ── 3) Apply freezes (per-component + always-freeze unused submodules) ──
+    freeze_unused, unused_names = rc.freeze_unused_d2v_submodules(backbone)
+    if freeze_unused:
+        print(f"\n[freeze-unused] Froze {freeze_unused:,} params in unused submodules: {unused_names}")
+    freeze_map = {
+        "fe":          bool(getattr(args, "freeze_fe", False) or getattr(args, "freeze_fe_v2", False)),
+        "ln":          bool(getattr(args, "freeze_ln", False)),
+        "proj":        bool(getattr(args, "freeze_proj", False)),
+        "transformer": bool(getattr(args, "freeze_transformer", False)),
+        "head_trans":  bool(getattr(args, "freeze_head_trans", False) or getattr(args, "freeze_head", False)),
+        "head_fe":     bool(getattr(args, "freeze_head_fe", False)),
+    }
+    frozen_comp = rc.apply_freezes(backbone, head_trans, head_fe, freeze=freeze_map)
+    if frozen_comp:
+        print(f"[freeze-comp] {frozen_comp}")
+    if freeze_map["fe"]:
+        backbone.feature_grad_mult = 0.0
+        print("[freeze-comp] fe: also set feature_grad_mult=0 (no-grad conv forward).")
+
+    backbone.train(); head_trans.train()
+    if head_fe is not None:
+        head_fe.train()
+
+    # ── 3b) Resolve λ_fe / λ_trans with Option B defaults + auto-zero rules ──
+    if user_set_lambda_trans:
+        lambda_trans = float(args.lambda_recon_trans)
+    else:
+        lambda_trans = 1.0  # Option B default for --recon_path transformer
+    if user_set_lambda_fe:
+        lambda_fe = float(args.lambda_recon_fe)
+    else:
+        lambda_fe = 1.0 if head_fe is not None else 0.0
+
+    # Auto-zero rules (with warnings).
+    if lambda_trans > 0 and freeze_map["head_trans"]:
+        print(f"[lambda] head_trans is frozen → forcing lambda_recon_trans {lambda_trans} → 0")
+        lambda_trans = 0.0
+    if lambda_fe > 0 and (head_fe is None or freeze_map["head_fe"]):
+        reason = "head_fe not built" if head_fe is None else "head_fe is frozen"
+        print(f"[lambda] {reason} → forcing lambda_recon_fe {lambda_fe} → 0")
+        lambda_fe = 0.0
+    if lambda_fe == 0.0 and lambda_trans == 0.0:
+        raise RuntimeError(
+            "Both λ_recon_fe and λ_recon_trans resolved to 0 — no trainable reconstruction loss. "
+            "Set --lambda_recon_trans>0 (and ensure head_trans is not frozen), or pass "
+            "--init_head_fe_ckpt / --lambda_recon_fe>0 with head_fe trainable."
+        )
+    print(f"[lambda] λ_recon_trans={lambda_trans}  λ_recon_fe={lambda_fe}  (head_fe={'on' if head_fe is not None else 'off'})")
+
+    # ── 4) Component summary + dry-run gradient audit ──
+    rows = rc.component_param_summary(backbone, head_trans, head_fe)
+    rc.print_component_summary(rows, tag=f"trainable components [{tag}]")
+    bb_total = sum(p.numel() for p in backbone.parameters())
+    bb_train = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
+    hd_total = sum(p.numel() for p in head_trans.parameters()) + (
+        sum(p.numel() for p in head_fe.parameters()) if head_fe is not None else 0
+    )
+    hd_train = sum(p.numel() for p in head_trans.parameters() if p.requires_grad) + (
+        sum(p.numel() for p in head_fe.parameters() if p.requires_grad) if head_fe is not None else 0
+    )
+
+    # ── 5) Per-component param groups with optional per-component LR ──
+    lr_overrides = {
+        "fe":          getattr(args, "lr_fe", None),
+        "ln":          getattr(args, "lr_ln", None),
+        "proj":        getattr(args, "lr_proj", None),
+        "transformer": getattr(args, "lr_transformer", None),
+        "head_trans":  getattr(args, "lr_head_trans", None) if getattr(args, "lr_head_trans", None) is not None
+                       else getattr(args, "lr_head", None),
+        "head_fe":     getattr(args, "lr_head_fe", None),
+    }
+    param_groups = rc.build_param_groups(
+        backbone, head_trans, head_fe, lr_base=float(args.lr), lr_overrides=lr_overrides
+    )
+    train_mode_str = "frozen_fe_train_encoder_and_head" if freeze_map["fe"] else "full_data2vec_audio_ae"
     print(f"\n{'='*60}")
-    print(f"TRAIN transformer+mirror  [{tag}]")
-    print(f"Decoder (stem+mirror) params: {dec_params:,}")
+    print(f"TRAIN transformer AE  [{tag}]  mode={train_mode_str}")
+    print(f"Optimizer param groups ({len(param_groups)}):")
+    for g in param_groups:
+        n_p = sum(p.numel() for p in g["params"])
+        print(f"  - {g['name']:<12} params={n_p:>12,}  base_lr={g['base_lr']:.2e}")
     print(f"{'='*60}")
 
-    optimizer = torch.optim.Adam(decoder.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(param_groups, lr=args.lr)
     use_cosine = args.warmup > 0
     if use_cosine:
-        print(f"LR schedule: cosine (warmup={args.warmup}, peak={args.lr}, decay to 0)")
+        print(f"LR schedule: cosine (warmup={args.warmup}, decay to 0; applied per-group)")
 
     use_lazy = args.manifest is not None
     if use_lazy:
@@ -488,32 +684,72 @@ def _run_train_transformer_mirror(args):
             f"(dataset or n too small for 512 with accum {args.grad_accum_steps})\n"
         )
 
+    # ── 6) Gradient-flow audit (one tiny dry forward+backward) ──
+    if use_lazy:
+        try:
+            audit_src = next(iter(loader)).to(args.device)
+        except StopIteration:
+            audit_src = None
+    else:
+        audit_src = source_all[: min(4, n)]
+    audit = None
+    if audit_src is not None and audit_src.numel() > 0:
+        audit = rc.audit_gradient_flow(
+            backbone, head_trans, audit_src,
+            micro_bs=min(4, audit_src.shape[0]),
+            head_fe=head_fe, lambda_trans=lambda_trans, lambda_fe=lambda_fe,
+        )
+        print(
+            f"\n[grad-audit] trainable_with_grad={audit['trainable_with_grad']}  "
+            f"trainable_without_grad={audit['trainable_without_grad']} "
+            f"({audit['trainable_without_grad_params']:,} params)  "
+            f"sample-no-grad-names={audit['no_grad_names_sample']}"
+        )
+
     wb_run = None
     if args.wandb_project:
         import wandb
-        wb_run = wandb.init(
-            project=args.wandb_project,
-            name=_wandb_display_name(args, tag),
-            config={
-                "lr": args.lr, "warmup": args.warmup,
-                "n_samples": n, "steps": args.steps,
-                "batch_size": args.batch_size,
-                "grad_accum_steps": args.grad_accum_steps,
-                "micro_batch_size": micro_bs,
-                "effective_batch_size": eff_bs,
-                "loss_fn": "L2 (MSE)",
-                "schedule": "cosine" if use_cosine else "constant",
-                "dec_params": dec_params,
-                "recon_path": "transformer",
-                "backbone_ckpt": ckpt_label,
-                "encoder_embed_dim": enc_dim,
-                "manifest": getattr(args, "manifest", None),
-                "data_dir": getattr(args, "data_dir", None),
-                "exp_tag": tag,
-            },
-        )
+        wb_cfg = {
+            "lr": args.lr, "warmup": args.warmup,
+            "n_samples": n, "steps": args.steps,
+            "batch_size": args.batch_size,
+            "grad_accum_steps": args.grad_accum_steps,
+            "micro_batch_size": micro_bs,
+            "effective_batch_size": eff_bs,
+            "loss_fn": "L2 (MSE)",
+            "schedule": "cosine" if use_cosine else "constant",
+            "backbone_params_total": bb_total,
+            "backbone_params_trainable": bb_train,
+            "head_params_total": hd_total,
+            "head_params_trainable": hd_train,
+            "recon_path": "transformer",
+            "transformer_train_mode": train_mode_str,
+            "freeze_fe": freeze_map["fe"],
+            "freeze_ln": freeze_map["ln"],
+            "freeze_proj": freeze_map["proj"],
+            "freeze_transformer": freeze_map["transformer"],
+            "freeze_head_trans": freeze_map["head_trans"],
+            "freeze_head_fe":    freeze_map["head_fe"],
+            "lambda_recon_trans": lambda_trans,
+            "lambda_recon_fe":    lambda_fe,
+            "head_fe_enabled":    head_fe is not None,
+            "fe_ckpt": fe_extra or None,
+            "train_reconstruction_format": 3,
+            "backbone_ckpt": ckpt_label,
+            "encoder_embed_dim": enc_dim,
+            "manifest": getattr(args, "manifest", None),
+            "data_dir": getattr(args, "data_dir", None),
+            "exp_tag": tag,
+            "components": rows,
+            "init_manifest": init_manifest,
+            "lr_overrides": {k: float(v) for k, v in lr_overrides.items() if v is not None},
+            "param_groups": [{"name": g["name"], "base_lr": g["base_lr"],
+                              "n_params": sum(p.numel() for p in g["params"])} for g in param_groups],
+            "audit_gradient_flow": audit,
+        }
+        wb_run = wandb.init(project=args.wandb_project,
+                            name=_wandb_display_name(args, tag), config=wb_cfg)
 
-    decoder.train()
     log_interval = max(1, args.steps // 20)
     losses, lrs = [], []
 
@@ -526,17 +762,31 @@ def _run_train_transformer_mirror(args):
             b = next(loader_iter)
         return b.to(args.device)
 
+    # Forward hook on layer_norm to capture fe_seq (post-LN FE) for head_fe, without
+    # re-running the conv FE. Hook only registered when head_fe is enabled.
+    _captured: dict = {}
+    def _ln_hook(_mod, _inp, out):
+        _captured["fe_seq"] = out
+    _ln_handle = backbone.layer_norm.register_forward_hook(_ln_hook) if head_fe is not None else None
+
+    losses_trans: list = []
+    losses_fe:    list = []
+
     for step in range(1, args.steps + 1):
-        if use_cosine:
-            lr_now = cosine_lr(step, args.steps, args.warmup, args.lr)
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr_now
-        else:
-            lr_now = args.lr
+        lrs_now = rc.apply_cosine_to_groups(
+            param_groups, step, args.steps, args.warmup if use_cosine else 0
+        )
+        # Track the representative (max) LR for the legacy ``losses/lrs`` columns
+        lr_now = max(lrs_now.values()) if lrs_now else args.lr
         lrs.append(lr_now)
 
         optimizer.zero_grad()
-        loss_sum = 0.0
+        loss_total_sum = 0.0
+        loss_trans_sum = 0.0
+        loss_fe_sum    = 0.0
+        target_var_sum = 0.0
+        pred_trans_var_sum = 0.0
+        pred_fe_var_sum    = 0.0
         for _ in range(accum_steps):
             if use_lazy:
                 source_batch = _next_lazy_batch()
@@ -544,35 +794,105 @@ def _run_train_transformer_mirror(args):
                 idx = torch.randint(0, n, (micro_bs,), device=args.device)
                 source_batch = source_all[idx]
             target = source_batch[:, :245].float()
-            with torch.no_grad():
-                lat = _transformer_latent_btc(backbone, source_batch)
-            lat = lat.detach()
-            recon, _ = decoder(lat)
-            loss = F.mse_loss(recon.squeeze(1), target) / accum_steps
-            loss.backward()
-            loss_sum += loss.item() * accum_steps
+            backbone.train(); head_trans.train()
+            if head_fe is not None:
+                head_fe.train()
+            _captured.clear()
+            enc_out = backbone(source_batch, padding_mask=None, mask=False, features_only=True)
+
+            micro_loss = torch.zeros((), device=source_batch.device)
+            if lambda_trans > 0:
+                recon_t, _ = head_trans(enc_out["x"])
+                recon_t = recon_t.squeeze(1)
+                lt = F.mse_loss(recon_t, target)
+                micro_loss = micro_loss + lambda_trans * lt
+                loss_trans_sum += float(lt.item())
+                pred_trans_var_sum += float(recon_t.var(dim=-1).mean().item())
+            if lambda_fe > 0 and head_fe is not None:
+                fe_seq = _captured.get("fe_seq")
+                if fe_seq is None:
+                    raise RuntimeError("fe_seq hook did not fire — backbone.layer_norm forward path changed?")
+                # fe_seq is [B, T=47, C=512]; MirrorDecoder wants [B, C, T].
+                recon_f, _ = head_fe(fe_seq.transpose(1, 2).contiguous())
+                recon_f = recon_f.squeeze(1)
+                lf = F.mse_loss(recon_f, target)
+                micro_loss = micro_loss + lambda_fe * lf
+                loss_fe_sum += float(lf.item())
+                pred_fe_var_sum += float(recon_f.var(dim=-1).mean().item())
+            target_var_sum += float(target.var(dim=-1).mean().item())
+            (micro_loss / accum_steps).backward()
+            loss_total_sum += float(micro_loss.item())
         optimizer.step()
-        losses.append(loss_sum)
+        # accum-averaged scalars
+        loss_total_avg = loss_total_sum / accum_steps
+        loss_trans_avg = loss_trans_sum / accum_steps if lambda_trans > 0 else 0.0
+        loss_fe_avg    = loss_fe_sum    / accum_steps if (lambda_fe > 0 and head_fe is not None) else 0.0
+        target_var_avg = target_var_sum / accum_steps
+        pred_trans_var_avg = pred_trans_var_sum / accum_steps if lambda_trans > 0 else 0.0
+        pred_fe_var_avg    = pred_fe_var_sum    / accum_steps if (lambda_fe > 0 and head_fe is not None) else 0.0
+        losses.append(loss_total_avg)
+        losses_trans.append(loss_trans_avg)
+        losses_fe.append(loss_fe_avg)
 
         epoch = step * eff_bs / n
         if wb_run:
-            log_d = {"train/loss": loss_sum, "train/lr": lr_now,
-                     "train/epoch": epoch, "step": step}
+            log_d = {
+                "train/loss_total":     loss_total_avg,
+                "train/loss":           loss_total_avg,  # back-compat key
+                "train/lambda_trans":   lambda_trans,
+                "train/lambda_fe":      lambda_fe,
+                "train/target_var":     target_var_avg,
+                "train/lr":             lr_now,
+                "train/epoch":          epoch,
+                "step":                 step,
+            }
+            if lambda_trans > 0:
+                log_d["train/recon_trans_loss"] = loss_trans_avg
+                log_d["train/pred_var_trans"]   = pred_trans_var_avg
+            if lambda_fe > 0 and head_fe is not None:
+                log_d["train/recon_fe_loss"]    = loss_fe_avg
+                log_d["train/pred_var_fe"]      = pred_fe_var_avg
+            log_d.update({f"train/lr/{k}": v for k, v in lrs_now.items()})
             if step % 100 == 0 or step == 1:
-                gn = sum(p.grad.norm().item() ** 2 for p in decoder.parameters()
-                         if p.grad is not None) ** 0.5
-                log_d["train/grad_norm"] = gn
+                log_d.update(rc.per_component_norms(param_groups))
+                log_d["train/grad_norm"] = sum(
+                    v ** 2 for k, v in log_d.items() if k.endswith("/grad_norm")
+                ) ** 0.5
             wb_run.log(log_d, step=step)
 
         if step % log_interval == 0 or step == 1:
-            print(f"  step {step:5d}/{args.steps}  L2 = {loss_sum:.6f}  lr = {lr_now:.2e}  epoch = {epoch:.1f}")
+            parts = [f"L2_total = {loss_total_avg:.6f}"]
+            if lambda_trans > 0:
+                parts.append(f"L2_trans = {loss_trans_avg:.6f}")
+            if lambda_fe > 0 and head_fe is not None:
+                parts.append(f"L2_fe = {loss_fe_avg:.6f}")
+            parts.append(f"lr = {lr_now:.2e}  epoch = {epoch:.1f}")
+            print(f"  step {step:5d}/{args.steps}  " + "  ".join(parts))
+
+    if _ln_handle is not None:
+        _ln_handle.remove()
 
     ckpt_path = str(Path(args.out_dir) / f"ckpt_{tag}.pt")
-    torch.save({
+    save_obj = {
         "recon_path": "transformer",
+        "train_reconstruction_format": 4,
+        "transformer_ae_format": 3,
+        "freeze_map": freeze_map,
+        "lambda_recon_trans": lambda_trans,
+        "lambda_recon_fe":    lambda_fe,
+        "head_fe_enabled":    head_fe is not None,
+        "fe_ckpt": fe_extra or None,
+        "feature_grad_mult_at_save": float(getattr(backbone, "feature_grad_mult", 1.0)),
         "encoder_embed_dim": enc_dim,
-        "transformer_mirror": decoder.state_dict(),
+        "data2vec_audio": backbone.state_dict(),
+        "transformer_mirror": head_trans.state_dict(),
+        "components": rows,
+        "init_manifest": init_manifest,
+        "lr_overrides": {k: float(v) for k, v in lr_overrides.items() if v is not None},
+        "audit_gradient_flow": audit,
         "losses": losses,
+        "losses_trans": losses_trans,
+        "losses_fe":    losses_fe,
         "lrs": lrs,
         "tag": tag,
         "lr": args.lr,
@@ -584,17 +904,30 @@ def _run_train_transformer_mirror(args):
         "grad_accum_steps": args.grad_accum_steps,
         "micro_batch_size": micro_bs,
         "effective_batch_size": eff_bs,
-    }, ckpt_path)
+    }
+    if head_fe is not None:
+        save_obj["fe_mirror"] = head_fe.state_dict()
+    torch.save(save_obj, ckpt_path)
     print(f"\nCheckpoint saved to {ckpt_path}")
-    print(f"Final train L2: {losses[-1]:.6f}")
+    print(f"Final train L2 (total): {losses[-1]:.6f}"
+          + (f"  trans={losses_trans[-1]:.6f}" if lambda_trans > 0 else "")
+          + (f"  fe={losses_fe[-1]:.6f}" if (lambda_fe > 0 and head_fe is not None) else ""))
     if wb_run:
-        wb_run.log({"train/final_loss": losses[-1]})
+        final_log = {"train/final_loss": losses[-1]}
+        if lambda_trans > 0:
+            final_log["train/final_recon_trans_loss"] = losses_trans[-1]
+        if lambda_fe > 0 and head_fe is not None:
+            final_log["train/final_recon_fe_loss"] = losses_fe[-1]
+        wb_run.log(final_log)
         wb_run.finish()
 
 
 def run_train_mode(args):
     if getattr(args, "recon_path", "fe") == "transformer":
-        return _run_train_transformer_mirror(args)
+        return _run_train_transformer_autoencoder(args)
+
+    if getattr(args, "freeze_fe", False) or (getattr(args, "fe_ckpt", None) or "").strip():
+        print("[!] --freeze_fe / --fe_ckpt are only used with --recon_path transformer (ignored here).")
 
     tag = exp_tag(args)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -602,11 +935,22 @@ def run_train_mode(args):
     encoder, layer_norm = build_fe_standalone(args.device, args.ckpt)
     decoder = MirrorDecoder().to(args.device)
 
+    fe_init_manifest = {"ckpt": args.ckpt}
+
+    ln_params = sum(p.numel() for p in layer_norm.parameters())
     enc_params = sum(p.numel() for p in encoder.parameters())
     dec_params = sum(p.numel() for p in decoder.parameters())
+    fe_rows = [
+        {"name": "fe",      "class": type(encoder).__name__,
+         "total": enc_params, "trainable": enc_params, "frozen": 0},
+        {"name": "ln",      "class": type(layer_norm).__name__,
+         "total": ln_params,  "trainable": ln_params,  "frozen": 0},
+        {"name": "decoder", "class": type(decoder).__name__,
+         "total": dec_params, "trainable": dec_params, "frozen": 0},
+    ]
     print(f"\n{'='*60}")
-    print(f"TRAIN  [{tag}]")
-    print(f"Encoder: {enc_params:,}  Decoder: {dec_params:,}  Total: {enc_params+dec_params:,}")
+    print(f"TRAIN FE-AE  [{tag}]")
+    rc.print_component_summary(fe_rows, tag=f"FE-AE components [{tag}]")
     print(f"{'='*60}")
 
     all_params = list(encoder.parameters()) + list(layer_norm.parameters()) + list(decoder.parameters())
@@ -662,13 +1006,15 @@ def run_train_mode(args):
                 "effective_batch_size": eff_bs,
                 "loss_fn": "L2 (MSE)",
                 "schedule": "cosine" if use_cosine else "constant",
-                "enc_params": enc_params, "dec_params": dec_params,
+                "enc_params": enc_params, "dec_params": dec_params, "ln_params": ln_params,
                 "ckpt_init": args.ckpt or "random",
                 "loader": "lazy" if use_lazy else "preload",
                 "recon_path": "fe",
                 "manifest": getattr(args, "manifest", None),
                 "data_dir": getattr(args, "data_dir", None),
                 "exp_tag": tag,
+                "components": fe_rows,
+                "init_manifest": fe_init_manifest,
             },
         )
 
@@ -745,6 +1091,10 @@ def run_train_mode(args):
         "grad_accum_steps": args.grad_accum_steps,
         "micro_batch_size": micro_bs,
         "effective_batch_size": eff_bs,
+        "components": fe_rows,
+        "init_manifest": fe_init_manifest,
+        "recon_path": "fe",
+        "train_reconstruction_format": 3,
     }, ckpt_path)
     print(f"\nCheckpoint saved to {ckpt_path}")
     print(f"Final train L2: {losses[-1]:.6f}")
@@ -801,21 +1151,33 @@ def _eval_on_samples(encoder, layer_norm, decoder, source, device):
 
 
 def _load_transformer_mirror_from_ckpt(ckpt_ae_path, device):
-    """Load ``TransformerMirrorDecoder`` weights from a train-mode transformer checkpoint."""
+    """Load ``TransformerMirrorDecoder`` (head) from a train-mode transformer checkpoint."""
     ckpt = torch.load(ckpt_ae_path, map_location=device)
     enc_dim = int(ckpt.get("encoder_embed_dim", 768))
-    decoder = TransformerMirrorDecoder(encoder_embed_dim=enc_dim).to(device)
-    decoder.load_state_dict(ckpt["transformer_mirror"])
-    decoder.eval()
-    return decoder, ckpt
+    ae_fmt = int(ckpt.get("transformer_ae_format", 1))
+    use_ln = ae_fmt >= 2
+    head = TransformerMirrorDecoder(enc_dim, use_pre_decoder_ln=use_ln).to(device)
+    sd = ckpt.get("transformer_mirror", {})
+    if sd:
+        inc = head.load_state_dict(sd, strict=False)
+        if inc.missing_keys or inc.unexpected_keys:
+            print(
+                f"[!] transformer_mirror load_state_dict(strict=False): "
+                f"{len(inc.missing_keys)} missing, {len(inc.unexpected_keys)} unexpected"
+            )
+    head.eval()
+    return head, ckpt
 
 
-def _eval_transformer_mirror_on_samples(backbone, decoder, source, device):
-    """Backbone (fairseq) + stem+mirror decoder; same return shape tuple as ``_eval_on_samples``."""
+def _eval_transformer_mirror_on_samples(backbone, head, source, device):
+    """Backbone + head; same return shape tuple as ``_eval_on_samples``."""
     target = source[:, :245].float()
     with torch.no_grad():
-        lat = _transformer_latent_btc(backbone, source)
-        recon, intermediates = decoder(lat)
+        backbone.eval()
+        head.eval()
+        out = backbone(source, padding_mask=None, mask=False, features_only=True)
+        lat = out["x"]
+        recon, intermediates = head(lat)
         pred = recon.squeeze(1)
         per_sample_l2 = ((pred - target) ** 2).mean(dim=1)
     fe_dummy = torch.zeros(source.shape[0], 512, 47, device=source.device, dtype=source.dtype)
@@ -824,21 +1186,67 @@ def _eval_transformer_mirror_on_samples(backbone, decoder, source, device):
 
 
 def _run_analyze_transformer_mirror(args):
-    """Analyze datasets using frozen fairseq backbone + trained ``TransformerMirrorDecoder``."""
-    ck = (args.ckpt or "").strip()
-    if not ck or ck.lower() == "none" or not os.path.isfile(ck):
-        print("ERROR: --recon_path transformer analyze requires existing --ckpt (fairseq .pt tensor dict)")
-        sys.exit(1)
-
-    decoder, ckpt = _load_transformer_mirror_from_ckpt(args.ckpt_ae, args.device)
-    backbone = build_data2vec_audio_backbone(args.device, ck)
-    _freeze_module_params(backbone)
-
+    """Analyze datasets using ``Data2VecAudioModel`` + ``TransformerMirrorDecoder`` (eval, frozen)."""
+    head, ckpt = _load_transformer_mirror_from_ckpt(args.ckpt_ae, args.device)
     tag = ckpt["tag"]
 
+    d2v_sd = ckpt.get("data2vec_audio")
+    emb = ckpt.get("backbone")
+    ck = (args.ckpt or "").strip()
+
+    if isinstance(d2v_sd, dict) and d2v_sd:
+        backbone = build_data2vec_audio_backbone(args.device, None)
+        inc = backbone.load_state_dict(d2v_sd, strict=False)
+        if inc.missing_keys or inc.unexpected_keys:
+            print(
+                f"[!] data2vec_audio load_state_dict(strict=False): "
+                f"{len(inc.missing_keys)} missing, {len(inc.unexpected_keys)} unexpected"
+            )
+        if "feature_grad_mult_at_save" in ckpt:
+            backbone.feature_grad_mult = float(ckpt["feature_grad_mult_at_save"])
+        _freeze_module_params(backbone)
+        backbone_desc = "ckpt_ae[data2vec_audio]"
+    elif isinstance(emb, dict) and emb:
+        backbone = build_data2vec_audio_backbone(args.device, None)
+        inc = backbone.load_state_dict(emb, strict=False)
+        if inc.missing_keys or inc.unexpected_keys:
+            print(
+                f"[!] Embedded backbone load_state_dict(strict=False): "
+                f"{len(inc.missing_keys)} missing, {len(inc.unexpected_keys)} unexpected"
+            )
+        _freeze_module_params(backbone)
+        backbone_desc = "embedded legacy `backbone` in ckpt_ae"
+    elif ckpt.get("backbone_ckpt") == "random_backbone":
+        print(
+            "ERROR: v1 random-backbone checkpoint (decoder-only, no full ``data2vec_audio``). "
+            "Re-train with ``train_reconstruction_format`` 2 to save ``data2vec_audio`` for analyze."
+        )
+        sys.exit(1)
+    elif ck and ck.lower() != "none" and os.path.isfile(ck):
+        backbone = build_data2vec_audio_backbone(args.device, ck)
+        _freeze_module_params(backbone)
+        backbone_desc = ck
+    else:
+        print(
+            "ERROR: transformer analyze needs one of:\n"
+            "  - ``data2vec_audio`` in ckpt_ae (full-model AE checkpoints), or\n"
+            "  - legacy embedded ``backbone`` (frozen random v1), or\n"
+            "  - ``--ckpt`` fairseq .pt for v1 Libri-init decoder-only checkpoints."
+        )
+        sys.exit(1)
+
     print(f"\n{'='*60}")
-    print(f"ANALYZE transformer+mirror  [{tag}]  decoder={args.ckpt_ae}  backbone={ck}")
+    print(f"ANALYZE transformer AE  [{tag}]  head={args.ckpt_ae}  backbone={backbone_desc}")
     print(f"{'='*60}")
+    saved_rows = ckpt.get("components")
+    if isinstance(saved_rows, list) and saved_rows:
+        rc.print_component_summary(saved_rows, tag=f"saved components [{tag}]")
+    if isinstance(ckpt.get("init_manifest"), dict) and ckpt["init_manifest"]:
+        print("\n  ── init_manifest (from training) ──")
+        for k, v in ckpt["init_manifest"].items():
+            print(f"    {k:<12} {v}")
+    if isinstance(ckpt.get("lr_overrides"), dict) and ckpt["lr_overrides"]:
+        print(f"\n  per-component LR overrides at train time: {ckpt['lr_overrides']}")
 
     nova_root = _resolve_nova_root()
     datasets_to_eval = args.datasets.split(",") if args.datasets else ["single_channel_10k"]
@@ -859,7 +1267,7 @@ def _run_analyze_transformer_mirror(args):
         print(f"\n── Dataset: {ds_name} ({wav_dir}) ──")
         source_stat, wavs_stat = load_data(wav_dir, n_stat, args.device)
         per_l2, pred_stat, target_stat, _, _, _ = _eval_transformer_mirror_on_samples(
-            backbone, decoder, source_stat, args.device)
+            backbone, head, source_stat, args.device)
         l2_arr = per_l2.cpu().numpy()
 
         stats = {
@@ -901,8 +1309,15 @@ def run_analyze_mode(args):
     losses = ckpt["losses"]
 
     print(f"\n{'='*60}")
-    print(f"ANALYZE  [{tag}]  from {args.ckpt_ae}")
+    print(f"ANALYZE FE-AE  [{tag}]  from {args.ckpt_ae}")
     print(f"{'='*60}")
+    saved_rows = ckpt.get("components")
+    if isinstance(saved_rows, list) and saved_rows:
+        rc.print_component_summary(saved_rows, tag=f"saved components [{tag}]")
+    if isinstance(ckpt.get("init_manifest"), dict) and ckpt["init_manifest"]:
+        print("\n  ── init_manifest (from training) ──")
+        for k, v in ckpt["init_manifest"].items():
+            print(f"    {k:<12} {v}")
 
     nova_root = _resolve_nova_root()
     datasets_to_eval = args.datasets.split(",") if args.datasets else ["single_channel_10k"]
@@ -1172,7 +1587,7 @@ if __name__ == "__main__":
         "--recon_path",
         choices=["fe", "transformer"],
         default="fe",
-        help="fe: CNN+MirrorDecoder; transformer: frozen data2vec_audio latent + stem+MirrorDecoder",
+        help="fe: CNN FE + LayerNorm + MirrorDecoder. transformer: Data2VecAudio + head; see --freeze_fe / --fe_ckpt.",
     )
     parser.add_argument("--ckpt", default="checkpoints/runai/recon_only_l1/20k/recon_interp_lr1e-4_20k.pt",
                         help="fe train: FE weights from data2vec ckpt or 'none'. "
@@ -1224,6 +1639,78 @@ if __name__ == "__main__":
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Single-GPU only: cuda or cuda:N (pins default device; no multi-GPU).",
     )
+    parser.add_argument(
+        "--freeze_fe",
+        action="store_true",
+        help="Transformer path only: freeze conv feature_extractor (alias for --freeze_fe_v2 + freeze_ln). "
+        "Sets feature_grad_mult=0; trains post_extract_proj, TransformerEncoder, and recon head.",
+    )
+    parser.add_argument(
+        "--fe_ckpt",
+        default=None,
+        help="Transformer path only: optional Fairseq .pt merged into feature_extractor + extractor layer_norm "
+        "after the main --ckpt build (e.g. Libri FE weights with --ckpt none for random transformer).",
+    )
+
+    # ── Per-component pretrained-weight loading (transformer path) ──
+    g_init = parser.add_argument_group(
+        "Per-component init",
+        "Each --init_*_ckpt loads ONLY that component's weights from the given file, "
+        "auto-detecting fairseq_audio / data2vec_multi / apr28_fe_recon layouts and "
+        "shape-mismatched tensors are skipped with a count. Applied AFTER --ckpt / --fe_ckpt.",
+    )
+    g_init.add_argument("--init_fe_ckpt",          default=None, help="conv feature_extractor source")
+    g_init.add_argument("--init_ln_ckpt",          default=None, help="post-FE LayerNorm (512-d) source")
+    g_init.add_argument("--init_proj_ckpt",        default=None, help="post_extract_proj (512->encoder_dim) source")
+    g_init.add_argument("--init_transformer_ckpt", default=None,
+                        help="TransformerEncoder source (fairseq encoder.* or data2vec_multi blocks.* w/ ViT remap)")
+    g_init.add_argument("--init_head_ckpt",        default=None,
+                        help="DEPRECATED alias for --init_head_trans_ckpt (kept for back-compat).")
+    g_init.add_argument("--init_head_trans_ckpt",  default=None,
+                        help="TransformerMirrorDecoder (head_trans) source: transformer_mirror or FE-AE decoder dict.")
+    g_init.add_argument("--init_head_fe_ckpt",     default=None,
+                        help="MirrorDecoder (head_fe) source: FE-AE decoder dict or transformer_mirror.decoder.")
+
+    # ── Per-component freezing (transformer path) ──
+    g_fr = parser.add_argument_group("Per-component freeze")
+    g_fr.add_argument("--freeze_fe_v2",       action="store_true", help="freeze conv FE only (no LN side-effect)")
+    g_fr.add_argument("--freeze_ln",          action="store_true", help="freeze post-FE LayerNorm")
+    g_fr.add_argument("--freeze_proj",        action="store_true", help="freeze post_extract_proj")
+    g_fr.add_argument("--freeze_transformer", action="store_true", help="freeze TransformerEncoder")
+    g_fr.add_argument("--freeze_head",        action="store_true",
+                      help="DEPRECATED alias for --freeze_head_trans (kept for back-compat).")
+    g_fr.add_argument("--freeze_head_trans",  action="store_true",
+                      help="freeze transformer-output reconstruction head (head_trans).")
+    g_fr.add_argument("--freeze_head_fe",     action="store_true",
+                      help="freeze post-LN FE reconstruction head (head_fe). Auto-zeroes lambda_recon_fe.")
+
+    # ── Per-component LR overrides (transformer path) ──
+    g_lr = parser.add_argument_group(
+        "Per-component LR",
+        "Each --lr_<name> overrides the base --lr for that component's Adam param group. "
+        "Cosine warmup/decay is applied per-group using each group's base_lr.",
+    )
+    g_lr.add_argument("--lr_fe",          type=float, default=None)
+    g_lr.add_argument("--lr_ln",          type=float, default=None)
+    g_lr.add_argument("--lr_proj",        type=float, default=None)
+    g_lr.add_argument("--lr_transformer", type=float, default=None)
+    g_lr.add_argument("--lr_head",        type=float, default=None,
+                      help="DEPRECATED alias for --lr_head_trans (kept for back-compat).")
+    g_lr.add_argument("--lr_head_trans",  type=float, default=None)
+    g_lr.add_argument("--lr_head_fe",     type=float, default=None)
+
+    # ── Reconstruction loss weights (transformer path; FE path always uses recon_fe) ──
+    g_loss = parser.add_argument_group(
+        "Reconstruction loss weights",
+        "Option B defaults: with --recon_path transformer and no explicit lambdas, λ_trans=1.0 and λ_fe=1.0 if "
+        "any --init_head_fe_ckpt / --lambda_recon_fe was set (else λ_fe=0). With --recon_path fe, λ_fe=1.0 and "
+        "λ_trans=0. Auto-zero rules force a lambda to 0 with a warning if the matching head is frozen.",
+    )
+    g_loss.add_argument("--lambda_recon_fe",    type=float, default=None,
+                        help="Weight for the post-LN FE recon loss (head_fe). None = Option B default.")
+    g_loss.add_argument("--lambda_recon_trans", type=float, default=None,
+                        help="Weight for the transformer-output recon loss (head_trans). None = Option B default.")
+
     args = parser.parse_args()
     _configure_single_gpu(args.device)
 
@@ -1233,11 +1720,6 @@ if __name__ == "__main__":
         if args.ckpt_ae is None:
             print("ERROR: --ckpt_ae required for analyze mode")
             sys.exit(1)
-        if getattr(args, "recon_path", "fe") == "transformer":
-            ck = (args.ckpt or "").strip()
-            if not ck or ck.lower() == "none" or not os.path.isfile(ck):
-                print("ERROR: transformer analyze needs a real fairseq checkpoint path via --ckpt")
-                sys.exit(1)
         run_analyze_mode(args)
     else:
         run_interp_mode(args)
