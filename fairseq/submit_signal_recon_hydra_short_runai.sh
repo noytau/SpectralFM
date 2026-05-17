@@ -53,6 +53,8 @@ RUN_DIR="${REPO}/fairseq/outputs/recon_loss/${RUN_TAG}"
 MAX_UPDATE="${MAX_UPDATE:-100}"
 MAX_EPOCH="${MAX_EPOCH:-100}"
 SAVE_INTERVAL_UPDATES="${SAVE_INTERVAL_UPDATES:-50}"
+# 5% of MAX_UPDATE by default, capped to a sensible smoke value.
+WARMUP_UPDATES="${WARMUP_UPDATES:-$(( MAX_UPDATE / 20 > 10 ? MAX_UPDATE / 20 : 10 ))}"
 
 submit_one() {
   local STATUS
@@ -90,7 +92,7 @@ conda run --no-capture-output -n ${CONDA_ENV} \
   optimization.max_epoch=${MAX_EPOCH} \
   optimization.update_freq=[1] \
   optimization.lr=[1.0e-5] \
-  lr_scheduler.warmup_updates=10 \
+  lr_scheduler.warmup_updates=${WARMUP_UPDATES} \
   checkpoint.save_interval_updates=${SAVE_INTERVAL_UPDATES} \
   checkpoint.keep_interval_updates=2 \
   checkpoint.no_epoch_checkpoints=true \
@@ -138,7 +140,7 @@ echo "Data root:   ${DATA_ROOT}"
 echo "Init:        ${BASE_LIBRI}"
 echo "Run dir:     ${RUN_DIR}"
 echo "Max update:  ${MAX_UPDATE}  (save every ${SAVE_INTERVAL_UPDATES})"
-echo "Trainable:   transformer + trans_recon_decoder @ lr=1e-5 (warmup=10)"
+echo "Trainable:   transformer + trans_recon_decoder @ lr=1e-5 (warmup=${WARMUP_UPDATES})"
 echo ""
 submit_one
 echo "=== Done. Logs: runai logs -f ${JOB_NAME} ==="
