@@ -46,29 +46,66 @@ lr_scheduler:
 # (it ignores `lr:` here). The per-group LR is injected into
 # `optimizer.lr` via `optimizer_config.lr = [group_cfg.lr_float]`.
 # Using lr (not lr_float) silently leaves lr=0 (interpolated from optimization.lr).
+# Also: do NOT use YAML inline-dict syntax for the optimizer block — the comma
+# in adam_betas (0.9,0.98) collides with YAML's flow-mapping separator.
 optimizer:
   _name: composite
   groups:
     fe:
       lr_float: 1.0e-5
-      optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
-      lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 10
+        max_update: 100
     ln:
       lr_float: 1.0e-5
-      optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.0}
-      lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.0
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 10
+        max_update: 100
     proj:
       lr_float: 1.0e-4
-      optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
-      lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 10
+        max_update: 100
     transformer:
       lr_float: 1.0e-5
-      optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
-      lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 10
+        max_update: 100
     other:
       lr_float: 1.0e-4
-      optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
-      lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 10
+        max_update: 100
 
 model:
   recon_only: false
