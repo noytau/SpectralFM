@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SpectralFM — Reconstruction 2-AE basemerge how-to</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0e1117;
+  --bg-raised: #161b22;
+  --bg-card: #1c2128;
+  --bg-code: #1a1f29;
+  --border: #30363d;
+  --border-bright: #484f58;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --text-bright: #e6edf3;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --green: #3fb950;
+  --green-dim: #238636;
+  --orange: #d29922;
+  --red: #f85149;
+  --purple: #bc8cff;
+  --radius: 8px;
+  --radius-sm: 4px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; font-size: 15px; }
+body {
+  font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.65;
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ---------- Sidebar Nav ---------- */
+nav {
+  position: fixed;
+  top: 0; left: 0;
+  width: 280px;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border);
+  padding: 24px 0 40px;
+  z-index: 100;
+}
+nav::-webkit-scrollbar { width: 4px; }
+nav::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.nav-brand { padding: 0 20px 16px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.nav-brand h1 {
+  font-family: 'IBM Plex Serif', serif;
+  font-size: 1.05rem; font-weight: 600;
+  color: var(--accent); letter-spacing: -0.02em;
+}
+.nav-brand .sub {
+  font-size: 0.72rem; color: var(--text-dim); margin-top: 2px;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+nav a {
+  display: block; padding: 5px 20px;
+  color: var(--text-dim); text-decoration: none;
+  font-size: 0.82rem; line-height: 1.5;
+  transition: color 0.15s, background 0.15s;
+}
+nav a:hover { color: var(--text-bright); background: rgba(88,166,255,0.06); }
+nav a.active { color: var(--accent); background: rgba(88,166,255,0.1); border-right: 2px solid var(--accent); }
+nav .sep { height: 1px; background: var(--border); margin: 8px 20px; }
+nav .nav-section {
+  padding: 12px 20px 4px; font-size: 0.68rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-dim); opacity: 0.7;
+}
+
+/* ---------- Main ---------- */
+main {
+  margin-left: 280px;
+  max-width: 1000px;
+  padding: 48px 56px 120px;
+  width: 100%;
+}
+h2 {
+  font-family: 'IBM Plex Serif', serif;
+  font-size: 1.55rem; font-weight: 600;
+  color: var(--text-bright);
+  margin: 56px 0 20px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: -0.01em;
+}
+h2:first-of-type { margin-top: 0; }
+h3 { font-size: 1.1rem; font-weight: 600; color: var(--text-bright); margin: 32px 0 12px; }
+h4 { font-size: 0.95rem; font-weight: 600; color: var(--accent); margin: 20px 0 8px; }
+p { margin-bottom: 12px; }
+strong { color: var(--text-bright); font-weight: 600; }
+ul, ol { padding-left: 24px; margin: 8px 0 16px; }
+li { margin: 4px 0; }
+
+/* ---------- Badges ---------- */
+.badge {
+  display: inline-block; font-size: 0.7rem; font-weight: 600;
+  padding: 2px 8px; border-radius: 12px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  vertical-align: middle; margin-left: 6px;
+}
+.badge-new      { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge-changed  { background: rgba(210,153,34,0.2); color: var(--orange); }
+.badge-deprecated { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge-hydra    { background: rgba(188,140,255,0.15); color: var(--purple); }
+.badge-argparse { background: var(--accent-dim); color: var(--accent); }
+
+/* ---------- Code ---------- */
+code {
+  font-family: 'DM Mono', 'Fira Code', monospace;
+  font-size: 0.85em;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+}
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  overflow-x: auto;
+  margin: 12px 0 16px;
+  line-height: 1.55;
+}
+pre code {
+  background: none; border: none; padding: 0;
+  color: var(--text); font-size: 0.82rem;
+}
+.cmd { color: var(--green); }
+.flag { color: var(--orange); }
+.path { color: var(--purple); }
+.comment { color: var(--text-dim); font-style: italic; }
+.keyword { color: var(--accent); }
+.str { color: var(--green); }
+.num { color: var(--orange); }
+
+/* ---------- Tables ---------- */
+.table-wrap { overflow-x: auto; margin: 12px 0 20px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+thead th {
+  background: var(--bg-card); color: var(--text-bright);
+  font-weight: 600; text-align: left;
+  padding: 10px 14px; border-bottom: 2px solid var(--border-bright);
+  font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+td { padding: 8px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:hover td { background: rgba(88,166,255,0.03); }
+td code { font-size: 0.8em; }
+
+/* ---------- Cards ---------- */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px; margin: 16px 0;
+}
+.card h4 { margin-top: 0; }
+.card.tip      { border-left: 4px solid var(--green); }
+.card.warn     { border-left: 4px solid var(--orange); }
+.card.danger   { border-left: 4px solid var(--red); }
+.card.info     { border-left: 4px solid var(--accent); }
+
+/* ---------- Architecture diagram ---------- */
+.arch-diagram {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  margin: 16px 0;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text);
+}
+.arch-diagram .lbl   { color: var(--accent); font-weight: 500; }
+.arch-diagram .dim   { color: var(--text-dim); }
+.arch-diagram .new   { color: var(--green); font-weight: 500; }
+.arch-diagram .hyd   { color: var(--purple); font-weight: 500; }
+.arch-diagram .arr   { color: var(--border-bright); }
+
+/* ---------- Status pills ---------- */
+.pill {
+  display: inline-block; font-family: 'DM Mono', monospace;
+  font-size: 0.72rem; font-weight: 600;
+  padding: 1px 8px; border-radius: 4px;
+}
+.pill-train  { background: rgba(63,185,80,0.15); color: var(--green); }
+.pill-frozen { background: rgba(248,81,73,0.15); color: var(--red); }
+.pill-none   { background: rgba(139,148,158,0.15); color: var(--text-dim); }
+.pill-hydra  { background: rgba(188,140,255,0.15); color: var(--purple); }
+
+/* ---------- Footer ---------- */
+.footer {
+  margin-top: 64px; padding-top: 24px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim); font-size: 0.82rem;
+}
+.footer code { font-size: 0.8em; }
+
+@media (max-width: 900px) {
+  nav { display: none; }
+  main { margin-left: 0; padding: 24px 16px 80px; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-brand">
+    <h1>2-AE basemerge</h1>
+    <div class="sub">SpectralFM · how-to</div>
+  </div>
+  <div class="nav-section">Overview</div>
+  <a href="#tldr">1. TL;DR</a>
+  <a href="#files">2. Files changed</a>
+  <div class="nav-section">Argparse</div>
+  <a href="#cli">3.1 CLI flags</a>
+  <a href="#autozero">3.2 Auto-zero rules</a>
+  <a href="#optionb">3.3 Option B defaults</a>
+  <a href="#wandb">3.4 WandB keys</a>
+  <a href="#ckpt">3.5 Checkpoint format</a>
+  <div class="nav-section">Hydra</div>
+  <a href="#hydra-cfg">4.1 New config fields</a>
+  <a href="#hydra-tagging">4.2 Param-group tagging</a>
+  <a href="#hydra-mirror">4.3 MirrorReconDecoder</a>
+  <a href="#hydra-yaml">4.4 Composite optimizer YAML</a>
+  <div class="nav-section">Run & verify</div>
+  <a href="#smoke">5. Smoke tests</a>
+  <a href="#run-argparse">6.1 RunAI 2-AE</a>
+  <a href="#run-hydra">6.2 Hydra preset</a>
+  <a href="#configs">7. The 6 configurations</a>
+  <a href="#status">8. Status & open items</a>
+  <a href="#recover">9. Quick recovery checklist</a>
+</nav>
+
+<main>
+
+<h1 style="font-family:'IBM Plex Serif',serif;font-size:2.1rem;color:var(--text-bright);margin-bottom:8px;letter-spacing:-0.02em;">
+  Reconstruction 2-AE basemerge <span class="badge badge-new">how-to</span>
+</h1>
+<p style="color:var(--text-dim);font-size:0.9rem;">
+  Branch <code>recon/2ae-basemerge</code> · commit <code>fdfeea4</code> (+ doc commit <code>e75be59</code>)
+  · companion: <code>code/docs/RECON_2AE_BASEMERGE.md</code> · summary plot:
+  <code>code/eval_results/recon_components_overview.png</code>
+</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="tldr">1.  TL;DR — what's new</h2>
+
+<p>Two parallel reconstruction heads on top of the basemerge transformer backbone.</p>
+
+<div class="arch-diagram">            <span class="arr">┌──────────────────────┐</span>       <span class="lbl">head_trans</span>  <span class="dim">(existing)</span>
+            <span class="arr">│ Transformer encoder  │ ────►</span> ConvTranspose <span class="lbl">MirrorDecoder</span>
+            <span class="arr">└──────────────────────┘</span>       <span class="arr">→</span> <span class="lbl">recon_trans_loss</span>   <span class="dim">(λ_trans)</span>
+   FE ─► LN ─┬─► post_extract_proj ─► <span class="dim">(transformer above)</span>
+             │
+             └─► <span class="new">head_fe</span>   <span class="dim">(NEW, when λ_fe > 0)</span>
+                 ConvTranspose <span class="lbl">MirrorDecoder</span>
+                 <span class="arr">→</span> <span class="new">recon_fe_loss</span>   <span class="dim">(λ_fe)</span></div>
+
+<h4>Loss formulas</h4>
+
+<pre><code><span class="comment"># argparse  (code/train_reconstruction.py)</span>
+total = λ_trans · recon_trans_loss + λ_fe · recon_fe_loss                          <span class="comment"># L2</span>
+
+<span class="comment"># Hydra  (data2vec_audio + new YAML preset)</span>
+total = regression_loss                                                            <span class="comment"># always weight 1</span>
+      + λ_recon_trans · recon_trans_loss                                           <span class="comment"># L2</span>
+      + λ_recon_fe    · recon_fe_loss                                              <span class="comment"># L2</span></code></pre>
+
+<h4>Per-component LR (joint encoder + decoder share a group, per spec)</h4>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Group</th><th>Members</th><th>Default LR</th></tr></thead>
+<tbody>
+<tr><td><code>fe</code></td><td><code>feature_extractor</code> + <code>fe_recon_decoder</code></td><td><code>1e-5</code></td></tr>
+<tr><td><code>ln</code></td><td><code>layer_norm</code></td><td><code>1e-5</code></td></tr>
+<tr><td><code>proj</code></td><td><code>post_extract_proj</code></td><td><code>1e-4</code></td></tr>
+<tr><td><code>transformer</code></td><td><code>encoder</code> + <code>trans_recon_decoder</code></td><td><code>1e-5</code></td></tr>
+<tr><td><code>other</code></td><td><code>mask_emb</code>, <code>final_proj</code></td><td><code>1e-4</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Argparse path uses <code>torch.optim.Adam</code> param-groups; Hydra path uses fairseq's
+<code>optimizer._name: composite</code> (one Adam + cosine LR scheduler per group).</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="files">2.  Files changed / added</h2>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Path</th><th>Status</th><th>What</th></tr></thead>
+<tbody>
+<tr><td><code>code/train_reconstruction.py</code></td><td><span class="badge badge-changed">changed</span></td><td>new λ flags, <code>head_fe</code> build, hook-based <code>fe_seq</code> capture, weighted L2 loss, renamed WandB keys, expanded checkpoint format</td></tr>
+<tr><td><code>code/recon_components.py</code></td><td><span class="badge badge-new">new</span></td><td><code>head_trans</code> + optional <code>head_fe</code> everywhere; <code>load_head_from_ckpt</code> rewritten for flat state dicts and stem-less heads</td></tr>
+<tr><td><code>fairseq/examples/data2vec/models/data2vec_audio.py</code></td><td><span class="badge badge-changed">changed</span></td><td>new <code>init_*_ckpt</code> / <code>freeze_*</code> / <code>tag_param_groups</code> config fields; <code>_maybe_apply_recon_components</code> helper; <code>MirrorReconDecoder</code> + <code>_TransMirrorWrap</code>; new <code>recon_decoder_type=mirror</code> wiring; <code>recon_trans</code> forward respects <code>needs_full_sequence</code></td></tr>
+<tr><td><code>…/config/audio/pretraining/recon_loss/spectralfm_recon_loss_basemerge.yaml</code></td><td><span class="badge badge-new">new</span></td><td>composite optimizer, 5 LR groups, basemerge inits, both λ_recon_* = 1, L2</td></tr>
+<tr><td><code>fairseq/submit_signal_recon_2ae_runai.sh</code></td><td><span class="badge badge-new">new</span></td><td>RunAI submitter for the argparse 2-AE grid</td></tr>
+<tr><td><code>fairseq/submit_signal_recon_basemerge_runai.sh</code></td><td><span class="badge badge-new">new</span></td><td>(earlier in this work) basemerge transformer-AE submitter</td></tr>
+<tr><td><code>fairseq/copy_signal_recon_grid_ckpts_from_runai.sh</code></td><td><span class="badge badge-new">new</span></td><td>(earlier in this work) helper to pull RunAI ckpts back to <code>/mnt5</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="cli">3.1  Argparse — new CLI flags <span class="badge badge-argparse">argparse</span></h2>
+
+<p>All back-compat preserved — old flag names still accepted as deprecated aliases.</p>
+
+<pre><code><span class="comment"># reconstruction loss weights</span>
+<span class="flag">--lambda_recon_fe</span> FLOAT          <span class="comment"># default: Option B (see §3.3)</span>
+<span class="flag">--lambda_recon_trans</span> FLOAT       <span class="comment"># default: Option B (see §3.3)</span>
+
+<span class="comment"># head_fe (the new MirrorDecoder branch)</span>
+<span class="flag">--init_head_fe_ckpt</span> PATH         <span class="comment"># FE-AE decoder dict or transformer_mirror.decoder.*</span>
+<span class="flag">--freeze_head_fe</span>                  <span class="comment"># frozen → λ_fe auto-zeroed</span>
+<span class="flag">--lr_head_fe</span> FLOAT
+
+<span class="comment"># head_trans (was --*_head before; old names still work)</span>
+<span class="flag">--init_head_trans_ckpt</span> PATH      <span class="comment"># alias for legacy --init_head_ckpt</span>
+<span class="flag">--freeze_head_trans</span>               <span class="comment"># alias for legacy --freeze_head</span>
+<span class="flag">--lr_head_trans</span> FLOAT             <span class="comment"># alias for legacy --lr_head</span></code></pre>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="autozero">3.2  Auto-zero rules</h2>
+
+<p><code>train_reconstruction.py</code> enforces these with a warning, so the optimizer
+never sees a useless loss term.</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Condition</th><th>Enforced</th></tr></thead>
+<tbody>
+<tr><td><code>head_trans</code> frozen</td><td><code>λ_trans → 0</code></td></tr>
+<tr><td><code>head_fe</code> frozen or not built</td><td><code>λ_fe → 0</code></td></tr>
+<tr><td>both end up 0</td><td><strong>raises</strong> with a clear message</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="optionb">3.3  Default behaviour (Option B)</h2>
+
+<ul>
+  <li><code>--recon_path transformer</code>:
+    <ul>
+      <li>neither λ flag set → <code>λ_trans = 1</code>, <code>λ_fe = 1</code> <em>iff</em> <code>head_fe</code> is wired (via <code>--init_head_fe_ckpt</code> or explicit <code>--lambda_recon_fe</code>), else <code>λ_fe = 0</code>;</li>
+      <li>any λ flag set explicitly → use that value (still subject to auto-zero rules).</li>
+    </ul>
+  </li>
+  <li><code>--recon_path fe</code>: unchanged — single MirrorDecoder on FE+LN, no transformer.</li>
+</ul>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="wandb">3.4  WandB keys</h2>
+
+<pre><code>train/loss_total
+train/loss                         <span class="comment"># back-compat alias of loss_total</span>
+train/recon_trans_loss             <span class="comment"># logged only when λ_trans > 0</span>
+train/recon_fe_loss                <span class="comment"># logged only when λ_fe > 0</span>
+train/lambda_trans / lambda_fe     <span class="comment"># constants per run</span>
+train/target_var
+train/pred_var_trans / pred_var_fe <span class="comment"># variance along spectrogram axis, batch-averaged</span>
+train/lr   train/lr/{fe,ln,proj,transformer,head_trans,head_fe}
+{name}/grad_norm / param_norm / lr <span class="comment"># every 100 steps via per_component_norms</span></code></pre>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="ckpt">3.5  Checkpoint format bump (<code>transformer_ae_format=3</code>)</h2>
+
+<p>In addition to the existing fields:</p>
+
+<pre><code><span class="str">"fe_mirror"</span>:            head_fe.state_dict()              <span class="comment"># only when head_fe is enabled</span>
+<span class="str">"lambda_recon_trans"</span>:   float
+<span class="str">"lambda_recon_fe"</span>:      float
+<span class="str">"head_fe_enabled"</span>:      bool
+<span class="str">"losses_trans"</span>:         list[float]                       <span class="comment"># per-step recon_trans loss</span>
+<span class="str">"losses_fe"</span>:            list[float]                       <span class="comment"># per-step recon_fe loss</span></code></pre>
+
+<div class="card info">
+  <h4>Back-compat</h4>
+  <p>The existing analyze-mode loader (<code>_load_transformer_mirror_from_ckpt</code>)
+  ignores the new fields gracefully — old checkpoints still load.</p>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="hydra-cfg">4.1  Hydra — new <code>Data2VecAudioConfig</code> fields <span class="badge badge-hydra">hydra</span></h2>
+
+<p>All default to <code>None</code> / <code>False</code> so existing YAMLs are unaffected.</p>
+
+<pre><code><span class="keyword">model</span>:
+  <span class="comment"># per-component init (paths to .pt files; loaders auto-detect</span>
+  <span class="comment"># fairseq_audio / data2vec_multi / apr28_fe_recon layouts and</span>
+  <span class="comment"># remap ViT blocks.X.* → fairseq layers.X.* with QKV split)</span>
+  <span class="flag">init_fe_ckpt</span>:                  <span class="path">/path/to/apr28_fe_recon_best.pt</span>
+  <span class="flag">init_ln_ckpt</span>:                  <span class="path">/path/to/apr28_fe_recon_best.pt</span>
+  <span class="flag">init_proj_ckpt</span>:                <span class="keyword">null</span>
+  <span class="flag">init_transformer_ckpt</span>:         <span class="path">/path/to/base_libri_official.pt</span>
+  <span class="flag">init_fe_recon_decoder_ckpt</span>:    <span class="path">/path/to/apr28_fe_recon_best.pt</span>  <span class="comment"># head_fe init</span>
+  <span class="flag">init_trans_recon_decoder_ckpt</span>: <span class="keyword">null</span>
+
+  <span class="comment"># per-component freeze</span>
+  <span class="flag">freeze_fe_v2</span>:               <span class="keyword">true</span>        <span class="comment"># also sets feature_grad_mult=0</span>
+  <span class="flag">freeze_ln</span>:                  <span class="keyword">true</span>
+  <span class="flag">freeze_proj</span>:                <span class="keyword">false</span>
+  <span class="flag">freeze_transformer_v2</span>:      <span class="keyword">false</span>       <span class="comment"># (alternative to existing freeze_encoder)</span>
+  <span class="flag">freeze_fe_recon_decoder</span>:    <span class="keyword">false</span>
+  <span class="flag">freeze_trans_recon_decoder</span>: <span class="keyword">false</span>
+
+  <span class="comment"># tag p.param_group for composite optimizer</span>
+  <span class="flag">tag_param_groups</span>:           <span class="keyword">true</span>
+
+  <span class="comment"># decoder choice — wires MirrorReconDecoder (needs_full_sequence=True)</span>
+  <span class="flag">recon_decoder_type</span>:         <span class="str">mirror</span>      <span class="comment"># mlp | linear | conv1d | interp | flat | mirror</span></code></pre>
+
+<p><code>build_model()</code> calls a new <code>_maybe_apply_recon_components(model, cfg)</code> after
+the legacy <code>model_path</code> load. It uses <code>code/recon_components.py</code> for the
+shape-safe loaders (lazy import — falls back to a no-op + warning if <code>code/</code>
+is not on <code>PYTHONPATH</code>).</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="hydra-tagging">4.2  Param-group tagging</h2>
+
+<p>Joint encoder + decoder of the same modality share a group per spec.</p>
+
+<pre><code><span class="keyword">_PARAM_GROUP_MAP</span> = {
+    <span class="str">"feature_extractor"</span>:    <span class="str">"fe"</span>,
+    <span class="str">"fe_recon_decoder"</span>:     <span class="str">"fe"</span>,            <span class="comment"># joint with FE encoder</span>
+    <span class="str">"layer_norm"</span>:           <span class="str">"ln"</span>,
+    <span class="str">"post_extract_proj"</span>:    <span class="str">"proj"</span>,
+    <span class="str">"encoder"</span>:              <span class="str">"transformer"</span>,
+    <span class="str">"trans_recon_decoder"</span>:  <span class="str">"transformer"</span>,   <span class="comment"># joint with transformer encoder</span>
+    <span class="comment"># anything else → "other"  (mask_emb, final_proj, …)</span>
+}</code></pre>
+
+<div class="card tip">
+  <h4>Validated counts</h4>
+  <p><code>{fe: 33 tensors, ln: 2, proj: 2, transformer: 219, other: 3}</code></p>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="hydra-mirror">4.3  <code>MirrorReconDecoder</code></h2>
+
+<p>Same 5-layer <code>ConvTranspose1d</code> stack as <code>code/train_reconstruction.MirrorDecoder</code>
+(245 → 47 conv stack reversed). Sets <code>needs_full_sequence = True</code>, so the
+existing branch in the data2vec forward feeds it the full <code>fe_seq</code> (no mean-pool):</p>
+
+<pre><code><span class="keyword">if</span> <span class="cmd">getattr</span>(self.fe_recon_decoder, <span class="str">"needs_full_sequence"</span>, <span class="keyword">False</span>):
+    pred_fe = self.fe_recon_decoder(fe_seq)
+<span class="keyword">else</span>:
+    pred_fe = self.fe_recon_decoder(self._mean_pool(fe_seq, padding_mask))</code></pre>
+
+<p><code>recon_decoder_type=mirror</code> also swaps <code>trans_recon_decoder</code> to a wrapped
+<code>_TransMirrorWrap</code> (stem 1×1 conv 768→512 + LN → <code>MirrorReconDecoder</code>) and the
+<code>recon_trans</code> forward path now honours <code>needs_full_sequence</code> instead of always
+mean-pooling.</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="hydra-yaml">4.4  Composite optimizer YAML pattern</h2>
+
+<pre><code><span class="keyword">optimizer</span>:
+  <span class="flag">_name</span>: <span class="str">composite</span>
+  <span class="flag">groups</span>:
+    <span class="keyword">fe</span>:          { lr: [<span class="num">1e-5</span>], optimizer: {<span class="flag">_name</span>: <span class="str">adam</span>, ...}, lr_scheduler: {<span class="flag">_name</span>: <span class="str">cosine</span>, warmup_updates: <span class="num">1000</span>, max_update: <span class="num">100000</span>} }
+    <span class="keyword">ln</span>:          { lr: [<span class="num">1e-5</span>], ... }
+    <span class="keyword">proj</span>:        { lr: [<span class="num">1e-4</span>], ... }
+    <span class="keyword">transformer</span>: { lr: [<span class="num">1e-5</span>], ... }
+    <span class="keyword">other</span>:       { lr: [<span class="num">1e-4</span>], ... }
+<span class="keyword">lr_scheduler</span>: <span class="str">pass_through</span>
+
+<span class="keyword">optimization</span>:
+  <span class="flag">lr</span>: [<span class="num">0</span>]              <span class="comment"># required global field; composite ignores it</span></code></pre>
+
+<p>Full file:
+<code>fairseq/examples/data2vec/config/audio/pretraining/recon_loss/spectralfm_recon_loss_basemerge.yaml</code>.</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="smoke">5.  Validation done (both smoke tests passed)</h2>
+
+<h3>5.1  Argparse 2-AE smoke (local RTX 2080 Ti)</h3>
+
+<pre><code><span class="cmd">PYTHONPATH</span>=code:fairseq/examples <span class="cmd">python3</span> code/train_reconstruction.py \
+  <span class="flag">--mode</span> train <span class="flag">--recon_path</span> transformer <span class="flag">--ckpt</span> none \
+  <span class="flag">--init_fe_ckpt</span>          <span class="path">fairseq/apr28_fe_recon_best.pt</span> \
+  <span class="flag">--init_ln_ckpt</span>          <span class="path">fairseq/apr28_fe_recon_best.pt</span> \
+  <span class="flag">--init_transformer_ckpt</span> <span class="path">fairseq/base_libri_official.pt</span> \
+  <span class="flag">--init_head_fe_ckpt</span>     <span class="path">fairseq/apr28_fe_recon_best.pt</span> \
+  <span class="flag">--freeze_fe_v2</span> <span class="flag">--freeze_ln</span> \
+  <span class="flag">--lambda_recon_fe</span> <span class="num">1.0</span> <span class="flag">--lambda_recon_trans</span> <span class="num">1.0</span> \
+  <span class="flag">--lr</span> <span class="num">1e-4</span> <span class="flag">--lr_transformer</span> <span class="num">1e-5</span> <span class="flag">--lr_proj</span> <span class="num">1e-4</span> \
+  <span class="flag">--lr_head_trans</span> <span class="num">1e-4</span> <span class="flag">--lr_head_fe</span> <span class="num">1e-4</span> \
+  <span class="flag">--data_dir</span> <span class="path">fairseq/data/nova_data/single_channel_100/wav</span> \
+  <span class="flag">--n_samples</span> <span class="num">16</span> <span class="flag">--steps</span> <span class="num">4</span> <span class="flag">--warmup</span> <span class="num">1</span> \
+  <span class="flag">--batch_size</span> <span class="num">16</span> <span class="flag">--grad_accum_steps</span> <span class="num">1</span> \
+  <span class="flag">--out_dir</span> <span class="path">/tmp/smoke_2ae</span> <span class="flag">--device</span> cuda</code></pre>
+
+<ul>
+  <li>All <strong>239</strong> trainable parameters received gradients (<code>grad-audit ok</code>).</li>
+  <li>4 param groups built with the right LRs (proj 1e-4, transformer 1e-5, head_trans 1e-4, head_fe 1e-4).</li>
+  <li><code>L2_total = L2_trans + L2_fe</code> per step.</li>
+  <li>With <code>--init_head_fe_ckpt fairseq/apr28_fe_recon_best.pt</code>: <code>L2_fe</code> started at <strong>0.02</strong> at step 1 (Apr-28 decoder paired with its own Apr-28 FE+LN inputs), confirming the head loader round-trips correctly.</li>
+</ul>
+
+<h3>5.2  Hydra <code>build_model</code> smoke (synthetic batch)</h3>
+
+<pre><code><span class="keyword">from</span> omegaconf <span class="keyword">import</span> OmegaConf, open_dict
+<span class="keyword">from</span> data2vec.models.data2vec_audio <span class="keyword">import</span> Data2VecAudioModel, Data2VecAudioConfig
+sc = OmegaConf.structured(Data2VecAudioConfig)
+<span class="keyword">with</span> open_dict(sc):
+    sc.conv_feature_layers = <span class="str">"[(512, 3, 1)]*4 + [(512, 5, 5)]"</span>   <span class="comment"># pseudo</span>
+    sc.recon_decoder_type = <span class="str">"mirror"</span>
+    sc.init_fe_ckpt = <span class="str">"...apr28_fe_recon_best.pt"</span>
+    sc.init_ln_ckpt = <span class="str">"...apr28_fe_recon_best.pt"</span>
+    sc.init_transformer_ckpt = <span class="str">"...base_libri_official.pt"</span>
+    sc.init_fe_recon_decoder_ckpt = <span class="str">"...apr28_fe_recon_best.pt"</span>
+    sc.freeze_fe_v2 = <span class="keyword">True</span>; sc.freeze_ln = <span class="keyword">True</span>
+    sc.tag_param_groups = <span class="keyword">True</span>
+m = Data2VecAudioModel.build_model(sc)</code></pre>
+
+<div class="card tip">
+  <h4>Result</h4>
+  <ul>
+    <li>FE + LN frozen, <code>feature_grad_mult=0</code>.</li>
+    <li><code>transformer</code> 89.78M trainable, <code>fe_recon_decoder</code> 3.68M trainable (<code>MirrorReconDecoder</code>, full sequence), <code>trans_recon_decoder</code> 4.07M trainable (<code>_TransMirrorWrap</code>, full sequence).</li>
+    <li><code>param_group → tensor counts: {fe: 33, ln: 2, proj: 2, transformer: 219, other: 3}</code>.</li>
+    <li><code>recon_only</code> forward returns <code>losses = {'recon_fe': tensor(19.11)}</code> on random input — sanity check that the decoder runs end-to-end on <code>fe_seq</code> instead of mean-pooled features.</li>
+  </ul>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="run-argparse">6.1  How to launch — argparse 2-AE on RunAI</h2>
+
+<pre><code><span class="cmd">bash</span> fairseq/submit_signal_recon_2ae_runai.sh</code></pre>
+
+<p>Submits 2 jobs:</p>
+<ul>
+  <li><code>sfm-sr2ae-s10k</code>  — 10 k optimizer steps, 1 k warmup</li>
+  <li><code>sfm-sr2ae-s100k</code> — 100 k steps, 10 k warmup</li>
+</ul>
+
+<p>Both run with: FE+LN frozen from Apr-28, transformer from base_libri (8→12 layer
+remap), <code>head_fe</code> pre-loaded from the Apr-28 decoder, <code>λ_fe = λ_trans = 1</code>.</p>
+
+<p>WandB project (default): <code>spectralfm-runai-signal-recon-2ae</code>.</p>
+
+<div class="card warn">
+  <h4>Prerequisites on the RunAI PVC <code>/storage/noy/SpectralFM/</code></h4>
+  <ul>
+    <li>latest <code>code/</code> synced (knows the new flags),</li>
+    <li><code>fairseq/apr28_fe_recon_best.pt</code> and <code>fairseq/base_libri_official.pt</code>,</li>
+    <li>manifest <code>fairseq/data/nova_data/single_channel_one/train_runai_150k.tsv</code>.</li>
+  </ul>
+</div>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="run-hydra">6.2  How to launch — Hydra 2-AE basemerge (new preset)</h2>
+
+<pre><code><span class="cmd">cd</span> fairseq
+<span class="cmd">PYTHONPATH</span>=<span class="path">/mnt5/noy/SpectralFM/code</span> \
+<span class="cmd">fairseq-hydra-train</span> \
+  <span class="flag">--config-dir</span> examples/data2vec/config/audio/pretraining/recon_loss \
+  <span class="flag">--config-name</span> spectralfm_recon_loss_basemerge</code></pre>
+
+<div class="card danger">
+  <h4><code>PYTHONPATH</code> matters</h4>
+  <p><code>PYTHONPATH</code> must include <code>code/</code> so <code>data2vec_audio.py</code> can lazy-import
+  <code>recon_components.py</code> for the per-component loaders. Without it, the
+  init/freeze/tag flags become no-ops (with a warning) and you get random init.</p>
+</div>
+
+<p>Pass <code>model.lambda_recon_fe=0.5 model.lambda_recon_trans=0.5</code> etc. to sweep λ.
+Override LRs per group via <code>optimizer.groups.transformer.lr=[3e-5]</code> etc.</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="configs">7.  The 6 configurations</h2>
+
+<p>Mirrors Panel B of the summary plot.</p>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>#</th><th>name</th>
+  <th>FE</th><th>LN</th><th>proj</th><th>transformer</th>
+  <th>head_fe</th><th>head_trans</th>
+  <th>regression</th><th>losses</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>①</td><td><code>sfm-sr-fe-*</code></td>
+  <td><span class="pill pill-train">T Feb-25</span></td>
+  <td><span class="pill pill-train">T Feb-25</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><code>recon_fe</code></td>
+</tr>
+<tr>
+  <td>②</td><td><code>sfm-sr-tr-*</code></td>
+  <td><span class="pill pill-frozen">F Feb-25</span></td>
+  <td><span class="pill pill-frozen">F Feb-25</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><code>recon_trans</code></td>
+</tr>
+<tr>
+  <td>③</td><td><code>sfm-srbm-*</code> <span class="dim">(basemerge)</span></td>
+  <td><span class="pill pill-frozen">F Apr-28</span></td>
+  <td><span class="pill pill-frozen">F Apr-28</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-train">T base_libri</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><code>recon_trans</code></td>
+</tr>
+<tr>
+  <td>④</td><td><strong>PROPOSED 2-AE</strong> <span class="badge badge-argparse">argparse</span></td>
+  <td><span class="pill pill-frozen">F Apr-28</span></td>
+  <td><span class="pill pill-frozen">F Apr-28</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-train">T base_libri</span></td>
+  <td><span class="pill pill-train">T Apr-28</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><code>recon_fe + recon_trans</code></td>
+</tr>
+<tr>
+  <td>⑤</td><td>Hydra data2vec <span class="dim">(baseline)</span></td>
+  <td><span class="pill pill-train">T any</span></td>
+  <td><span class="pill pill-train">T any</span></td>
+  <td><span class="pill pill-train">T any</span></td>
+  <td><span class="pill pill-train">T any</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-none">—</span></td>
+  <td><span class="pill pill-hydra">T</span></td>
+  <td><code>regression</code></td>
+</tr>
+<tr>
+  <td>⑥</td><td><strong>PROPOSED Hydra 2-AE</strong> <span class="badge badge-hydra">hydra</span></td>
+  <td><span class="pill pill-frozen">F Apr-28</span></td>
+  <td><span class="pill pill-frozen">F Apr-28</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-train">T base_libri</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-train">T rand</span></td>
+  <td><span class="pill pill-hydra">T</span></td>
+  <td><code>regression + recon_fe + recon_trans</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<p style="font-size:0.85rem;color:var(--text-dim);">
+  <strong>Legend:</strong>
+  <span class="pill pill-train">T</span> trainable
+  &nbsp;·&nbsp; <span class="pill pill-frozen">F</span> frozen
+  &nbsp;·&nbsp; <span class="pill pill-none">—</span> not present.
+  Init source after the slash.
+</p>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="status">8.  Status & open items</h2>
+
+<h4>Done</h4>
+<ul>
+  <li>Branch <code>recon/2ae-basemerge</code> created off <code>main</code>, all changes committed (<code>fdfeea4</code>).</li>
+  <li><strong>Argparse:</strong> 2-AE forward, weighted L2 loss, auto-zero rules, new WandB keys, per-component LR groups, audit, checkpoint bump.</li>
+  <li><strong>Hydra:</strong> new config fields, lazy <code>recon_components</code> loader, param-group tagging, <code>MirrorReconDecoder</code>, <code>recon_decoder_type=mirror</code>, composite-optimizer YAML preset.</li>
+  <li>RunAI submitter for the argparse 2-AE grid.</li>
+  <li>Both smoke tests green.</li>
+</ul>
+
+<h4>Not done <span class="dim">(deliberately, until you say go)</span></h4>
+<ul>
+  <li><code>git push</code> — branch is local only.</li>
+  <li>RunAI submission — <code>submit_signal_recon_2ae_runai.sh</code> is ready but not invoked.</li>
+  <li>Hydra preset has not been launched end-to-end on RunAI yet; the smoke test exercises <code>build_model</code> + <code>recon_only</code> forward but not a full <code>fairseq-hydra-train</code> loop with composite optimizer.</li>
+  <li><code>head_fe</code> is currently a separate component in the argparse path; if you eventually want to fold the FE-only path's <code>decoder</code> under the same name for symmetry, that's a follow-up rename.</li>
+</ul>
+
+<!-- ════════════════════════════════════════════════ -->
+<h2 id="recover">9.  Quick recovery checklist when you come back</h2>
+
+<ol>
+  <li><code>git checkout recon/2ae-basemerge</code> and <code>git log --stat -1</code> — confirm you're on commit <code>fdfeea4</code>.</li>
+  <li>Open <code>code/eval_results/recon_components_overview.png</code> — Panels A–D + the 6 strips show the whole design at a glance.</li>
+  <li>Skim <a href="#cli">§3.1 (argparse flags)</a> and <a href="#hydra-cfg">§4.1 (Hydra fields)</a> — those are the API surface.</li>
+  <li>If you want to run an experiment:
+    <ul>
+      <li>Argparse on RunAI → <a href="#run-argparse">§6.1</a>.</li>
+      <li>Hydra locally / on RunAI → <a href="#run-hydra">§6.2</a>.</li>
+    </ul>
+  </li>
+  <li>If something looks off in a checkpoint, the new metadata (<code>lambda_recon_*</code>, <code>head_fe_enabled</code>, <code>losses_trans</code>, <code>losses_fe</code>, <code>init_manifest</code>, <code>freeze_map</code>, <code>audit_gradient_flow</code>) is right there to diagnose it.</li>
+</ol>
+
+<div class="footer">
+  Companion docs: <code>code/docs/RECON_2AE_BASEMERGE.md</code> ·
+  <code>code/eval_results/recon_components_overview.png</code> ·
+  <code>code/docs/recon_loss_explained.html</code> (original data2vec recon background) ·
+  <code>code/docs/EVALUATION_FLOW.html</code> (eval suite reference).
+</div>
+
+</main>
+
+<script>
+// Highlight the active sidebar entry on scroll.
+const sections = Array.from(document.querySelectorAll('h2[id], h3[id]'));
+const links    = Array.from(document.querySelectorAll('nav a[href^="#"]'));
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      const id = e.target.id;
+      links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + id));
+    }
+  });
+}, { rootMargin: '-30% 0px -60% 0px' });
+sections.forEach(s => obs.observe(s));
+</script>
+</body>
+</html>
