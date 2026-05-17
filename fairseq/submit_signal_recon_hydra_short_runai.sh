@@ -63,6 +63,13 @@ SAVE_INTERVAL_UPDATES="${SAVE_INTERVAL_UPDATES:-50}"
 WARMUP_UPDATES="${WARMUP_UPDATES:-$(( MAX_UPDATE / 20 > 10 ? MAX_UPDATE / 20 : 10 ))}"
 # Peak LR (passed to cosine scheduler; warmup ramps 0→LR, then cosine decays LR→min_lr).
 LR="${LR:-1.0e-5}"
+# Batch-size convention from .cursor/rules/training-batch-size.mdc:
+# bsz=512 + update_freq=4 ⇒ effective optimizer batch = 2048 on 1 GPU (matches the
+# scale the Feb-15 SpectralFM warm-start was trained at). bsz=16 / uf=1 is for
+# smoke tests only (the 100-step verify run). NUM_WORKERS bumped to 4 for bsz=512.
+BATCH_SIZE="${BATCH_SIZE:-512}"
+UPDATE_FREQ="${UPDATE_FREQ:-4}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 
 submit_one() {
   local STATUS
@@ -94,11 +101,12 @@ conda run --no-capture-output -n ${CONDA_ENV} \
   common.log_interval=10 \
   distributed_training.distributed_world_size=1 \
   dataset.disable_validation=true \
-  dataset.batch_size=16 \
+  dataset.batch_size=${BATCH_SIZE} \
+  dataset.num_workers=${NUM_WORKERS} \
   task.data=${DATA_ROOT} \
   optimization.max_update=${MAX_UPDATE} \
   optimization.max_epoch=${MAX_EPOCH} \
-  optimization.update_freq=[1] \
+  optimization.update_freq=[${UPDATE_FREQ}] \
   optimization.lr=[${LR}] \
   lr_scheduler.warmup_updates=${WARMUP_UPDATES} \
   checkpoint.save_interval_updates=${SAVE_INTERVAL_UPDATES} \
@@ -154,6 +162,7 @@ echo "Data root:   ${DATA_ROOT}"
 echo "Init:        ${PRETRAINED_CKPT}  (Feb-15 2026, full model_path load)"
 echo "Run dir:     ${RUN_DIR}"
 echo "Max update:  ${MAX_UPDATE}  (save every ${SAVE_INTERVAL_UPDATES})"
+echo "Batch:       bsz=${BATCH_SIZE} update_freq=${UPDATE_FREQ}  (effective optimizer batch = $((BATCH_SIZE*UPDATE_FREQ)))"
 echo "Trainable:   transformer + final_proj + trans_recon_decoder @ lr=${LR} (warmup=${WARMUP_UPDATES})"
 echo ""
 submit_one
