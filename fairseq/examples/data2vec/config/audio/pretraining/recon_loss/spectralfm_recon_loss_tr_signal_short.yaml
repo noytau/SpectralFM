@@ -3,56 +3,62 @@
 # Short RunAI smoke for transformer signal-reconstruction.
 #
 # BASELINE: spectralfm_full_train (the standard SpectralFM pretraining recipe).
-#   We inherit:
-#     - model arch (data2vec_audio, layer_norm extractor, mask_prob 0.4, EMA, etc.)
-#     - task (audio_pretraining, normalize=true, max_sample_size=500, min=200)
-#     - common.fp16, log_format, tensorboard_logdir
-#     - criterion._name = model (with target_var / pred_var / ema_decay log_keys)
-#     - single AdamW optimizer + cosine LR scheduler (no composite optimizer here)
+# This file is intentionally SELF-CONTAINED (no Hydra `defaults:` import) — the
+# other recon_loss YAMLs are self-contained too, and importing sibling configs
+# across `# @package _group_` boundaries is unreliable in fairseq's Hydra setup.
+# All fields below are copied 1:1 from spectralfm_full_train.yaml except for
+# the smoke overrides flagged with "[SMOKE]".
 #
-# SMOKE OVERRIDES (this file):
+# SMOKE OVERRIDES vs baseline:
 #   - 1 GPU, batch_size=16, max_update=100, max_epoch=100, warmup=10
-#   - W&B project = spectralfm-runai-signal-recon (per user spec)
-#   - data = /storage/.../single_channel_100  (RunAI; never /mnt5)
+#   - W&B project = spectralfm-runai-signal-recon
+#   - data = /storage/.../single_channel_100   (RunAI; never /mnt5)
 #   - Add recon-loss log_keys (regression / loss_recon_fe / loss_recon_trans)
 #   - Init FE + LN + proj + transformer from base_libri_official.pt
 #   - Freeze EVERYTHING except transformer + trans_recon_decoder
-#   - lambda_recon_trans=1.0, lambda_recon_fe=0.0 (FE branch off, still logged)
+#   - lambda_recon_trans=1.0, lambda_recon_fe=0.0
 #   - recon_decoder_type=mirror (MirrorReconDecoder)
-#   - LR=1e-5 for everything (only transformer+decoder have grads anyway)
+#   - LR=1e-5 for everything (only trainable params actually update)
 #
 # CLI overrides in submit_signal_recon_hydra_short_runai.sh pin: hydra.run.dir,
 # checkpoint.save_dir, optimization.max_update/epoch, and all model.* fields,
-# because `# @package _group_` doesn't reliably deep-merge top-level blocks
-# across `defaults:` imports — CLI overrides always win.
-
-defaults:
-  - ../spectralfm_full_train
+# as belt-and-suspenders.
 
 common:
-  fp16: false
-  log_interval: 10
-  wandb_project: "spectralfm-runai-signal-recon"
-  # Self-describing run name; uses the get_data_size resolver registered in
-  # fairseq.dataclass.initialize. Short tag for the smoke.
+  fp16: false               # [SMOKE] no fp16 for the tiny job
+  log_format: json
+  log_interval: 10          # [SMOKE] more frequent than baseline's 100
+  tensorboard_logdir: tb
+  user_dir: /storage/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm-runai-signal-recon"   # [SMOKE]
   wandb_run_name: "tr_signal_short_lr${optimization.lr[0]}_${get_data_size:${task.data}}_${now:%Y%m%d_%H%M}"
 
 checkpoint:
-  save_interval_updates: 50
-  keep_interval_updates: 2
+  save_interval: 1
+  save_interval_updates: 50          # [SMOKE]
+  keep_interval_updates: 2           # [SMOKE]
   no_epoch_checkpoints: true
 
 task:
-  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100
+  _name: audio_pretraining
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100   # [SMOKE]
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
 
 dataset:
-  num_workers: 2
-  batch_size: 16
-  disable_validation: true
+  num_workers: 2           # [SMOKE]
+  batch_size: 16           # [SMOKE]
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  valid_subset: valid
+  required_batch_size_multiple: 1
+  disable_validation: true # [SMOKE]
   max_tokens: null
 
 distributed_training:
-  distributed_world_size: 1
+  distributed_world_size: 1   # [SMOKE]
   ddp_backend: legacy_ddp
 
 criterion:
@@ -61,15 +67,15 @@ criterion:
     - ema_decay
     - target_var
     - pred_var
-    - regression
-    - loss_recon_fe
-    - loss_recon_trans
+    - regression          # [SMOKE] data2vec EMA loss
+    - loss_recon_fe       # [SMOKE] FE reconstruction L2 (off here)
+    - loss_recon_trans    # [SMOKE] transformer reconstruction L2
 
 optimization:
-  max_update: 100
-  max_epoch: 100
-  lr: [1.0e-5]
-  update_freq: [1]
+  max_update: 100          # [SMOKE]
+  max_epoch: 100           # [SMOKE]
+  lr: [1.0e-5]             # [SMOKE] from 1e-4 → 1e-5 (per spec)
+  update_freq: [1]         # [SMOKE]
   clip_norm: 1.0
 
 optimizer:
@@ -80,12 +86,43 @@ optimizer:
 
 lr_scheduler:
   _name: cosine
-  warmup_updates: 10
+  warmup_updates: 10       # [SMOKE] from 4000 → 10
 
 model:
   _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.05
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
 
-  # Recon-loss specific fields (added by recon_loss work; not in baseline).
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  require_same_masks: true
+  mask_dropout: 0
+
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  # ---- [SMOKE] recon-loss specific (added by recon_loss work) ----
   recon_only: false
   recon_loss_type: l2
   lambda_recon_fe: 0.0
@@ -98,7 +135,7 @@ model:
   model_path: null
   skip_pretrained_weights: true
 
-  # Init from base_libri (shape-safe; FE may skip, transformer loads compatible layers).
+  # Init from base_libri_official.pt (shape-safe; FE may skip, transformer loads compat layers).
   init_fe_ckpt:          /storage/noy/SpectralFM/fairseq/base_libri_official.pt
   init_ln_ckpt:          /storage/noy/SpectralFM/fairseq/base_libri_official.pt
   init_proj_ckpt:        /storage/noy/SpectralFM/fairseq/base_libri_official.pt
@@ -114,8 +151,7 @@ model:
   freeze_transformer_v2: false
   freeze_trans_recon_decoder: false
 
-  # No composite optimizer here (single Adam); param-group tagging is harmless
-  # but unnecessary, so leave it off.
+  # Single Adam → no composite optimizer → no param_group tagging needed.
   tag_param_groups: false
 
   # Smoke skips the epoch-cosim monitor.
