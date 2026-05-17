@@ -88,7 +88,8 @@ def _maybe_apply_recon_components(model, cfg) -> None:
         bool(getattr(cfg, k, False))
         for k in ("freeze_fe_v2", "freeze_ln", "freeze_proj",
                   "freeze_transformer_v2", "freeze_fe_recon_decoder",
-                  "freeze_trans_recon_decoder")
+                  "freeze_trans_recon_decoder", "freeze_mask_emb",
+                  "freeze_final_proj")
     )
     tag = bool(getattr(cfg, "tag_param_groups", False))
     if not (any_init or any_freeze or tag):
@@ -136,6 +137,18 @@ def _maybe_apply_recon_components(model, cfg) -> None:
             if attr == "feature_extractor":
                 model.feature_grad_mult = 0.0
                 logger.info("  feature_extractor: also set feature_grad_mult=0")
+        if getattr(cfg, "freeze_mask_emb", False) and hasattr(model, "mask_emb"):
+            if model.mask_emb.requires_grad:
+                model.mask_emb.requires_grad = False
+                logger.info("  mask_emb: froze 1 param")
+        if getattr(cfg, "freeze_final_proj", False) and getattr(model, "final_proj", None) is not None:
+            n = 0
+            for p in model.final_proj.parameters():
+                if p.requires_grad:
+                    p.requires_grad = False
+                    n += p.numel()
+            if n:
+                logger.info(f"  final_proj: froze {n:,} params")
 
     if tag:
         n_tagged: Dict[str, int] = {}
@@ -609,6 +622,12 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     )
     freeze_trans_recon_decoder: bool = field(
         default=False, metadata={"help": "Freeze trans_recon_decoder head."},
+    )
+    freeze_mask_emb: bool = field(
+        default=False, metadata={"help": "Freeze mask embedding parameter (mask_emb)."},
+    )
+    freeze_final_proj: bool = field(
+        default=False, metadata={"help": "Freeze final_proj (student head for EMA regression)."},
     )
 
     # --- Param-group tagging for composite optimizer (per-component LR) ---
