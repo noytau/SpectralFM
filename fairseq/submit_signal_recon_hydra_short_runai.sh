@@ -11,7 +11,7 @@
 # Prerequisites on PVC (/storage/noy/SpectralFM):
 #   1) Branch ``recon/2ae-basemerge`` pulled on the cluster (git) OR ``code/`` synced.
 #   2) ``fairseq/base_libri_official.pt`` on PVC.
-#   3) ``fairseq/data/nova_data/single_channel_100/wav`` (~100 wav files).
+#   3) ``fairseq/data/nova_data/single_channel_100`` (dataset ROOT, contains train.tsv + wav/).
 #   4) ``PYTHONPATH`` includes ``/storage/noy/SpectralFM/code`` (for recon_components loaders).
 #   5) WANDB_API_KEY in the image/job env.
 #
@@ -35,6 +35,11 @@ GPU_MEM="${GPU_MEM:-40G}"
 
 BASE_LIBRI="${BASE_LIBRI:-${REPO}/fairseq/base_libri_official.pt}"
 
+# All RunAI data lives under /storage/noy/SpectralFM/fairseq/data/nova_data
+# (NOT /mnt5; /mnt5 is local-only). Always pass task.data via CLI override to
+# guarantee it wins over any inherited YAML default.
+DATA_ROOT="${DATA_ROOT:-${REPO}/fairseq/data/nova_data/single_channel_100}"
+
 submit_one() {
   local STATUS
   STATUS=$(runai list jobs 2>/dev/null | awk -v name="$JOB_NAME" '$1 == name {print $2}' || true)
@@ -53,6 +58,7 @@ submit_one() {
 for f in ${BASE_LIBRI} ${CODE}/recon_components.py ${FAIRSEQ}/examples/data2vec/models/data2vec_audio.py; do \
   [[ -f \"\$f\" ]] || { echo \"ERROR: missing \$f on PVC (git pull recon/2ae-basemerge or kubectl cp code/)\"; exit 2; }; \
 done; \
+[[ -f ${DATA_ROOT}/train.tsv ]] || { echo \"ERROR: missing ${DATA_ROOT}/train.tsv on PVC\"; exit 3; }; \
 cd ${FAIRSEQ} && \
 export PYTHONPATH=${CODE}:${REPO}/fairseq:${REPO}/fairseq/examples CUDA_VISIBLE_DEVICES=0 && \
 conda run --no-capture-output -n ${CONDA_ENV} \
@@ -61,7 +67,8 @@ conda run --no-capture-output -n ${CONDA_ENV} \
   --config-name ${CONFIG_NAME} \
   common.user_dir=${REPO}/fairseq/examples/ \
   distributed_training.distributed_world_size=1 \
-  dataset.disable_validation=true"
+  dataset.disable_validation=true \
+  task.data=${DATA_ROOT}"
 
   echo "Submitting $JOB_NAME  gpu=${GPU_MEM}  pools=${NODE_POOLS}"
   runai submit "$JOB_NAME" \
@@ -74,8 +81,9 @@ conda run --no-capture-output -n ${CONDA_ENV} \
 
 echo "=== Hydra short signal-recon  job=${JOB_NAME} ==="
 echo "W&B project: spectralfm-runai-signal-recon"
-echo "Init: ${BASE_LIBRI}"
-echo "Trainable: transformer + trans_recon_decoder @ lr=1e-5"
+echo "Data root:   ${DATA_ROOT}"
+echo "Init:        ${BASE_LIBRI}"
+echo "Trainable:   transformer + trans_recon_decoder @ lr=1e-5"
 echo ""
 submit_one
 echo "=== Done. Logs: runai logs -f ${JOB_NAME} ==="

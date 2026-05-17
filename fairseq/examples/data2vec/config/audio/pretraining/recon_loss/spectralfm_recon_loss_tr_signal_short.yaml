@@ -20,7 +20,10 @@ checkpoint:
   no_epoch_checkpoints: true
 
 task:
-  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100/wav
+  # IMPORTANT: this is the dataset ROOT (contains train.tsv / valid.tsv),
+  # NOT the wav/ subdir. Fairseq AudioPretrainingTask wants the manifest dir.
+  # On RunAI all nova_data lives under /storage/noy/SpectralFM/fairseq/data/nova_data/.
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100
   max_sample_size: 500
   min_sample_size: 200
 

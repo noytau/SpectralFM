@@ -16,8 +16,29 @@ description: Dataset paths, sizes, WAV structure, and checkpoint locations for S
 | Local | `/mnt5/noy/SpectralFM/fairseq/data/nova_data/` |
 | RunAI | `/storage/noy/SpectralFM/fairseq/data/nova_data/` |
 
+> **RunAI gotcha — do NOT use `/mnt5` paths in any RunAI job, YAML, or `runai exec` command.**
+> Inside RunAI pods `/mnt5` does **not** exist; the PVC is mounted at `/storage`.
+> All datasets, checkpoints, configs, and code referenced by a RunAI run must live under
+> `/storage/noy/SpectralFM/...`. When inheriting a Hydra YAML that has `/mnt5` defaults
+> (e.g. `spectralfm_recon_loss_basemerge.yaml`), override **every** `/mnt5/...` field —
+> `task.data`, `model.init_*_ckpt`, `common.user_dir`, `hydra.run.dir`, `model.epoch_cosim_*`,
+> `checkpoint.save_dir`, etc. Prefer passing `task.data=...` as a CLI override in the
+> submit script so it always wins over inherited YAML defaults.
+
 **WAV subdir convention**: each dataset dir contains a `wav/` (or occasionally `wavs/`) subdirectory with the actual `.wav` files.
 `load_wav_files_torchaudio` auto-detects both — pass the dataset root, not the `wav/` subdir.
+
+**Fairseq `task.data` convention**: for `audio_pretraining` (Hydra), `task.data` is the **manifest directory**
+that contains `train.tsv` (and optionally `valid.tsv`), **not** the `wav/` subdir. The first line of
+`train.tsv` already encodes the wav-root prefix, so just point Hydra at the parent.
+
+| Dataset | RunAI `task.data` (manifest dir) |
+|---|---|
+| `single_channel_100` | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100` |
+| `single_channel_1k`  | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_1k` |
+| `single_channel_10k` | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k` |
+| `single_channel_one` | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_one` |
+| `multi_channel`      | `/storage/noy/SpectralFM/fairseq/data/nova_data/multi_channel` |
 
 ---
 
