@@ -38,7 +38,7 @@ common:
   tensorboard_logdir: tb
   user_dir: /storage/noy/SpectralFM/fairseq/examples/
   wandb_project: "spectralfm-runai-signal-recon"   # [SMOKE]
-  wandb_run_name: "tr_signal_short_lr${optimization.lr[0]}_${get_data_size:${task.data}}_${now:%Y%m%d_%H%M}"
+  wandb_run_name: "tr_signal_short_lr${optimization.lr.0}_${get_data_size:${task.data}}_${now:%Y%m%d_%H%M}"
 
 checkpoint:
   save_interval: 1
