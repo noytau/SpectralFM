@@ -84,13 +84,11 @@ def _maybe_apply_recon_components(model, cfg) -> None:
                   "init_transformer_ckpt", "init_fe_recon_decoder_ckpt",
                   "init_trans_recon_decoder_ckpt")
     )
-    any_freeze = any(
-        bool(getattr(cfg, k, False))
-        for k in ("freeze_fe_v2", "freeze_ln", "freeze_proj",
-                  "freeze_transformer_v2", "freeze_fe_recon_decoder",
-                  "freeze_trans_recon_decoder", "freeze_mask_emb",
-                  "freeze_final_proj")
-    )
+    _FREEZE_KEYS = ("freeze_fe_v2", "freeze_ln", "freeze_proj",
+                    "freeze_transformer_v2", "freeze_fe_recon_decoder",
+                    "freeze_trans_recon_decoder", "freeze_mask_emb",
+                    "freeze_final_proj")
+    any_freeze = any(getattr(cfg, k, None) is not None for k in _FREEZE_KEYS)
     tag = bool(getattr(cfg, "tag_param_groups", False))
     if not (any_init or any_freeze or tag):
         return
@@ -113,42 +111,72 @@ def _maybe_apply_recon_components(model, cfg) -> None:
             getattr(rc, loader_name)(target, p)
 
     if any_freeze:
-        logger.info("[recon_components] per-component freeze:")
+        # Semantics (since the "explicit-unfreeze" patch):
+        #   True  → freeze the component (requires_grad=False; FE → feature_grad_mult=0)
+        #   False → UNFREEZE the component, overriding any prior freezing
+        #           (e.g. cfg.train_only_fe=True → freeze_all_except_feature_extractor()).
+        #   None  → leave whatever requires_grad state the module already has.
+        # This lets a recon_loss YAML say `freeze_transformer_v2: false` to force the
+        # transformer to be trainable even if some earlier code path froze it.
+        logger.info("[recon_components] per-component freeze (True=freeze, False=unfreeze, None=no-op):")
         freezes = {
-            "feature_extractor":    getattr(cfg, "freeze_fe_v2", False),
-            "layer_norm":           getattr(cfg, "freeze_ln", False),
-            "post_extract_proj":    getattr(cfg, "freeze_proj", False),
-            "encoder":              getattr(cfg, "freeze_transformer_v2", False),
-            "fe_recon_decoder":     getattr(cfg, "freeze_fe_recon_decoder", False),
-            "trans_recon_decoder":  getattr(cfg, "freeze_trans_recon_decoder", False),
+            "feature_extractor":    getattr(cfg, "freeze_fe_v2", None),
+            "layer_norm":           getattr(cfg, "freeze_ln", None),
+            "post_extract_proj":    getattr(cfg, "freeze_proj", None),
+            "encoder":              getattr(cfg, "freeze_transformer_v2", None),
+            "fe_recon_decoder":     getattr(cfg, "freeze_fe_recon_decoder", None),
+            "trans_recon_decoder":  getattr(cfg, "freeze_trans_recon_decoder", None),
         }
+        # FE needs special handling because freezing only the params isn't enough;
+        # SpectralFM also scales FE grads via `feature_grad_mult` upstream of the FE.
+        # Remember the user-configured value so we can restore it on explicit-unfreeze.
+        cfg_feature_grad_mult = float(getattr(cfg, "feature_grad_mult", 1.0))
+
         for attr, do_freeze in freezes.items():
-            if not do_freeze:
+            if do_freeze is None:
                 continue
             mod = getattr(model, attr, None)
             if mod is None:
                 continue
-            n = 0
+            want_grad = not bool(do_freeze)
+            n_changed = 0
             for p in mod.parameters():
-                if p.requires_grad:
-                    p.requires_grad = False
-                    n += p.numel()
-            logger.info(f"  {attr}: froze {n:,} params")
+                if p.requires_grad != want_grad:
+                    p.requires_grad = want_grad
+                    n_changed += p.numel()
+            verb = "froze" if do_freeze else "unfroze"
+            logger.info(f"  {attr}: {verb} {n_changed:,} params (now requires_grad={want_grad})")
             if attr == "feature_extractor":
-                model.feature_grad_mult = 0.0
-                logger.info("  feature_extractor: also set feature_grad_mult=0")
-        if getattr(cfg, "freeze_mask_emb", False) and hasattr(model, "mask_emb"):
-            if model.mask_emb.requires_grad:
-                model.mask_emb.requires_grad = False
-                logger.info("  mask_emb: froze 1 param")
-        if getattr(cfg, "freeze_final_proj", False) and getattr(model, "final_proj", None) is not None:
-            n = 0
+                if do_freeze:
+                    model.feature_grad_mult = 0.0
+                    logger.info("  feature_extractor: also set feature_grad_mult=0")
+                else:
+                    model.feature_grad_mult = cfg_feature_grad_mult
+                    logger.info(
+                        f"  feature_extractor: restored feature_grad_mult={cfg_feature_grad_mult}"
+                    )
+
+        mask_emb_freeze = getattr(cfg, "freeze_mask_emb", None)
+        if mask_emb_freeze is not None and hasattr(model, "mask_emb"):
+            want_grad = not bool(mask_emb_freeze)
+            if model.mask_emb.requires_grad != want_grad:
+                model.mask_emb.requires_grad = want_grad
+                verb = "froze" if mask_emb_freeze else "unfroze"
+                logger.info(f"  mask_emb: {verb} 1 param (now requires_grad={want_grad})")
+
+        final_proj_freeze = getattr(cfg, "freeze_final_proj", None)
+        if final_proj_freeze is not None and getattr(model, "final_proj", None) is not None:
+            want_grad = not bool(final_proj_freeze)
+            n_changed = 0
             for p in model.final_proj.parameters():
-                if p.requires_grad:
-                    p.requires_grad = False
-                    n += p.numel()
-            if n:
-                logger.info(f"  final_proj: froze {n:,} params")
+                if p.requires_grad != want_grad:
+                    p.requires_grad = want_grad
+                    n_changed += p.numel()
+            if n_changed:
+                verb = "froze" if final_proj_freeze else "unfroze"
+                logger.info(
+                    f"  final_proj: {verb} {n_changed:,} params (now requires_grad={want_grad})"
+                )
 
     if tag:
         n_tagged: Dict[str, int] = {}
