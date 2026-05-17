@@ -42,27 +42,31 @@ lr_scheduler:
   warmup_updates: 10
   max_update: 100
 
+# NOTE: fairseq/optim/composite.py only consumes `lr_float` at the group level
+# (it ignores `lr:` here). The per-group LR is injected into
+# `optimizer.lr` via `optimizer_config.lr = [group_cfg.lr_float]`.
+# Using lr (not lr_float) silently leaves lr=0 (interpolated from optimization.lr).
 optimizer:
   _name: composite
   groups:
     fe:
-      lr: [1e-5]
+      lr_float: 1.0e-5
       optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
       lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
     ln:
-      lr: [1e-5]
+      lr_float: 1.0e-5
       optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.0}
       lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
     proj:
-      lr: [1e-4]
+      lr_float: 1.0e-4
       optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
       lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
     transformer:
-      lr: [1e-5]
+      lr_float: 1.0e-5
       optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
       lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
     other:
-      lr: [1e-4]
+      lr_float: 1.0e-4
       optimizer: {_name: adam, adam_betas: (0.9,0.98), adam_eps: 1e-06, weight_decay: 0.01}
       lr_scheduler: {_name: cosine, warmup_updates: 10, max_update: 100}
 

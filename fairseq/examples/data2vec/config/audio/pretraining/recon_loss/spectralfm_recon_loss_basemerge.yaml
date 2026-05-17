@@ -72,12 +72,16 @@ optimization:
 
 # Per-component composite optimizer. p.param_group is set by Data2VecAudioModel.build_model
 # (model.tag_param_groups=true), keyed on the natural module-name prefix.
+#
+# IMPORTANT: fairseq/optim/composite.py only consumes ``lr_float`` at the group level
+# (it ignores ``lr:`` here). The per-group LR is injected into ``optimizer.lr`` via
+# ``optimizer_config.lr = [group_cfg.lr_float]``. If you set ``lr:`` instead of ``lr_float``,
+# the optimizer silently runs with lr=0 (interpolated from optimization.lr=[0] above).
 optimizer:
   _name: composite
   groups:
     fe:
-      lr: [1e-5]
-      lr_float: null
+      lr_float: 1.0e-5
       optimizer:
         _name: adam
         adam_betas: (0.9,0.98)
@@ -88,8 +92,7 @@ optimizer:
         warmup_updates: 1000
         max_update: 100000
     ln:
-      lr: [1e-5]
-      lr_float: null
+      lr_float: 1.0e-5
       optimizer:
         _name: adam
         adam_betas: (0.9,0.98)
@@ -100,8 +103,7 @@ optimizer:
         warmup_updates: 1000
         max_update: 100000
     proj:
-      lr: [1e-4]
-      lr_float: null
+      lr_float: 1.0e-4
       optimizer:
         _name: adam
         adam_betas: (0.9,0.98)
@@ -112,8 +114,7 @@ optimizer:
         warmup_updates: 1000
         max_update: 100000
     transformer:
-      lr: [1e-5]
-      lr_float: null
+      lr_float: 1.0e-5
       optimizer:
         _name: adam
         adam_betas: (0.9,0.98)
@@ -124,8 +125,7 @@ optimizer:
         warmup_updates: 1000
         max_update: 100000
     other:
-      lr: [1e-4]
-      lr_float: null
+      lr_float: 1.0e-4
       optimizer:
         _name: adam
         adam_betas: (0.9,0.98)
