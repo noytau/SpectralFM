@@ -405,7 +405,7 @@ def load_data(data_dir, n_samples, device):
 class LazyWavDataset(torch.utils.data.Dataset):
     """Reads from a fairseq-style manifest TSV (root_dir on line 1, then fname\\tsize)."""
 
-    def __init__(self, manifest_path, max_samples=None):
+    def __init__(self, manifest_path, max_samples=None, normalize=False):
         with open(manifest_path) as f:
             self.root = f.readline().strip()
             lines = f.readlines()
@@ -415,6 +415,7 @@ class LazyWavDataset(torch.utils.data.Dataset):
         for ln in lines:
             parts = ln.strip().split("\t")
             self.fnames.append(parts[0])
+        self.normalize = normalize
 
     def __len__(self):
         return len(self.fnames)
@@ -422,7 +423,10 @@ class LazyWavDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         import soundfile as sf
         wav, _ = sf.read(os.path.join(self.root, self.fnames[idx]), dtype="float32")
-        return torch.from_numpy(wav).float()
+        x = torch.from_numpy(wav).float()
+        if self.normalize:
+            x = F.layer_norm(x, x.shape)   # zero-mean unit-std, matches data2vec training
+        return x
 
 
 def exp_tag(args):
@@ -499,6 +503,75 @@ def resolve_micro_batch_accum(n, batch_size, grad_accum_steps):
 #  MODE: train — train autoencoder, save checkpoint
 # ═══════════════════════════════════════════════════════
 
+def _build_save_obj_3ae(
+    *,
+    backbone, head_trans, head_fe, head_proj,
+    args, tag, freeze_map,
+    lambda_trans, lambda_fe, lambda_proj,
+    monitor_fe, monitor_proj,
+    fe_extra, enc_dim, rows, init_manifest,
+    lr_overrides, audit,
+    losses, losses_trans, losses_fe, losses_proj, lrs,
+    ckpt_label, micro_bs, eff_bs,
+    step: int, completed: bool,
+    normalize: bool = False,
+):
+    """Build the canonical save_obj dict for the 3-AE transformer trainer.
+
+    Used by both the final end-of-training save and the periodic rolling
+    ``ckpt_<tag>_last.pt`` save (``--save_every``). ``step`` is the number of
+    optimizer steps completed so far (i.e. ``len(losses)`` at call time);
+    ``completed`` flags whether this is the final save (True) or a rolling
+    intermediate (False).
+    """
+    so = {
+        "recon_path": "transformer",
+        "train_reconstruction_format": 5,
+        "transformer_ae_format": 3,
+        "normalize": normalize,
+        "freeze_map": freeze_map,
+        "lambda_recon_trans": lambda_trans,
+        "lambda_recon_fe":    lambda_fe,
+        "lambda_recon_proj":  lambda_proj,
+        "head_fe_enabled":    head_fe is not None,
+        "head_proj_enabled":  head_proj is not None,
+        "monitor_recon_fe":   monitor_fe,
+        "monitor_recon_proj": monitor_proj,
+        "fe_ckpt": fe_extra or None,
+        "feature_grad_mult_at_save": float(getattr(backbone, "feature_grad_mult", 1.0)),
+        "encoder_embed_dim": enc_dim,
+        "data2vec_audio": backbone.state_dict(),
+        "transformer_mirror": head_trans.state_dict(),
+        "components": rows,
+        "init_manifest": init_manifest,
+        "lr_overrides": {k: float(v) for k, v in lr_overrides.items() if v is not None},
+        "audit_gradient_flow": audit,
+        "losses": list(losses),
+        "losses_trans": list(losses_trans),
+        "losses_fe":    list(losses_fe),
+        "losses_proj":  list(losses_proj),
+        "lrs": list(lrs),
+        "tag": tag,
+        "lr": args.lr,
+        "warmup": args.warmup,
+        "n_samples": args.n_samples,
+        "steps": args.steps,
+        "step_saved": int(step),
+        "completed": bool(completed),
+        "backbone_ckpt": ckpt_label,
+        "batch_size": args.batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "micro_batch_size": micro_bs,
+        "effective_batch_size": eff_bs,
+        "random_init_proj":   bool(getattr(args, "random_init_proj", False)),
+    }
+    if head_fe is not None:
+        so["fe_mirror"] = head_fe.state_dict()
+    if head_proj is not None:
+        so["proj_mirror"] = head_proj.state_dict()
+    return so
+
+
 def _run_train_transformer_autoencoder(args):
     """Train ``Data2VecAudioModel`` + reconstruction head (MSE on first 245 samples).
 
@@ -537,16 +610,28 @@ def _run_train_transformer_autoencoder(args):
         (getattr(args, "init_head_trans_ckpt", None) or "").strip()
         or (getattr(args, "init_head_ckpt", None) or "").strip()
     )
-    init_head_fe_path = (getattr(args, "init_head_fe_ckpt", None) or "").strip()
+    init_head_fe_path   = (getattr(args, "init_head_fe_ckpt",   None) or "").strip()
+    init_head_proj_path = (getattr(args, "init_head_proj_ckpt", None) or "").strip()
 
-    # ── 2b) Decide if head_fe is needed (Option B: enable when user opts in) ──
-    user_set_lambda_fe = getattr(args, "lambda_recon_fe", None) is not None
+    # ── 2b) Decide if head_fe / head_proj are needed (Option B: enable when user opts in) ──
+    user_set_lambda_fe    = getattr(args, "lambda_recon_fe",    None) is not None
     user_set_lambda_trans = getattr(args, "lambda_recon_trans", None) is not None
+    user_set_lambda_proj  = getattr(args, "lambda_recon_proj",  None) is not None
     want_head_fe = (
         bool(init_head_fe_path and init_head_fe_path.lower() != "none")
         or (user_set_lambda_fe and float(args.lambda_recon_fe) > 0)
+        or bool(getattr(args, "monitor_recon_fe", False))
     )
-    head_fe = MirrorDecoder().to(args.device) if want_head_fe else None
+    want_head_proj = (
+        bool(init_head_proj_path and init_head_proj_path.lower() != "none")
+        or (user_set_lambda_proj and float(args.lambda_recon_proj) > 0)
+        or bool(getattr(args, "monitor_recon_proj", False))
+    )
+    head_fe   = MirrorDecoder().to(args.device) if want_head_fe   else None
+    head_proj = (
+        TransformerMirrorDecoder(enc_dim, use_pre_decoder_ln=True).to(args.device)
+        if want_head_proj else None
+    )
 
     # ── 2c) Per-component init from explicit ``--init_*_ckpt`` overrides ──
     init_manifest: dict = {}
@@ -560,10 +645,30 @@ def _run_train_transformer_autoencoder(args):
     ]
     if head_fe is not None:
         init_specs.append(("head_fe", init_head_fe_path, (rc.load_head_from_ckpt, head_fe)))
+    if head_proj is not None:
+        init_specs.append(("head_proj", init_head_proj_path, (rc.load_head_from_ckpt, head_proj)))
     for name, path, (loader, target) in init_specs:
         if not path or path.lower() == "none":
             continue
         init_manifest[name] = loader(target, path)
+
+    # ── 2d) Optional: random-init post_extract_proj AFTER all per-component loads,
+    #       so we can wipe a proj that came in via --ckpt / --init_proj_ckpt.  Useful
+    #       for the 3-AE setup where the transformer comes from a pretrained ckpt
+    #       (e.g. May-18 + base_libri overlay) but the proj must train from scratch.
+    if bool(getattr(args, "random_init_proj", False)):
+        proj_mod = getattr(backbone, "post_extract_proj", None)
+        if proj_mod is None:
+            print("[init] --random_init_proj: backbone.post_extract_proj is None (skipping)")
+        else:
+            n_reset = 0
+            for sub in proj_mod.modules():
+                if hasattr(sub, "reset_parameters") and callable(sub.reset_parameters):
+                    sub.reset_parameters()
+                    n_reset += 1
+            print(f"[init] --random_init_proj: re-initialized post_extract_proj "
+                  f"({type(proj_mod).__name__}, reset {n_reset} submodules)")
+            init_manifest["proj"] = {"source": "random_init_proj=True", "loaded": 0}
 
     # ── 3) Apply freezes (per-component + always-freeze unused submodules) ──
     freeze_unused, unused_names = rc.freeze_unused_d2v_submodules(backbone)
@@ -576,8 +681,9 @@ def _run_train_transformer_autoencoder(args):
         "transformer": bool(getattr(args, "freeze_transformer", False)),
         "head_trans":  bool(getattr(args, "freeze_head_trans", False) or getattr(args, "freeze_head", False)),
         "head_fe":     bool(getattr(args, "freeze_head_fe", False)),
+        "head_proj":   bool(getattr(args, "freeze_head_proj", False)),
     }
-    frozen_comp = rc.apply_freezes(backbone, head_trans, head_fe, freeze=freeze_map)
+    frozen_comp = rc.apply_freezes(backbone, head_trans, head_fe, head_proj, freeze=freeze_map)
     if frozen_comp:
         print(f"[freeze-comp] {frozen_comp}")
     if freeze_map["fe"]:
@@ -587,8 +693,10 @@ def _run_train_transformer_autoencoder(args):
     backbone.train(); head_trans.train()
     if head_fe is not None:
         head_fe.train()
+    if head_proj is not None:
+        head_proj.train()
 
-    # ── 3b) Resolve λ_fe / λ_trans with Option B defaults + auto-zero rules ──
+    # ── 3b) Resolve λ_fe / λ_trans / λ_proj with Option B defaults + auto-zero rules ──
     if user_set_lambda_trans:
         lambda_trans = float(args.lambda_recon_trans)
     else:
@@ -597,8 +705,14 @@ def _run_train_transformer_autoencoder(args):
         lambda_fe = float(args.lambda_recon_fe)
     else:
         lambda_fe = 1.0 if head_fe is not None else 0.0
+    if user_set_lambda_proj:
+        lambda_proj = float(args.lambda_recon_proj)
+    else:
+        lambda_proj = 1.0 if head_proj is not None else 0.0
 
-    # Auto-zero rules (with warnings).
+    # Auto-zero rules (with warnings). A frozen head still contributes 0 gradient,
+    # but we may want to keep the *forward* alive for monitoring; that's gated by
+    # --monitor_recon_{fe,proj} below.
     if lambda_trans > 0 and freeze_map["head_trans"]:
         print(f"[lambda] head_trans is frozen → forcing lambda_recon_trans {lambda_trans} → 0")
         lambda_trans = 0.0
@@ -606,25 +720,37 @@ def _run_train_transformer_autoencoder(args):
         reason = "head_fe not built" if head_fe is None else "head_fe is frozen"
         print(f"[lambda] {reason} → forcing lambda_recon_fe {lambda_fe} → 0")
         lambda_fe = 0.0
-    if lambda_fe == 0.0 and lambda_trans == 0.0:
+    if lambda_proj > 0 and (head_proj is None or freeze_map["head_proj"]):
+        reason = "head_proj not built" if head_proj is None else "head_proj is frozen"
+        print(f"[lambda] {reason} → forcing lambda_recon_proj {lambda_proj} → 0")
+        lambda_proj = 0.0
+    # Monitoring flags: when set AND λ is 0 (frozen / disabled), still run the head
+    # forward under no_grad to log the loss value for evaluation.
+    monitor_fe   = bool(getattr(args, "monitor_recon_fe",   False)) and head_fe   is not None
+    monitor_proj = bool(getattr(args, "monitor_recon_proj", False)) and head_proj is not None
+    if lambda_fe == 0.0 and lambda_trans == 0.0 and lambda_proj == 0.0:
         raise RuntimeError(
-            "Both λ_recon_fe and λ_recon_trans resolved to 0 — no trainable reconstruction loss. "
-            "Set --lambda_recon_trans>0 (and ensure head_trans is not frozen), or pass "
-            "--init_head_fe_ckpt / --lambda_recon_fe>0 with head_fe trainable."
+            "All recon lambdas (trans / fe / proj) resolved to 0 — no trainable reconstruction loss. "
+            "Set --lambda_recon_{trans,fe,proj}>0 and ensure the matching head is not frozen."
         )
-    print(f"[lambda] λ_recon_trans={lambda_trans}  λ_recon_fe={lambda_fe}  (head_fe={'on' if head_fe is not None else 'off'})")
+    print(
+        f"[lambda] λ_recon_trans={lambda_trans}  λ_recon_fe={lambda_fe}  λ_recon_proj={lambda_proj}  "
+        f"(head_fe={'on' if head_fe is not None else 'off'}, "
+        f"head_proj={'on' if head_proj is not None else 'off'}, "
+        f"monitor_fe={monitor_fe}, monitor_proj={monitor_proj})"
+    )
 
     # ── 4) Component summary + dry-run gradient audit ──
-    rows = rc.component_param_summary(backbone, head_trans, head_fe)
+    rows = rc.component_param_summary(backbone, head_trans, head_fe, head_proj)
     rc.print_component_summary(rows, tag=f"trainable components [{tag}]")
     bb_total = sum(p.numel() for p in backbone.parameters())
     bb_train = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
     hd_total = sum(p.numel() for p in head_trans.parameters()) + (
         sum(p.numel() for p in head_fe.parameters()) if head_fe is not None else 0
-    )
+    ) + (sum(p.numel() for p in head_proj.parameters()) if head_proj is not None else 0)
     hd_train = sum(p.numel() for p in head_trans.parameters() if p.requires_grad) + (
         sum(p.numel() for p in head_fe.parameters() if p.requires_grad) if head_fe is not None else 0
-    )
+    ) + (sum(p.numel() for p in head_proj.parameters() if p.requires_grad) if head_proj is not None else 0)
 
     # ── 5) Per-component param groups with optional per-component LR ──
     lr_overrides = {
@@ -635,9 +761,11 @@ def _run_train_transformer_autoencoder(args):
         "head_trans":  getattr(args, "lr_head_trans", None) if getattr(args, "lr_head_trans", None) is not None
                        else getattr(args, "lr_head", None),
         "head_fe":     getattr(args, "lr_head_fe", None),
+        "head_proj":   getattr(args, "lr_head_proj", None),
     }
     param_groups = rc.build_param_groups(
-        backbone, head_trans, head_fe, lr_base=float(args.lr), lr_overrides=lr_overrides
+        backbone, head_trans, head_fe, head_proj,
+        lr_base=float(args.lr), lr_overrides=lr_overrides,
     )
     train_mode_str = "frozen_fe_train_encoder_and_head" if freeze_map["fe"] else "full_data2vec_audio_ae"
     print(f"\n{'='*60}")
@@ -654,8 +782,9 @@ def _run_train_transformer_autoencoder(args):
         print(f"LR schedule: cosine (warmup={args.warmup}, decay to 0; applied per-group)")
 
     use_lazy = args.manifest is not None
+    normalize = getattr(args, "normalize", False)
     if use_lazy:
-        ds = LazyWavDataset(args.manifest, max_samples=args.n_samples)
+        ds = LazyWavDataset(args.manifest, max_samples=args.n_samples, normalize=normalize)
         n = len(ds)
         micro_bs, accum_steps, eff_bs = resolve_micro_batch_accum(
             n, args.batch_size, args.grad_accum_steps
@@ -697,7 +826,8 @@ def _run_train_transformer_autoencoder(args):
         audit = rc.audit_gradient_flow(
             backbone, head_trans, audit_src,
             micro_bs=min(4, audit_src.shape[0]),
-            head_fe=head_fe, lambda_trans=lambda_trans, lambda_fe=lambda_fe,
+            head_fe=head_fe, head_proj=head_proj,
+            lambda_trans=lambda_trans, lambda_fe=lambda_fe, lambda_proj=lambda_proj,
         )
         print(
             f"\n[grad-audit] trainable_with_grad={audit['trainable_with_grad']}  "
@@ -730,9 +860,15 @@ def _run_train_transformer_autoencoder(args):
             "freeze_transformer": freeze_map["transformer"],
             "freeze_head_trans": freeze_map["head_trans"],
             "freeze_head_fe":    freeze_map["head_fe"],
+            "freeze_head_proj":  freeze_map["head_proj"],
             "lambda_recon_trans": lambda_trans,
             "lambda_recon_fe":    lambda_fe,
+            "lambda_recon_proj":  lambda_proj,
             "head_fe_enabled":    head_fe is not None,
+            "head_proj_enabled":  head_proj is not None,
+            "monitor_recon_fe":   monitor_fe,
+            "monitor_recon_proj": monitor_proj,
+            "random_init_proj":   bool(getattr(args, "random_init_proj", False)),
             "fe_ckpt": fe_extra or None,
             "train_reconstruction_format": 3,
             "backbone_ckpt": ckpt_label,
@@ -762,15 +898,22 @@ def _run_train_transformer_autoencoder(args):
             b = next(loader_iter)
         return b.to(args.device)
 
-    # Forward hook on layer_norm to capture fe_seq (post-LN FE) for head_fe, without
-    # re-running the conv FE. Hook only registered when head_fe is enabled.
+    # Forward hooks: capture post-LN FE for head_fe and post-extract-proj for head_proj.
+    # Registered only when the corresponding head is enabled.
     _captured: dict = {}
     def _ln_hook(_mod, _inp, out):
         _captured["fe_seq"] = out
-    _ln_handle = backbone.layer_norm.register_forward_hook(_ln_hook) if head_fe is not None else None
+    def _proj_hook(_mod, _inp, out):
+        _captured["proj_seq"] = out
+    _ln_handle   = backbone.layer_norm.register_forward_hook(_ln_hook)   if head_fe   is not None else None
+    _proj_handle = (
+        backbone.post_extract_proj.register_forward_hook(_proj_hook)
+        if head_proj is not None else None
+    )
 
     losses_trans: list = []
     losses_fe:    list = []
+    losses_proj:  list = []
 
     for step in range(1, args.steps + 1):
         lrs_now = rc.apply_cosine_to_groups(
@@ -784,9 +927,11 @@ def _run_train_transformer_autoencoder(args):
         loss_total_sum = 0.0
         loss_trans_sum = 0.0
         loss_fe_sum    = 0.0
+        loss_proj_sum  = 0.0
         target_var_sum = 0.0
         pred_trans_var_sum = 0.0
         pred_fe_var_sum    = 0.0
+        pred_proj_var_sum  = 0.0
         for _ in range(accum_steps):
             if use_lazy:
                 source_batch = _next_lazy_batch()
@@ -797,6 +942,8 @@ def _run_train_transformer_autoencoder(args):
             backbone.train(); head_trans.train()
             if head_fe is not None:
                 head_fe.train()
+            if head_proj is not None:
+                head_proj.train()
             _captured.clear()
             enc_out = backbone(source_batch, padding_mask=None, mask=False, features_only=True)
 
@@ -819,6 +966,36 @@ def _run_train_transformer_autoencoder(args):
                 micro_loss = micro_loss + lambda_fe * lf
                 loss_fe_sum += float(lf.item())
                 pred_fe_var_sum += float(recon_f.var(dim=-1).mean().item())
+            elif monitor_fe:
+                # Forward-only FE recon for logging when head_fe is frozen / λ=0.
+                fe_seq = _captured.get("fe_seq")
+                if fe_seq is not None:
+                    with torch.no_grad():
+                        recon_f, _ = head_fe(fe_seq.transpose(1, 2).contiguous())
+                        recon_f = recon_f.squeeze(1)
+                        lf = F.mse_loss(recon_f, target)
+                    loss_fe_sum += float(lf.item())
+                    pred_fe_var_sum += float(recon_f.var(dim=-1).mean().item())
+            if lambda_proj > 0 and head_proj is not None:
+                proj_seq = _captured.get("proj_seq")
+                if proj_seq is None:
+                    raise RuntimeError("proj_seq hook did not fire — backbone.post_extract_proj forward path changed?")
+                # proj_seq is [B, T=47, C=enc_dim]; TransformerMirrorDecoder consumes [B, T, C].
+                recon_p, _ = head_proj(proj_seq)
+                recon_p = recon_p.squeeze(1)
+                lp = F.mse_loss(recon_p, target)
+                micro_loss = micro_loss + lambda_proj * lp
+                loss_proj_sum += float(lp.item())
+                pred_proj_var_sum += float(recon_p.var(dim=-1).mean().item())
+            elif monitor_proj:
+                proj_seq = _captured.get("proj_seq")
+                if proj_seq is not None:
+                    with torch.no_grad():
+                        recon_p, _ = head_proj(proj_seq)
+                        recon_p = recon_p.squeeze(1)
+                        lp = F.mse_loss(recon_p, target)
+                    loss_proj_sum += float(lp.item())
+                    pred_proj_var_sum += float(recon_p.var(dim=-1).mean().item())
             target_var_sum += float(target.var(dim=-1).mean().item())
             (micro_loss / accum_steps).backward()
             loss_total_sum += float(micro_loss.item())
@@ -826,13 +1003,16 @@ def _run_train_transformer_autoencoder(args):
         # accum-averaged scalars
         loss_total_avg = loss_total_sum / accum_steps
         loss_trans_avg = loss_trans_sum / accum_steps if lambda_trans > 0 else 0.0
-        loss_fe_avg    = loss_fe_sum    / accum_steps if (lambda_fe > 0 and head_fe is not None) else 0.0
+        loss_fe_avg    = (loss_fe_sum   / accum_steps) if ((lambda_fe   > 0 and head_fe   is not None) or monitor_fe)   else 0.0
+        loss_proj_avg  = (loss_proj_sum / accum_steps) if ((lambda_proj > 0 and head_proj is not None) or monitor_proj) else 0.0
         target_var_avg = target_var_sum / accum_steps
         pred_trans_var_avg = pred_trans_var_sum / accum_steps if lambda_trans > 0 else 0.0
-        pred_fe_var_avg    = pred_fe_var_sum    / accum_steps if (lambda_fe > 0 and head_fe is not None) else 0.0
+        pred_fe_var_avg    = (pred_fe_var_sum   / accum_steps) if ((lambda_fe   > 0 and head_fe   is not None) or monitor_fe)   else 0.0
+        pred_proj_var_avg  = (pred_proj_var_sum / accum_steps) if ((lambda_proj > 0 and head_proj is not None) or monitor_proj) else 0.0
         losses.append(loss_total_avg)
         losses_trans.append(loss_trans_avg)
         losses_fe.append(loss_fe_avg)
+        losses_proj.append(loss_proj_avg)
 
         epoch = step * eff_bs / n
         if wb_run:
@@ -841,6 +1021,7 @@ def _run_train_transformer_autoencoder(args):
                 "train/loss":           loss_total_avg,  # back-compat key
                 "train/lambda_trans":   lambda_trans,
                 "train/lambda_fe":      lambda_fe,
+                "train/lambda_proj":    lambda_proj,
                 "train/target_var":     target_var_avg,
                 "train/lr":             lr_now,
                 "train/epoch":          epoch,
@@ -849,9 +1030,16 @@ def _run_train_transformer_autoencoder(args):
             if lambda_trans > 0:
                 log_d["train/recon_trans_loss"] = loss_trans_avg
                 log_d["train/pred_var_trans"]   = pred_trans_var_avg
-            if lambda_fe > 0 and head_fe is not None:
+            if (lambda_fe > 0 and head_fe is not None) or monitor_fe:
                 log_d["train/recon_fe_loss"]    = loss_fe_avg
                 log_d["train/pred_var_fe"]      = pred_fe_var_avg
+                if monitor_fe and lambda_fe == 0:
+                    log_d["train/recon_fe_loss_monitor"] = loss_fe_avg
+            if (lambda_proj > 0 and head_proj is not None) or monitor_proj:
+                log_d["train/recon_proj_loss"]  = loss_proj_avg
+                log_d["train/pred_var_proj"]    = pred_proj_var_avg
+                if monitor_proj and lambda_proj == 0:
+                    log_d["train/recon_proj_loss_monitor"] = loss_proj_avg
             log_d.update({f"train/lr/{k}": v for k, v in lrs_now.items()})
             if step % 100 == 0 or step == 1:
                 log_d.update(rc.per_component_norms(param_groups))
@@ -864,60 +1052,67 @@ def _run_train_transformer_autoencoder(args):
             parts = [f"L2_total = {loss_total_avg:.6f}"]
             if lambda_trans > 0:
                 parts.append(f"L2_trans = {loss_trans_avg:.6f}")
-            if lambda_fe > 0 and head_fe is not None:
-                parts.append(f"L2_fe = {loss_fe_avg:.6f}")
+            if (lambda_fe > 0 and head_fe is not None) or monitor_fe:
+                tag_fe = "L2_fe(mon)" if (monitor_fe and lambda_fe == 0) else "L2_fe"
+                parts.append(f"{tag_fe} = {loss_fe_avg:.6f}")
+            if (lambda_proj > 0 and head_proj is not None) or monitor_proj:
+                tag_pj = "L2_proj(mon)" if (monitor_proj and lambda_proj == 0) else "L2_proj"
+                parts.append(f"{tag_pj} = {loss_proj_avg:.6f}")
             parts.append(f"lr = {lr_now:.2e}  epoch = {epoch:.1f}")
             print(f"  step {step:5d}/{args.steps}  " + "  ".join(parts))
 
+        save_every = int(getattr(args, "save_every", 0) or 0)
+        if save_every > 0 and step % save_every == 0 and step < args.steps:
+            last_path = str(Path(args.out_dir) / f"ckpt_{tag}_last.pt")
+            tmp_path  = last_path + ".tmp"
+            save_obj_rolling = _build_save_obj_3ae(
+                backbone=backbone, head_trans=head_trans, head_fe=head_fe, head_proj=head_proj,
+                args=args, tag=tag, freeze_map=freeze_map,
+                lambda_trans=lambda_trans, lambda_fe=lambda_fe, lambda_proj=lambda_proj,
+                monitor_fe=monitor_fe, monitor_proj=monitor_proj,
+                fe_extra=fe_extra, enc_dim=enc_dim, rows=rows, init_manifest=init_manifest,
+                lr_overrides=lr_overrides, audit=audit,
+                losses=losses, losses_trans=losses_trans, losses_fe=losses_fe, losses_proj=losses_proj,
+                lrs=lrs, ckpt_label=ckpt_label, micro_bs=micro_bs, eff_bs=eff_bs,
+                step=step, completed=False, normalize=normalize,
+            )
+            torch.save(save_obj_rolling, tmp_path)
+            os.replace(tmp_path, last_path)
+            print(f"  [save] step {step:5d}/{args.steps} -> {last_path}")
+            if wb_run:
+                wb_run.log({"ckpt/last_step": step, "ckpt/last_path": last_path}, step=step)
+
     if _ln_handle is not None:
         _ln_handle.remove()
+    if _proj_handle is not None:
+        _proj_handle.remove()
 
     ckpt_path = str(Path(args.out_dir) / f"ckpt_{tag}.pt")
-    save_obj = {
-        "recon_path": "transformer",
-        "train_reconstruction_format": 4,
-        "transformer_ae_format": 3,
-        "freeze_map": freeze_map,
-        "lambda_recon_trans": lambda_trans,
-        "lambda_recon_fe":    lambda_fe,
-        "head_fe_enabled":    head_fe is not None,
-        "fe_ckpt": fe_extra or None,
-        "feature_grad_mult_at_save": float(getattr(backbone, "feature_grad_mult", 1.0)),
-        "encoder_embed_dim": enc_dim,
-        "data2vec_audio": backbone.state_dict(),
-        "transformer_mirror": head_trans.state_dict(),
-        "components": rows,
-        "init_manifest": init_manifest,
-        "lr_overrides": {k: float(v) for k, v in lr_overrides.items() if v is not None},
-        "audit_gradient_flow": audit,
-        "losses": losses,
-        "losses_trans": losses_trans,
-        "losses_fe":    losses_fe,
-        "lrs": lrs,
-        "tag": tag,
-        "lr": args.lr,
-        "warmup": args.warmup,
-        "n_samples": args.n_samples,
-        "steps": args.steps,
-        "backbone_ckpt": ckpt_label,
-        "batch_size": args.batch_size,
-        "grad_accum_steps": args.grad_accum_steps,
-        "micro_batch_size": micro_bs,
-        "effective_batch_size": eff_bs,
-    }
-    if head_fe is not None:
-        save_obj["fe_mirror"] = head_fe.state_dict()
+    save_obj = _build_save_obj_3ae(
+        backbone=backbone, head_trans=head_trans, head_fe=head_fe, head_proj=head_proj,
+        args=args, tag=tag, freeze_map=freeze_map,
+        lambda_trans=lambda_trans, lambda_fe=lambda_fe, lambda_proj=lambda_proj,
+        monitor_fe=monitor_fe, monitor_proj=monitor_proj,
+        fe_extra=fe_extra, enc_dim=enc_dim, rows=rows, init_manifest=init_manifest,
+        lr_overrides=lr_overrides, audit=audit,
+        losses=losses, losses_trans=losses_trans, losses_fe=losses_fe, losses_proj=losses_proj,
+        lrs=lrs, ckpt_label=ckpt_label, micro_bs=micro_bs, eff_bs=eff_bs,
+        step=len(losses), completed=True, normalize=normalize,
+    )
     torch.save(save_obj, ckpt_path)
     print(f"\nCheckpoint saved to {ckpt_path}")
     print(f"Final train L2 (total): {losses[-1]:.6f}"
           + (f"  trans={losses_trans[-1]:.6f}" if lambda_trans > 0 else "")
-          + (f"  fe={losses_fe[-1]:.6f}" if (lambda_fe > 0 and head_fe is not None) else ""))
+          + (f"  fe={losses_fe[-1]:.6f}"       if ((lambda_fe   > 0 and head_fe   is not None) or monitor_fe)   else "")
+          + (f"  proj={losses_proj[-1]:.6f}"   if ((lambda_proj > 0 and head_proj is not None) or monitor_proj) else ""))
     if wb_run:
         final_log = {"train/final_loss": losses[-1]}
         if lambda_trans > 0:
             final_log["train/final_recon_trans_loss"] = losses_trans[-1]
-        if lambda_fe > 0 and head_fe is not None:
+        if (lambda_fe > 0 and head_fe is not None) or monitor_fe:
             final_log["train/final_recon_fe_loss"] = losses_fe[-1]
+        if (lambda_proj > 0 and head_proj is not None) or monitor_proj:
+            final_log["train/final_recon_proj_loss"] = losses_proj[-1]
         wb_run.log(final_log)
         wb_run.finish()
 
@@ -1616,6 +1811,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--warmup", type=int, default=0,
                         help="Linear warmup steps for cosine LR schedule (0=constant LR)")
+    parser.add_argument(
+        "--save_every", type=int, default=0,
+        help="Save a rolling ckpt_<tag>_last.pt to --out_dir every N optimizer steps "
+             "(0 = only the final ckpt at end of training). Currently honored by the "
+             "transformer-AE training path (--recon_path transformer).",
+    )
     parser.add_argument("--k", type=int, default=5, help="Number of samples to plot in analyze mode")
     parser.add_argument("--datasets", default=None,
                         help="Comma-separated dataset names for analyze mode "
@@ -1623,6 +1824,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_stat", type=int, default=100,
                         help="Number of samples for statistical evaluation per dataset")
     parser.add_argument("--out_dir", default="autoencoder_experiments")
+    parser.add_argument("--normalize", action="store_true",
+                        help="Apply F.layer_norm per sample at load time (zero-mean unit-std, "
+                             "matching data2vec training preprocessing)")
     parser.add_argument("--wandb_project", default=None, help="W&B project name (omit to disable)")
     parser.add_argument(
         "--wandb_run_name",
@@ -1670,6 +1874,13 @@ if __name__ == "__main__":
                         help="TransformerMirrorDecoder (head_trans) source: transformer_mirror or FE-AE decoder dict.")
     g_init.add_argument("--init_head_fe_ckpt",     default=None,
                         help="MirrorDecoder (head_fe) source: FE-AE decoder dict or transformer_mirror.decoder.")
+    g_init.add_argument("--init_head_proj_ckpt",   default=None,
+                        help="TransformerMirrorDecoder (head_proj) source: transformer_mirror or "
+                             "FE-AE decoder dict. head_proj reads post-extract-proj features (B,T,enc_dim).")
+    g_init.add_argument("--random_init_proj", action="store_true",
+                        help="After all --ckpt / --init_*_ckpt loads, reset backbone.post_extract_proj to "
+                             "random init. Useful when --ckpt brings in a trained proj you want to discard "
+                             "(e.g. 3-AE: keep transformer + FE/LN from ckpt, but proj must train from scratch).")
 
     # ── Per-component freezing (transformer path) ──
     g_fr = parser.add_argument_group("Per-component freeze")
@@ -1683,6 +1894,8 @@ if __name__ == "__main__":
                       help="freeze transformer-output reconstruction head (head_trans).")
     g_fr.add_argument("--freeze_head_fe",     action="store_true",
                       help="freeze post-LN FE reconstruction head (head_fe). Auto-zeroes lambda_recon_fe.")
+    g_fr.add_argument("--freeze_head_proj",   action="store_true",
+                      help="freeze post-extract-proj reconstruction head (head_proj). Auto-zeroes lambda_recon_proj.")
 
     # ── Per-component LR overrides (transformer path) ──
     g_lr = parser.add_argument_group(
@@ -1698,6 +1911,7 @@ if __name__ == "__main__":
                       help="DEPRECATED alias for --lr_head_trans (kept for back-compat).")
     g_lr.add_argument("--lr_head_trans",  type=float, default=None)
     g_lr.add_argument("--lr_head_fe",     type=float, default=None)
+    g_lr.add_argument("--lr_head_proj",   type=float, default=None)
 
     # ── Reconstruction loss weights (transformer path; FE path always uses recon_fe) ──
     g_loss = parser.add_argument_group(
@@ -1710,6 +1924,13 @@ if __name__ == "__main__":
                         help="Weight for the post-LN FE recon loss (head_fe). None = Option B default.")
     g_loss.add_argument("--lambda_recon_trans", type=float, default=None,
                         help="Weight for the transformer-output recon loss (head_trans). None = Option B default.")
+    g_loss.add_argument("--lambda_recon_proj",  type=float, default=None,
+                        help="Weight for the post-extract-proj recon loss (head_proj). None = Option B default "
+                             "(=1.0 if head_proj enabled, else 0.0).")
+    g_loss.add_argument("--monitor_recon_fe",   action="store_true",
+                        help="Run head_fe forward under no_grad for logging when lambda_recon_fe=0 / head_fe is frozen.")
+    g_loss.add_argument("--monitor_recon_proj", action="store_true",
+                        help="Run head_proj forward under no_grad for logging when lambda_recon_proj=0 / head_proj is frozen.")
 
     args = parser.parse_args()
     _configure_single_gpu(args.device)

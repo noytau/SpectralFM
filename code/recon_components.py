@@ -322,13 +322,16 @@ def load_head_from_ckpt(head, ckpt_path: str) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 def _component_modules(
-    backbone, head_trans, head_fe: Optional[nn.Module] = None
+    backbone, head_trans, head_fe: Optional[nn.Module] = None,
+    head_proj: Optional[nn.Module] = None,
 ) -> List[Tuple[str, nn.Module]]:
     """Stable (name, module) list for the transformer-AE setup.
 
     ``head_trans`` is the existing :class:`TransformerMirrorDecoder` (transformer-output
     head). ``head_fe`` is the optional second :class:`MirrorDecoder` that branches off
-    post-LN FE features when ``lambda_recon_fe > 0`` (the 2-AE setup).
+    post-LN FE features when ``lambda_recon_fe > 0`` (the 2-AE setup). ``head_proj``
+    is an optional third :class:`TransformerMirrorDecoder` that branches off the
+    post-extract-proj output (post_extract_proj → mirror decoder) for the 3-AE setup.
     """
     comps: List[Tuple[str, nn.Module]] = [
         ("fe",          backbone.feature_extractor),
@@ -339,6 +342,8 @@ def _component_modules(
     ]
     if head_fe is not None:
         comps.append(("head_fe", head_fe))
+    if head_proj is not None:
+        comps.append(("head_proj", head_proj))
     return comps
 
 
@@ -382,14 +387,14 @@ def freeze_unused_d2v_submodules(backbone) -> Tuple[int, List[str]]:
 
 
 def apply_freezes(
-    backbone, head_trans, head_fe=None, *, freeze: Dict[str, bool]
+    backbone, head_trans, head_fe=None, head_proj=None, *, freeze: Dict[str, bool]
 ) -> Dict[str, int]:
     """Freeze components by name; returns per-component frozen-param counts.
 
-    Accepts ``head`` (legacy) or ``head_trans``/``head_fe`` keys in ``freeze``.
+    Accepts ``head`` (legacy) or ``head_trans``/``head_fe``/``head_proj`` keys in ``freeze``.
     """
     out: Dict[str, int] = {}
-    comps = dict(_component_modules(backbone, head_trans, head_fe))
+    comps = dict(_component_modules(backbone, head_trans, head_fe, head_proj))
     # Back-compat: map legacy "head" → "head_trans".
     freeze = dict(freeze)
     if "head" in freeze and "head_trans" not in freeze:
@@ -416,7 +421,7 @@ def apply_freezes(
 # ────────────────────────────────────────────────────────────────────────────
 
 def build_param_groups(
-    backbone, head_trans, head_fe=None, *, lr_base: float,
+    backbone, head_trans, head_fe=None, head_proj=None, *, lr_base: float,
     lr_overrides: Dict[str, Optional[float]],
 ) -> List[dict]:
     """Build Adam param groups, one per component, skipping all-frozen modules.
@@ -429,7 +434,7 @@ def build_param_groups(
     if "head" in lr_overrides and "head_trans" not in lr_overrides:
         lr_overrides["head_trans"] = lr_overrides.pop("head")
     groups: List[dict] = []
-    for name, mod in _component_modules(backbone, head_trans, head_fe):
+    for name, mod in _component_modules(backbone, head_trans, head_fe, head_proj):
         params = [p for p in mod.parameters() if p.requires_grad]
         if not params:
             continue
@@ -461,10 +466,10 @@ def apply_cosine_to_groups(
 #  Audit: who's trainable, who's actually receiving gradients
 # ────────────────────────────────────────────────────────────────────────────
 
-def component_param_summary(backbone, head_trans, head_fe=None) -> List[dict]:
+def component_param_summary(backbone, head_trans, head_fe=None, head_proj=None) -> List[dict]:
     """One row per component: total / trainable / frozen / pct_trainable."""
     rows: List[dict] = []
-    for name, mod in _component_modules(backbone, head_trans, head_fe):
+    for name, mod in _component_modules(backbone, head_trans, head_fe, head_proj):
         total = sum(p.numel() for p in mod.parameters())
         train = sum(p.numel() for p in mod.parameters() if p.requires_grad)
         rows.append({
@@ -489,30 +494,41 @@ def print_component_summary(rows: List[dict], *, tag: str = "components") -> Non
 
 def audit_gradient_flow(
     backbone, head_trans, source_template: torch.Tensor, *,
-    micro_bs: int = 4, head_fe=None, lambda_trans: float = 1.0,
-    lambda_fe: float = 0.0,
+    micro_bs: int = 4, head_fe=None, head_proj=None,
+    lambda_trans: float = 1.0, lambda_fe: float = 0.0, lambda_proj: float = 0.0,
 ) -> dict:
     """Run a single forward+backward on a tiny batch and check which trainable
     parameters actually received gradients.
 
-    Mirrors the production loss formula: ``λ_trans · recon_trans + λ_fe · recon_fe``
+    Mirrors the production loss formula:
+        ``λ_trans · recon_trans + λ_fe · recon_fe + λ_proj · recon_proj``
     with the FE branch taking post-LN features via a forward hook on
-    ``backbone.layer_norm``.
+    ``backbone.layer_norm`` and the proj branch taking post-extract-proj features
+    via a forward hook on ``backbone.post_extract_proj``.
     """
     import torch.nn.functional as F
     bb_was = backbone.training
     ht_was = head_trans.training
     hf_was = head_fe.training if head_fe is not None else None
+    hp_was = head_proj.training if head_proj is not None else None
     backbone.train(); head_trans.train()
     if head_fe is not None:
         head_fe.train()
+    if head_proj is not None:
+        head_proj.train()
     src = source_template[:micro_bs].clone().detach().to(next(head_trans.parameters()).device)
     target = src[:, :245].float()
 
     captured: Dict[str, torch.Tensor] = {}
     def _ln_hook(_mod, _inp, out):
         captured["fe_seq"] = out
-    h = backbone.layer_norm.register_forward_hook(_ln_hook) if head_fe is not None else None
+    def _proj_hook(_mod, _inp, out):
+        captured["proj_seq"] = out
+    h_ln   = backbone.layer_norm.register_forward_hook(_ln_hook) if head_fe is not None else None
+    h_proj = (
+        backbone.post_extract_proj.register_forward_hook(_proj_hook)
+        if head_proj is not None else None
+    )
     try:
         out = backbone(src, padding_mask=None, mask=False, features_only=True)
         loss = torch.zeros((), device=src.device)
@@ -523,11 +539,17 @@ def audit_gradient_flow(
             fe_seq = captured["fe_seq"]
             recon_f, _ = head_fe(fe_seq.transpose(1, 2))
             loss = loss + lambda_fe * F.mse_loss(recon_f.squeeze(1), target)
+        if lambda_proj > 0 and head_proj is not None and "proj_seq" in captured:
+            proj_seq = captured["proj_seq"]
+            recon_p, _ = head_proj(proj_seq)
+            loss = loss + lambda_proj * F.mse_loss(recon_p.squeeze(1), target)
         if loss.requires_grad:
             loss.backward()
     finally:
-        if h is not None:
-            h.remove()
+        if h_ln is not None:
+            h_ln.remove()
+        if h_proj is not None:
+            h_proj.remove()
 
     no_grad_named: List[Tuple[str, int]] = []
     yes_grad_named: List[Tuple[str, int]] = []
@@ -536,6 +558,8 @@ def audit_gradient_flow(
     ]
     if head_fe is not None:
         iterables += [(f"head_fe.{n}", p) for n, p in head_fe.named_parameters()]
+    if head_proj is not None:
+        iterables += [(f"head_proj.{n}", p) for n, p in head_proj.named_parameters()]
     for n, p in iterables:
         if not p.requires_grad:
             continue
@@ -546,9 +570,13 @@ def audit_gradient_flow(
     backbone.zero_grad(set_to_none=True); head_trans.zero_grad(set_to_none=True)
     if head_fe is not None:
         head_fe.zero_grad(set_to_none=True)
+    if head_proj is not None:
+        head_proj.zero_grad(set_to_none=True)
     backbone.train(bb_was); head_trans.train(ht_was)
     if head_fe is not None and hf_was is not None:
         head_fe.train(hf_was)
+    if head_proj is not None and hp_was is not None:
+        head_proj.train(hp_was)
     return {
         "trainable_with_grad": len(yes_grad_named),
         "trainable_without_grad": len(no_grad_named),
