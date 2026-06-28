@@ -34,9 +34,11 @@ BASE_LIBRI_CKPT="${BASE_LIBRI_CKPT:-${REPO}/fairseq/base_libri_official.pt}"
 # Warm-start heads from best exp2 long checkpoint
 EXP2_LONG_CKPT="${EXP2_LONG_CKPT:-${REPO}/checkpoints/recon_runs_copied/3ae_norm_exp2_long.pt}"
 
-# Data
-MANIFEST="${MANIFEST:-${REPO}/fairseq/data/nova_data/single_channel_100/train.tsv}"
-N_SAMPLES="${N_SAMPLES:-100}"
+# Data  (long=1k, short=100)
+MANIFEST_LONG="${MANIFEST_LONG:-${REPO}/fairseq/data/nova_data/single_channel_1k_with_valid/train.tsv}"
+MANIFEST_SHORT="${MANIFEST_SHORT:-${REPO}/fairseq/data/nova_data/single_channel_100/train.tsv}"
+MANIFEST="${MANIFEST:-${MANIFEST_LONG}}"
+N_SAMPLES="${N_SAMPLES:-990}"
 
 OUT_PARENT="${OUT_PARENT:-${REPO}/fairseq/outputs/signal_recon_tv_fe}"
 STAMP="$(date -u +%Y%m%d_%H%M%SZ)"
@@ -45,10 +47,10 @@ NODE_POOLS="${NODE_POOLS:-faculty,raja}"
 GPU_MEM="${GPU_MEM:-40G}"
 WANDB_PROJECT="${WANDB_PROJECT:-spectralfm-runai-signal-recon-tv-fe}"
 
-STEPS="${STEPS:-1000}"
-WARMUP="${WARMUP:-100}"
-BATCH="${BATCH:-128}"
-GA="${GA:-2}"
+STEPS="${STEPS:-5000}"
+WARMUP="${WARMUP:-500}"
+BATCH="${BATCH:-512}"
+GA="${GA:-1}"
 LR="${LR:-1e-4}"
 LAMBDA_TV_FE="${LAMBDA_TV_FE:-0.1}"
 
@@ -101,7 +103,7 @@ conda run --no-capture-output -n ${CONDA_ENV} python3 \"\$TR\" \
     --init_fe_ckpt      ${APR28_CKPT} \
     --init_ln_ckpt      ${APR28_CKPT} \
     --init_transformer_ckpt ${BASE_LIBRI_CKPT} \
-    --random_init_proj \
+    --init_proj_ckpt    ${EXP2_LONG_CKPT} \
     --freeze_fe_v2 --freeze_ln --freeze_proj --freeze_transformer \
     --init_head_fe_ckpt    ${EXP2_LONG_CKPT} \
     --init_head_proj_ckpt  ${EXP2_LONG_CKPT} \
