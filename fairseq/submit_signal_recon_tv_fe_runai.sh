@@ -32,7 +32,7 @@ APR28_CKPT="${APR28_CKPT:-${REPO}/fairseq/apr28_fe_recon_best.pt}"
 BASE_LIBRI_CKPT="${BASE_LIBRI_CKPT:-${REPO}/fairseq/base_libri_official.pt}"
 
 # Warm-start heads from best exp2 long checkpoint
-EXP2_LONG_CKPT="${EXP2_LONG_CKPT:-${REPO}/fairseq/checkpoints/recon_runs_copied/3ae_norm_exp2_long.pt}"
+EXP2_LONG_CKPT="${EXP2_LONG_CKPT:-${REPO}/checkpoints/recon_runs_copied/3ae_norm_exp2_long.pt}"
 
 # Data
 MANIFEST="${MANIFEST:-${REPO}/fairseq/data/nova_data/single_channel_100/train.tsv}"
