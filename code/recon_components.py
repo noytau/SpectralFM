@@ -271,16 +271,20 @@ def _count_block_layers(sd: dict, prefix: str) -> int:
 
 # ── Head (TransformerMirrorDecoder) ────────────────────────────────────────
 
-def load_head_from_ckpt(head, ckpt_path: str) -> dict:
+def load_head_from_ckpt(head, ckpt_path: str, preferred_key: str = "") -> dict:
     """Load a reconstruction head (``TransformerMirrorDecoder`` or ``MirrorDecoder``).
 
     Recognised source layouts (auto-detect by key prefix on the *flat* state dict
     produced by :func:`_read_state_dict`):
 
       * ``transformer_mirror.*``  → train_reconstruction.py transformer-AE checkpoint
-      * ``fe_mirror.*``           → train_reconstruction.py 2-AE checkpoint (head_fe)
+      * ``proj_mirror.*``         → train_reconstruction.py 3-AE checkpoint (head_proj)
+      * ``fe_mirror.*``           → train_reconstruction.py 2-AE / 3-AE checkpoint (head_fe)
       * ``decoder.*``             → Apr-28 FE-AE checkpoint (encoder/layer_norm/decoder)
                                     or transformer-AE inner ``transformer_mirror.decoder.*``
+
+    ``preferred_key`` (e.g. ``"proj_mirror"``) is tried first when provided, so callers
+    can disambiguate heads with identical architectures (head_trans vs head_proj).
     """
     sd_full = _read_state_dict(ckpt_path)
     if not sd_full:
@@ -291,9 +295,13 @@ def load_head_from_ckpt(head, ckpt_path: str) -> dict:
     tgt_keys = set(head.state_dict().keys())
     has_stem = any(k.startswith("stem.") for k in tgt_keys)
     candidates = []
+    # If caller supplies a preferred key, try it first.
+    if preferred_key:
+        candidates += [(f"{preferred_key}.", preferred_key)]
     if has_stem:
         # TransformerMirrorDecoder: prefer fully-prefixed head sources.
         candidates += [("transformer_mirror.", "transformer_mirror"),
+                       ("proj_mirror.",        "proj_mirror"),
                        ("fe_mirror.",          "fe_mirror")]
     else:
         # MirrorDecoder: bare "layers.*" keys in 3AE format (fe_mirror.*),

@@ -648,12 +648,12 @@ def _run_train_transformer_autoencoder(args):
         ("ln",          init_ln := (getattr(args, "init_ln_ckpt", None) or "").strip(),          (rc.load_layer_norm_from_ckpt,        backbone)),
         ("proj",        init_pj := (getattr(args, "init_proj_ckpt", None) or "").strip(),        (rc.load_post_extract_proj_from_ckpt, backbone)),
         ("transformer", init_tr := (getattr(args, "init_transformer_ckpt", None) or "").strip(), (rc.load_transformer_from_ckpt,       backbone)),
-        ("head_trans",  init_head_trans_path,                                                    (rc.load_head_from_ckpt,              head_trans)),
+        ("head_trans",  init_head_trans_path, (lambda m, p: rc.load_head_from_ckpt(m, p, preferred_key="transformer_mirror"), head_trans)),
     ]
     if head_fe is not None:
-        init_specs.append(("head_fe", init_head_fe_path, (rc.load_head_from_ckpt, head_fe)))
+        init_specs.append(("head_fe",   init_head_fe_path,   (lambda m, p: rc.load_head_from_ckpt(m, p, preferred_key="fe_mirror"),           head_fe)))
     if head_proj is not None:
-        init_specs.append(("head_proj", init_head_proj_path, (rc.load_head_from_ckpt, head_proj)))
+        init_specs.append(("head_proj", init_head_proj_path, (lambda m, p: rc.load_head_from_ckpt(m, p, preferred_key="proj_mirror"),         head_proj)))
     for name, path, (loader, target) in init_specs:
         if not path or path.lower() == "none":
             continue
