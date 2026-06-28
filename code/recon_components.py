@@ -296,9 +296,10 @@ def load_head_from_ckpt(head, ckpt_path: str) -> dict:
         candidates += [("transformer_mirror.", "transformer_mirror"),
                        ("fe_mirror.",          "fe_mirror")]
     else:
-        # MirrorDecoder: keys live under "decoder.*" in saved heads,
-        # or are bare "layers.*" in the FE-AE format.
-        candidates += [("fe_mirror.decoder.",          "fe_mirror.decoder"),
+        # MirrorDecoder: bare "layers.*" keys in 3AE format (fe_mirror.*),
+        # or under "decoder.*" sub-keys in transformer_mirror, or FE-AE format.
+        candidates += [("fe_mirror.",              "fe_mirror"),
+                       ("fe_mirror.decoder.",      "fe_mirror.decoder"),
                        ("transformer_mirror.decoder.", "transformer_mirror.decoder"),
                        ("decoder.",                    "decoder (FE-AE format)")]
 
