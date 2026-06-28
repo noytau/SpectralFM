@@ -155,7 +155,8 @@ def load_layer_norm_from_ckpt(model, ckpt_path: str) -> dict:
 # ── post_extract_proj (512 -> encoder_embed_dim) ───────────────────────────
 
 def _proj_subdict(sd: dict) -> Tuple[dict, str]:
-    for prefix in ("post_extract_proj.", "modality_encoders.AUDIO.project_features.2."):
+    for prefix in ("post_extract_proj.", "data2vec_audio.post_extract_proj.",
+                   "modality_encoders.AUDIO.project_features.2."):
         sub = _strip_prefix(sd, prefix)
         if sub:
             return sub, prefix
