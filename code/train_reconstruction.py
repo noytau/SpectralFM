@@ -455,6 +455,13 @@ def cosine_lr(step, total_steps, warmup_steps, peak_lr):
     return peak_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
+def _tv_loss(x: "torch.Tensor") -> "torch.Tensor":
+    """Mean absolute first-order difference along the time axis (L1-TV).
+    x: [B, T]  →  scalar.  TV = mean_B mean_{t=1..T-1} |x_{t} - x_{t-1}|
+    """
+    return (x[:, 1:] - x[:, :-1]).abs().mean()
+
+
 def _configure_single_gpu(device: str) -> None:
     """Pin the default CUDA device for single-GPU training (no DataParallel / DDP)."""
     if not str(device).startswith("cuda") or not torch.cuda.is_available():
@@ -709,6 +716,7 @@ def _run_train_transformer_autoencoder(args):
         lambda_proj = float(args.lambda_recon_proj)
     else:
         lambda_proj = 1.0 if head_proj is not None else 0.0
+    lambda_tv_fe = float(getattr(args, "lambda_tv_fe", 0.0))
 
     # Auto-zero rules (with warnings). A frozen head still contributes 0 gradient,
     # but we may want to keep the *forward* alive for monitoring; that's gated by
@@ -925,9 +933,10 @@ def _run_train_transformer_autoencoder(args):
 
         optimizer.zero_grad()
         loss_total_sum = 0.0
-        loss_trans_sum = 0.0
-        loss_fe_sum    = 0.0
-        loss_proj_sum  = 0.0
+        loss_trans_sum  = 0.0
+        loss_fe_sum     = 0.0
+        loss_fe_tv_sum  = 0.0
+        loss_proj_sum   = 0.0
         target_var_sum = 0.0
         pred_trans_var_sum = 0.0
         pred_fe_var_sum    = 0.0
@@ -962,9 +971,12 @@ def _run_train_transformer_autoencoder(args):
                 # fe_seq is [B, T=47, C=512]; MirrorDecoder wants [B, C, T].
                 recon_f, _ = head_fe(fe_seq.transpose(1, 2).contiguous())
                 recon_f = recon_f.squeeze(1)
-                lf = F.mse_loss(recon_f, target)
+                lf_mse = F.mse_loss(recon_f, target)
+                lf_tv  = _tv_loss(recon_f) if lambda_tv_fe > 0.0 else 0.0
+                lf     = lf_mse + lambda_tv_fe * lf_tv
                 micro_loss = micro_loss + lambda_fe * lf
-                loss_fe_sum += float(lf.item())
+                loss_fe_sum += float(lf_mse.item())
+                loss_fe_tv_sum += float(lf_tv.item() if lambda_tv_fe > 0.0 else 0.0)
                 pred_fe_var_sum += float(recon_f.var(dim=-1).mean().item())
             elif monitor_fe:
                 # Forward-only FE recon for logging when head_fe is frozen / λ=0.
@@ -1003,7 +1015,8 @@ def _run_train_transformer_autoencoder(args):
         # accum-averaged scalars
         loss_total_avg = loss_total_sum / accum_steps
         loss_trans_avg = loss_trans_sum / accum_steps if lambda_trans > 0 else 0.0
-        loss_fe_avg    = (loss_fe_sum   / accum_steps) if ((lambda_fe   > 0 and head_fe   is not None) or monitor_fe)   else 0.0
+        loss_fe_avg    = (loss_fe_sum    / accum_steps) if ((lambda_fe   > 0 and head_fe   is not None) or monitor_fe) else 0.0
+        loss_fe_tv_avg = (loss_fe_tv_sum / accum_steps) if (lambda_fe   > 0 and lambda_tv_fe > 0.0)                    else 0.0
         loss_proj_avg  = (loss_proj_sum / accum_steps) if ((lambda_proj > 0 and head_proj is not None) or monitor_proj) else 0.0
         target_var_avg = target_var_sum / accum_steps
         pred_trans_var_avg = pred_trans_var_sum / accum_steps if lambda_trans > 0 else 0.0
@@ -1035,6 +1048,9 @@ def _run_train_transformer_autoencoder(args):
                 log_d["train/pred_var_fe"]      = pred_fe_var_avg
                 if monitor_fe and lambda_fe == 0:
                     log_d["train/recon_fe_loss_monitor"] = loss_fe_avg
+                if lambda_tv_fe > 0.0:
+                    log_d["train/recon_fe_tv_loss"] = loss_fe_tv_avg
+                    log_d["train/lambda_tv_fe"]     = lambda_tv_fe
             if (lambda_proj > 0 and head_proj is not None) or monitor_proj:
                 log_d["train/recon_proj_loss"]  = loss_proj_avg
                 log_d["train/pred_var_proj"]    = pred_proj_var_avg
@@ -1055,6 +1071,8 @@ def _run_train_transformer_autoencoder(args):
             if (lambda_fe > 0 and head_fe is not None) or monitor_fe:
                 tag_fe = "L2_fe(mon)" if (monitor_fe and lambda_fe == 0) else "L2_fe"
                 parts.append(f"{tag_fe} = {loss_fe_avg:.6f}")
+                if lambda_tv_fe > 0.0:
+                    parts.append(f"TV_fe = {loss_fe_tv_avg:.6f}")
             if (lambda_proj > 0 and head_proj is not None) or monitor_proj:
                 tag_pj = "L2_proj(mon)" if (monitor_proj and lambda_proj == 0) else "L2_proj"
                 parts.append(f"{tag_pj} = {loss_proj_avg:.6f}")
@@ -1927,6 +1945,9 @@ if __name__ == "__main__":
     g_loss.add_argument("--lambda_recon_proj",  type=float, default=None,
                         help="Weight for the post-extract-proj recon loss (head_proj). None = Option B default "
                              "(=1.0 if head_proj enabled, else 0.0).")
+    g_loss.add_argument("--lambda_tv_fe", type=float, default=0.0,
+                        help="Total-variation regularisation weight for head_fe output (0 = off). "
+                             "TV = mean |x_{t+1} - x_t| over the 245-sample reconstruction.")
     g_loss.add_argument("--monitor_recon_fe",   action="store_true",
                         help="Run head_fe forward under no_grad for logging when lambda_recon_fe=0 / head_fe is frozen.")
     g_loss.add_argument("--monitor_recon_proj", action="store_true",
