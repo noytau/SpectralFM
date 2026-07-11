@@ -321,6 +321,222 @@ def _plot_structured_similarity_maps(results: dict, output_dir: str, label: str 
     return [(f"Cosine similarity maps — {run_name}", path)]
 
 
+def _plot_label_regression_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
+    """
+    Label regression bars across checkpoints.
+    Exact recreation of eval_label_regression._plot_label_regression:
+    Panel 1: input vs embedding R² grouped bars; Panel 2: ΔR² green/red bars.
+    """
+    needed = {"label_reg_input_r2", "label_reg_emb_r2", "label_reg_improvement_r2"}
+    if not needed.issubset(cdf.columns):
+        return []
+
+    labels = cdf["checkpoint"].tolist()
+    r2_in  = cdf["label_reg_input_r2"].fillna(0.0).tolist()
+    r2_emb = cdf["label_reg_emb_r2"].fillna(0.0).tolist()
+    delta  = cdf["label_reg_improvement_r2"].fillna(0.0).tolist()
+    n = len(labels)
+    x = np.arange(n)
+    w = 0.35
+
+    fig, axes = plt.subplots(1, 2, figsize=(max(10, n * 3), 5))
+    fig.suptitle("Label Regression — Ridge Probe (parameter_0)", fontsize=13, fontweight="bold")
+
+    # Panel 1: side-by-side R²
+    ax = axes[0]
+    b1 = ax.bar(x - w / 2, r2_in, w, color="#90CAF9", edgecolor="white", label="Input R²")
+    b2 = ax.bar(x + w / 2, r2_emb, w, color="#1565C0", edgecolor="white", label="Embedding R²")
+    for bar, v in zip(b1, r2_in):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
+                f"{v:.4f}", ha="center", va="bottom", fontsize=8, color="#555")
+    for bar, v in zip(b2, r2_emb):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
+                f"{v:.4f}", ha="center", va="bottom", fontsize=8, color="#1565C0", fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
+    ax.set_ylabel("R²")
+    ax.set_title("Input vs Embedding R²")
+    ax.legend(fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.axhline(0, color="black", linewidth=0.5)
+
+    # Panel 2: ΔR²
+    ax2 = axes[1]
+    colors = ["#2E7D32" if d > 0 else "#C62828" for d in delta]
+    bars = ax2.bar(x, delta, 0.5, color=colors, edgecolor="white")
+    for bar, v in zip(bars, delta):
+        y_off = 0.001 if v >= 0 else -0.003
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + y_off,
+                 f"{v:+.4f}", ha="center", va="bottom" if v >= 0 else "top",
+                 fontsize=9, fontweight="bold")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
+    ax2.set_ylabel("ΔR² (embedding − input)")
+    ax2.set_title("Improvement over Raw Input")
+    ax2.axhline(0, color="black", linewidth=1)
+    ax2.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    path = _save_fig(fig, os.path.join(output_dir, "label_regression_comparison.png"))
+    return [("Label regression — ridge probe (parameter_0)", path, "")]
+
+
+def _plot_noise_robustness_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
+    """
+    Noise robustness grouped bars across checkpoints.
+    Recreation of evaluation_runner.plot_noise_robustness_comparison panel 1
+    (embedding similarity per noise type). The robustness-ratio panel is omitted:
+    the new eval does not measure data-space stability.
+    """
+    noise_cols = [c for c in cdf.columns if c.startswith("noise_")]
+    if not noise_cols:
+        return []
+
+    run_labels = cdf["checkpoint"].tolist()
+    x = np.arange(len(run_labels))
+    width = 0.8 / len(noise_cols)
+
+    fig, ax = plt.subplots(figsize=(max(10, len(run_labels) * 3), 5))
+    for i, col in enumerate(noise_cols):
+        ax.bar(x + i * width, cdf[col].fillna(0.0), width, label=col.replace("noise_", ""))
+
+    ax.set_xlabel("Run")
+    ax.set_ylabel("Embedding Similarity (higher = more robust)")
+    ax.set_title("Noise Robustness: Embedding Similarity")
+    ax.set_xticks(x + width * (len(noise_cols) - 1) / 2)
+    ax.set_xticklabels(run_labels, rotation=45, ha="right")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    path = _save_fig(fig, os.path.join(output_dir, "noise_robustness_comparison.png"))
+    return [("Noise robustness — embedding similarity per noise type", path, "")]
+
+
+def _plot_signal_completion_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
+    """
+    Signal completion bars across checkpoints (cosine similarity at masked positions).
+    Adapted from evaluation_runner.plot_signal_completion_comparison — the new eval
+    has a single span-masking strategy instead of four.
+    """
+    if "completion_cos_sim" not in cdf.columns:
+        return []
+
+    run_labels = cdf["checkpoint"].tolist()
+    x = np.arange(len(run_labels))
+
+    fig, axes = plt.subplots(1, 2, figsize=(max(10, len(run_labels) * 3), 5))
+
+    axes[0].bar(x, cdf["completion_cos_sim"].fillna(0.0), 0.5, color=_ACCENT)
+    axes[0].set_xlabel("Run")
+    axes[0].set_ylabel("Cosine Similarity (higher = better completion)")
+    axes[0].set_title("Signal Completion: Embedding Similarity at Masked Positions")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(run_labels, rotation=45, ha="right")
+    axes[0].grid(alpha=0.3)
+    axes[0].set_ylim(0, 1)
+
+    if "completion_mse" in cdf.columns:
+        axes[1].bar(x, cdf["completion_mse"].fillna(0.0), 0.5, color="#c98a2c")
+        axes[1].set_xlabel("Run")
+        axes[1].set_ylabel("MSE at Masked Positions")
+        axes[1].set_title("Signal Completion: MSE")
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(run_labels, rotation=45, ha="right")
+        axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    path = _save_fig(fig, os.path.join(output_dir, "signal_completion_comparison.png"))
+    return [("Signal completion across checkpoints", path, "")]
+
+
+def _plot_signal_completion_histogram(comp_results: dict, output_dir: str, label: str = "") -> list:
+    """
+    Per-checkpoint histogram of per-sample completion cosine similarities.
+    Exact recreation of evaluation_runner.plot_signal_completion_histogram styling
+    (steelblue bins, red mean line, gray zero line, xlim [-1, 1]).
+    """
+    rdf = comp_results.get("results_df")
+    if rdf is None or rdf.empty or "cos_sim" not in rdf.columns:
+        return []
+
+    suffix   = f"_{label}" if label else ""
+    run_name = label or "checkpoint"
+    values   = rdf["cos_sim"].dropna().values
+    if len(values) == 0:
+        return []
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    fig.suptitle(f"Signal Completion Analysis - Run: {run_name}", fontsize=12, fontweight="bold")
+    ax.hist(values, bins=20, alpha=0.7, color="steelblue", edgecolor="darkblue")
+    ax.axvline(x=values.mean(), color="red", linestyle="-", linewidth=2,
+               label=f"Mean ({values.mean():.3f})")
+    ax.axvline(x=0, color="gray", linestyle="--", linewidth=1, label="Zero")
+    ax.set_xlabel("Cosine Similarity")
+    ax.set_ylabel("Frequency")
+    ax.set_title(f"span mask (mean: {values.mean():.3f})")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    ax.set_xlim(-1, 1)
+
+    plt.tight_layout()
+    path = _save_fig(fig, os.path.join(output_dir, f"signal_completion_hist{suffix}.png"))
+    return [(f"Signal completion histogram — {run_name}", path)]
+
+
+def _plot_clustering_scatter(clust_results: dict, output_dir: str, label: str = "") -> list:
+    """
+    Per-checkpoint KMeans cluster scatter in t-SNE (and UMAP if installed) space.
+    Exact recreation of compute_stats.cluster_vectors visualisation:
+    PCA(50) → t-SNE/UMAP(2), seaborn scatterplot, hls palette, s=50, no legend.
+    """
+    import seaborn as sns
+    from sklearn.decomposition import PCA
+    from sklearn.manifold import TSNE
+
+    embeddings  = clust_results.get("embeddings")
+    pred_labels = clust_results.get("pred_labels")
+    if embeddings is None or pred_labels is None:
+        return []
+
+    suffix     = f"_{label}" if label else ""
+    run_name   = label or "checkpoint"
+    n_clusters = len(np.unique(pred_labels))
+    figures    = []
+
+    vectors_np = np.asarray(embeddings)
+    # PCA to speed up t-SNE
+    n_comp = min(50, vectors_np.shape[0] - 1, vectors_np.shape[1])
+    pca_embeddings = PCA(n_components=n_comp).fit_transform(vectors_np)
+
+    palette = sns.color_palette("hls", n_colors=n_clusters)
+
+    projections = []
+    tsne_emb = TSNE(n_components=2, random_state=42).fit_transform(pca_embeddings)
+    projections.append(("tSNE", tsne_emb))
+    try:
+        import umap
+        umap_emb = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42).fit_transform(pca_embeddings)
+        projections.append(("UMAP", umap_emb))
+    except ImportError:
+        pass
+
+    for proj_name, emb2d in projections:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.scatterplot(x=emb2d[:, 0], y=emb2d[:, 1], hue=pred_labels,
+                        palette=palette, s=50, legend=False, ax=ax)
+        ax.set_title(f"KMeans Clustering (on embeddings), Visualized in {proj_name} — n={n_clusters}\n{run_name}")
+        ax.set_xlabel(f"{proj_name}-1")
+        ax.set_ylabel(f"{proj_name}-2")
+        ax.grid(True)
+        plt.tight_layout()
+        fname = f"kmeans_clustered_then_{proj_name.lower()}{suffix}.png"
+        path = _save_fig(fig, os.path.join(output_dir, fname))
+        figures.append((f"KMeans clusters in {proj_name} space — {run_name}", path))
+
+    return figures
+
+
 def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
     """
     Returns a list of (caption, path, checkpoint_label) triples.
@@ -356,13 +572,28 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
             path = _save_fig(fig, os.path.join(output_dir, "checkpoint_comparison.png"))
             figures.append(("Scalar metrics across checkpoints", path, ""))
 
-    # ── Per-checkpoint: structured similarity 4-panel only ───────────────────
+        # ── Summary: per-method comparison figures ────────────────────────────
+        figures += _plot_noise_robustness_comparison(cdf, output_dir)
+        figures += _plot_signal_completion_comparison(cdf, output_dir)
+        figures += _plot_label_regression_comparison(cdf, output_dir)
+
+    # ── Per-checkpoint figures ────────────────────────────────────────────────
     if per_cp:
         for cp_label, cp_res in per_cp.items():
             ss = cp_res.get("structured_similarity", {})
             if ss:
                 ss_figs = _plot_structured_similarity_maps(ss, output_dir, label=cp_label)
                 figures += [(cap, path, cp_label) for cap, path in ss_figs]
+
+            clust = cp_res.get("clustering", {})
+            if clust:
+                cl_figs = _plot_clustering_scatter(clust, output_dir, label=cp_label)
+                figures += [(cap, path, cp_label) for cap, path in cl_figs]
+
+            comp = cp_res.get("signal_completion", {})
+            if comp and not comp.get("skipped"):
+                sc_figs = _plot_signal_completion_histogram(comp, output_dir, label=cp_label)
+                figures += [(cap, path, cp_label) for cap, path in sc_figs]
 
     return figures
 

@@ -55,6 +55,13 @@ def run(
         embeddings=embeddings, component_ids=stack_ids, inputs=inputs, k=k
     )
 
+    # KMeans labels for the t-SNE/UMAP scatter plots (same params as the metric)
+    pred_labels = None
+    if "comp_cluster_error" not in metrics:
+        from sklearn.cluster import KMeans
+        km = KMeans(n_clusters=len(np.unique(stack_ids)), random_state=42, n_init=10)
+        pred_labels = km.fit_predict(embeddings)
+
     if "comp_cluster_error" not in metrics:
         print(f"[Clustering] n_clusters={metrics['comp_cluster_n_components']}  "
               f"ARI={metrics['comp_cluster_ari']:.4f}  "
@@ -67,4 +74,5 @@ def run(
         **metrics,
         "embeddings": embeddings,
         "true_labels": stack_ids,
+        "pred_labels": pred_labels,
     }
