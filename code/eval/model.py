@@ -123,6 +123,105 @@ class CompletionHead(nn.Module):
         return self.linear(x)
 
 
+class SingleLayerPosConv(nn.Module):
+    """
+    fairseq wav2vec2-style positional conv: one weight-normed Conv1d + SamePad + GELU.
+    Drop-in replacement for HF Data2VecAudioPositionalConvEmbedding (5-layer stack)
+    when the checkpoint was trained with conv_pos=<kernel>, conv_pos_groups=<groups>
+    (checkpoint keys: encoder.pos_conv.0.weight_g / weight_v / bias).
+    """
+
+    def __init__(self, dim: int = 768, kernel: int = 128, groups: int = 16):
+        super().__init__()
+        conv = nn.Conv1d(dim, dim, kernel_size=kernel, padding=kernel // 2, groups=groups)
+        self.conv = nn.utils.weight_norm(conv, name="weight", dim=2)
+        self.remove = 1 if kernel % 2 == 0 else 0
+        self.act = nn.GELU()
+
+    def forward(self, hidden_states):
+        """[B, T, C] → [B, T, C] positional embeddings (matches HF pos_conv_embed contract)."""
+        x = hidden_states.transpose(1, 2)
+        x = self.conv(x)
+        if self.remove > 0:
+            x = x[:, :, : -self.remove]
+        x = self.act(x)
+        return x.transpose(1, 2)
+
+
+# ─── Mirror decoder: reverse of FE conv layers ───
+# Encoder (FE):  [(512,3,1)]×4 + [(512,5,5)]  245→47
+# Decoder (mirror): ConvT layers reversing each stage, 47→245.
+# Ported verbatim from train_reconstruction.py (reconstruction-loss-experiments).
+
+class MirrorDecoder(nn.Module):
+    """ConvTranspose1d decoder mirroring the FE's 5-layer CNN in reverse."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=5, stride=5, output_padding=2),
+                nn.LayerNorm(237),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1),
+                nn.LayerNorm(239),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1),
+                nn.LayerNorm(241),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1),
+                nn.LayerNorm(243),
+                nn.GELU(),
+            ),
+            nn.ConvTranspose1d(512, 1, kernel_size=3, stride=1),
+        ])
+
+    def forward(self, x):
+        """x: [B, 512, 47] → [B, 1, 245]"""
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class TransformerMirrorDecoder(nn.Module):
+    """Map transformer encoder output ``[B, T, C]`` → spectrogram ``[B, 1, 245]``.
+
+    1×1 conv ``C→512`` → optional ``LayerNorm(512)`` over time → ``MirrorDecoder``.
+    ``T`` must match the subsampled FE length (47 for the default 245-bin conv stack).
+    Ported verbatim from train_reconstruction.py.
+    """
+
+    def __init__(
+        self,
+        encoder_embed_dim: int = 768,
+        mid_channels: int = 512,
+        use_pre_decoder_ln: bool = True,
+    ):
+        super().__init__()
+        self.encoder_embed_dim = int(encoder_embed_dim)
+        self.mid_channels = int(mid_channels)
+        self.stem = nn.Conv1d(self.encoder_embed_dim, self.mid_channels, kernel_size=1, bias=True)
+        self.pre_decoder_ln = (
+            nn.LayerNorm(self.mid_channels) if use_pre_decoder_ln else None
+        )
+        self.decoder = MirrorDecoder()
+
+    def forward(self, x_bt_c):
+        """``x_bt_c``: ``[B, T, C]`` encoder output → ``[B, 245]``."""
+        x = x_bt_c.transpose(1, 2).contiguous()   # [B, C, T]
+        x = self.stem(x)                           # [B, 512, T]
+        if self.pre_decoder_ln is not None:
+            x = self.pre_decoder_ln(x.transpose(1, 2)).transpose(1, 2)
+        x = self.decoder(x)                        # [B, 1, 245]
+        return x.squeeze(1)
+
+
 def build_model(hf_model, arch: str = "conv1d", with_completion_head: bool = False):
     """
     Attach custom components to a HuggingFace Data2VecAudioModel.

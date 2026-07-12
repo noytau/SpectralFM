@@ -17,7 +17,6 @@ from . import embedding_similarity as emb_eval
 from . import noise_robustness as noise_eval
 from . import structured_similarity as struct_eval
 from . import clustering as clust_eval
-from . import signal_completion as completion_eval
 from . import label_regression as labelreg_eval
 
 
@@ -28,7 +27,6 @@ def run(
     device: str = "cpu",
     run_noise: bool = True,
     run_clustering: bool = True,
-    run_completion: bool = True,
     run_label_regression: bool = True,
     k: int = 5,
     nova_data_dir: Optional[str] = None,
@@ -90,17 +88,6 @@ def run(
                 row["clustering_silhouette"] = clust_results.get("comp_cluster_silhouette")
             except Exception as e:
                 print(f"[CheckpointComparison] Clustering skipped: {e}")
-
-        if run_completion:
-            try:
-                comp_results = completion_eval.run(
-                    df=df, model=model, dataloader=dataloader, device=device
-                )
-                checkpoint_results["signal_completion"] = comp_results
-                row["completion_cos_sim"] = comp_results.get("completion_cos_sim")
-                row["completion_mse"] = comp_results.get("completion_mse")
-            except Exception as e:
-                print(f"[CheckpointComparison] Signal completion skipped: {e}")
 
         if run_label_regression and labeled_data_dir and os.path.isdir(labeled_data_dir):
             try:

@@ -171,38 +171,99 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     return figures
 
 
-def _plot_signal_completion(results: dict, output_dir: str) -> list:
+def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
+    """
+    True signal reconstruction figures, styled after compare_fe_vs_trans_recon.py:
+      1. Per-sample overlay panel — target (black) + FE recon (blue) / TR recon (red),
+         one column per available pathway, y-axis fixed to target range per row.
+      2. Per-sample MSE bars (log scale) comparing the pathways.
+    """
     figures = []
     if results.get("skipped"):
         return figures
-    rdf = results.get("results_df")
-    if rdf is None:
+
+    panel = results.get("panel") or {}
+    target  = panel.get("target")
+    indices = panel.get("indices") or []
+    names   = panel.get("names") or []
+    rdf     = results.get("results_df")
+
+    _PATHWAY_STYLE = [
+        ("fe",   "FE recon",          "#1f77b4"),
+        ("proj", "Projection recon",  "#2ca02c"),
+        ("tr",   "Transformer recon", "#d62728"),
+    ]
+    pathways = [
+        (label, panel[f"pred_{key}"], color, f"{key}_mse")
+        for key, label, color in _PATHWAY_STYLE
+        if panel.get(f"pred_{key}") is not None
+    ]
+    if target is None or not pathways:
         return figures
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.hist(rdf["mse"], bins=30, color="coral", alpha=0.85)
-    ax.axvline(rdf["mse"].mean(), color="darkred", linestyle="--",
-               label=f"Mean = {rdf['mse'].mean():.4f}")
-    ax.set_xlabel("MSE")
-    ax.set_ylabel("Count")
-    ax.set_title("Signal Completion: MSE Distribution")
-    ax.legend()
-    path = _save_fig(fig, os.path.join(output_dir, "signal_completion_mse.png"))
-    figures.append(("Signal completion MSE distribution", path))
+    n = len(indices)
+    T = target.shape[1]
+    fig, axes = plt.subplots(n, len(pathways), figsize=(6.5 * len(pathways), 1.9 * n),
+                             squeeze=False)
+    for r in range(n):
+        tgt = target[r]
+        pad = 0.1 * max(tgt.max() - tgt.min(), 0.1)
+        ylo, yhi = tgt.min() - pad, tgt.max() + pad
+        for c, (pw_label, pred, color, mse_col) in enumerate(pathways):
+            ax = axes[r, c]
+            ax.plot(tgt, color="black", lw=1.6, label="target", alpha=0.9)
+            ax.plot(pred[r], color=color, lw=1.1, label=pw_label, alpha=0.9)
+            ax.set_xlim(0, T - 1)
+            ax.set_ylim(ylo, yhi)
+            ax.tick_params(labelsize=6, labelleft=(c == 0))
+            if c == 0:
+                ax.set_ylabel(f"idx {indices[r]}", fontsize=9, rotation=0, ha="right", labelpad=22)
+            mse_val = ""
+            if rdf is not None and mse_col in rdf.columns:
+                mse_val = f"    MSE = {rdf[rdf['index'] == indices[r]][mse_col].iloc[0]:.2e}"
+            title = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
+            ax.set_title(title, fontsize=7, loc="left")
+            if r == 0:
+                ax.legend(fontsize=7, loc="upper right")
 
-    for label, sub in [("best", rdf.nsmallest(3, "mse")), ("worst", rdf.nlargest(3, "mse"))]:
-        fig, axes = plt.subplots(1, len(sub), figsize=(5 * len(sub), 3))
-        if len(sub) == 1:
-            axes = [axes]
-        for ax, (_, row) in zip(axes, sub.iterrows()):
-            ax.plot(row["inputs"],    label="Original",  linestyle="--", alpha=0.7)
-            ax.plot(row["masked"],    label="Masked",    linestyle=":",  alpha=0.7)
-            ax.plot(row["predicted"], label="Predicted", linewidth=1.5)
-            ax.set_title(f"MSE = {row['mse']:.4f}")
-            ax.legend(fontsize=7)
-        fig.suptitle(f"Signal Completion: {label.upper()} samples")
-        path = _save_fig(fig, os.path.join(output_dir, f"signal_completion_{label}.png"))
-        figures.append((f"Signal completion {label} samples", path))
+    mean_bits = [
+        f"{label} mean MSE = {results[f'recon_{key}_mse_mean']:.3e}"
+        for key, label, _ in _PATHWAY_STYLE
+        if f"recon_{key}_mse_mean" in results
+    ]
+    fig.suptitle(
+        "Signal Reconstruction — per-pathway (FE / projection / transformer)\n"
+        + "   |   ".join(mean_bits)
+        + f"\nnormalize={results.get('normalize')}   "
+        "(y-axis fixed to target range per row; predictions outside are clipped)",
+        fontsize=9, y=1.0,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    path = _save_fig(fig, os.path.join(output_dir, "recon_overlay.png"))
+    figures.append(("Reconstruction overlay — target vs per-pathway recon", path))
+
+    # Per-sample MSE bars (log scale), one bar group per pathway present
+    bar_cols = [(label, color, mse_col) for label, _, color, mse_col in pathways
+                if rdf is not None and mse_col in rdf.columns]
+    if bar_cols:
+        sub = rdf[rdf["index"].isin(indices)]
+        x = np.arange(len(sub))
+        w = 0.8 / len(bar_cols)
+        fig, ax = plt.subplots(figsize=(9, 4))
+        for j, (label, color, mse_col) in enumerate(bar_cols):
+            offset = (j - (len(bar_cols) - 1) / 2) * w
+            ax.bar(x + offset, sub[mse_col], w, color=color,
+                   label=f"{label}  (mean {rdf[mse_col].mean():.2e})")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"idx {i}" for i in sub["index"]], fontsize=8)
+        ax.set_ylabel("per-sample MSE", fontsize=9)
+        ax.set_yscale("log")
+        ax.grid(True, alpha=0.3, which="both", axis="y")
+        ax.legend(fontsize=8)
+        ax.set_title("Per-sample reconstruction MSE — per pathway", fontsize=10)
+        fig.tight_layout()
+        path = _save_fig(fig, os.path.join(output_dir, "recon_mse_bars.png"))
+        figures.append(("Per-sample reconstruction MSE", path))
 
     return figures
 
@@ -381,107 +442,94 @@ def _plot_label_regression_comparison(cdf: pd.DataFrame, output_dir: str) -> lis
     return [("Label regression — ridge probe (parameter_0)", path, "")]
 
 
+def _shorten_label(label: str, max_len: int = 28) -> str:
+    """Shorten a long checkpoint label for axis ticks (keep head + tail)."""
+    if len(label) <= max_len:
+        return label
+    half = (max_len - 1) // 2
+    return label[:half] + "…" + label[-half:]
+
+
 def _plot_noise_robustness_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
     """
     Noise robustness grouped bars across checkpoints.
     Recreation of evaluation_runner.plot_noise_robustness_comparison panel 1
-    (embedding similarity per noise type). The robustness-ratio panel is omitted:
-    the new eval does not measure data-space stability.
+    (embedding similarity per noise type). Legend sits outside the axes and
+    checkpoint labels are shortened so nothing overlaps the title.
     """
     noise_cols = [c for c in cdf.columns if c.startswith("noise_")]
     if not noise_cols:
         return []
 
-    run_labels = cdf["checkpoint"].tolist()
+    run_labels = [_shorten_label(l) for l in cdf["checkpoint"].tolist()]
     x = np.arange(len(run_labels))
     width = 0.8 / len(noise_cols)
 
-    fig, ax = plt.subplots(figsize=(max(10, len(run_labels) * 3), 5))
+    fig, ax = plt.subplots(figsize=(max(8, len(run_labels) * 2.5 + 3), 4.5))
     for i, col in enumerate(noise_cols):
         ax.bar(x + i * width, cdf[col].fillna(0.0), width, label=col.replace("noise_", ""))
 
-    ax.set_xlabel("Run")
-    ax.set_ylabel("Embedding Similarity (higher = more robust)")
-    ax.set_title("Noise Robustness: Embedding Similarity")
+    ax.set_ylabel("Embedding Similarity (higher = more robust)", fontsize=9)
+    ax.set_title("Noise Robustness: Embedding Similarity", fontsize=11)
     ax.set_xticks(x + width * (len(noise_cols) - 1) / 2)
-    ax.set_xticklabels(run_labels, rotation=45, ha="right")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    ax.set_xticklabels(run_labels, rotation=20, ha="right", fontsize=8)
+    ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+    ax.grid(alpha=0.3, axis="y")
+    ax.set_ylim(0, 1.05)
 
-    plt.tight_layout()
+    fig.tight_layout()
     path = _save_fig(fig, os.path.join(output_dir, "noise_robustness_comparison.png"))
     return [("Noise robustness — embedding similarity per noise type", path, "")]
 
 
-def _plot_signal_completion_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
+def _plot_noise_example_grid(noise_results: dict, output_dir: str, label: str = "",
+                             sample_idx: int | None = None) -> list:
     """
-    Signal completion bars across checkpoints (cosine similarity at masked positions).
-    Adapted from evaluation_runner.plot_signal_completion_comparison — the new eval
-    has a single span-masking strategy instead of four.
+    Noise Example Grid — one cell per noise type showing the clean vs noisy input
+    signal together with that noise type's embedding similarity.
+    Style restored from compute_stats.plot_noisy_vs_clean_spectrogram (clean=black,
+    noisy overlay, per-cell title), laid out as a 2×3 grid over all 6 noise types.
     """
-    if "completion_cos_sim" not in cdf.columns:
+    rdf   = noise_results.get("results_df")
+    clean = noise_results.get("clean_data")
+    noisy = noise_results.get("noisy_data") or {}
+    if rdf is None or rdf.empty or clean is None or not noisy:
         return []
 
-    run_labels = cdf["checkpoint"].tolist()
-    x = np.arange(len(run_labels))
-
-    fig, axes = plt.subplots(1, 2, figsize=(max(10, len(run_labels) * 3), 5))
-
-    axes[0].bar(x, cdf["completion_cos_sim"].fillna(0.0), 0.5, color=_ACCENT)
-    axes[0].set_xlabel("Run")
-    axes[0].set_ylabel("Cosine Similarity (higher = better completion)")
-    axes[0].set_title("Signal Completion: Embedding Similarity at Masked Positions")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(run_labels, rotation=45, ha="right")
-    axes[0].grid(alpha=0.3)
-    axes[0].set_ylim(0, 1)
-
-    if "completion_mse" in cdf.columns:
-        axes[1].bar(x, cdf["completion_mse"].fillna(0.0), 0.5, color="#c98a2c")
-        axes[1].set_xlabel("Run")
-        axes[1].set_ylabel("MSE at Masked Positions")
-        axes[1].set_title("Signal Completion: MSE")
-        axes[1].set_xticks(x)
-        axes[1].set_xticklabels(run_labels, rotation=45, ha="right")
-        axes[1].grid(alpha=0.3)
-
-    plt.tight_layout()
-    path = _save_fig(fig, os.path.join(output_dir, "signal_completion_comparison.png"))
-    return [("Signal completion across checkpoints", path, "")]
-
-
-def _plot_signal_completion_histogram(comp_results: dict, output_dir: str, label: str = "") -> list:
-    """
-    Per-checkpoint histogram of per-sample completion cosine similarities.
-    Exact recreation of evaluation_runner.plot_signal_completion_histogram styling
-    (steelblue bins, red mean line, gray zero line, xlim [-1, 1]).
-    """
-    rdf = comp_results.get("results_df")
-    if rdf is None or rdf.empty or "cos_sim" not in rdf.columns:
+    noise_types = [c for c in rdf.columns if c in noisy]
+    if not noise_types:
         return []
+
+    # Representative sample: median embedding similarity on the first noise type
+    if sample_idx is None:
+        first = rdf[noise_types[0]]
+        sample_idx = int((first - first.median()).abs().idxmin())
 
     suffix   = f"_{label}" if label else ""
     run_name = label or "checkpoint"
-    values   = rdf["cos_sim"].dropna().values
-    if len(values) == 0:
-        return []
+    n_cols = 3
+    n_rows = (len(noise_types) + n_cols - 1) // n_cols
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    fig.suptitle(f"Signal Completion Analysis - Run: {run_name}", fontsize=12, fontweight="bold")
-    ax.hist(values, bins=20, alpha=0.7, color="steelblue", edgecolor="darkblue")
-    ax.axvline(x=values.mean(), color="red", linestyle="-", linewidth=2,
-               label=f"Mean ({values.mean():.3f})")
-    ax.axvline(x=0, color="gray", linestyle="--", linewidth=1, label="Zero")
-    ax.set_xlabel("Cosine Similarity")
-    ax.set_ylabel("Frequency")
-    ax.set_title(f"span mask (mean: {values.mean():.3f})")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    ax.set_xlim(-1, 1)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.6 * n_rows), squeeze=False)
+    fig.suptitle(f"Noise Example Grid — idx {sample_idx} — {run_name}",
+                 fontsize=12, fontweight="bold")
 
-    plt.tight_layout()
-    path = _save_fig(fig, os.path.join(output_dir, f"signal_completion_hist{suffix}.png"))
-    return [(f"Signal completion histogram — {run_name}", path)]
+    for i, nt in enumerate(noise_types):
+        ax = axes[i // n_cols][i % n_cols]
+        ax.plot(clean[sample_idx], label="Clean", color="black", linewidth=1.2)
+        ax.plot(noisy[nt][sample_idx], label=nt.replace("_", " "), alpha=0.8)
+        emb_sim = rdf.iloc[sample_idx][nt]
+        ax.set_title(f"{nt.replace('_', ' ')} | emb sim = {emb_sim:.4f}", fontsize=9)
+        ax.set_xlabel("Time / Frequency bins", fontsize=8)
+        ax.set_ylabel("Amplitude", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7)
+    for j in range(len(noise_types), n_rows * n_cols):
+        axes[j // n_cols][j % n_cols].axis("off")
+
+    fig.tight_layout()
+    path = _save_fig(fig, os.path.join(output_dir, f"noise_example_grid{suffix}.png"))
+    return [(f"Noise example grid — {run_name}", path)]
 
 
 def _plot_clustering_scatter(clust_results: dict, output_dir: str, label: str = "") -> list:
@@ -537,6 +585,179 @@ def _plot_clustering_scatter(clust_results: dict, output_dir: str, label: str = 
     return figures
 
 
+_NOISE_PLOT_TYPES = ["gaussian_std", "gaussian_mean", "gain_low", "gain_high"]
+
+
+def _plot_noise_examples(noise_results: dict, output_dir: str, label: str = "", k: int = 3) -> list:
+    """
+    Best/worst noise robustness examples per noise type.
+    Recreation of evaluation_runner.plot_noisy_vs_clean_spectrogram: clean (black) vs
+    noisy overlay with emb-sim in the title. One figure per noise type,
+    2 rows (best/worst) × k columns.
+    """
+    rdf   = noise_results.get("results_df")
+    clean = noise_results.get("clean_data")
+    noisy = noise_results.get("noisy_data") or {}
+    if rdf is None or rdf.empty or clean is None:
+        return []
+
+    suffix   = f"_{label}" if label else ""
+    run_name = label or "checkpoint"
+    figures  = []
+
+    for noise_type in _NOISE_PLOT_TYPES:
+        if noise_type not in rdf.columns or noise_type not in noisy:
+            continue
+
+        sorted_df = rdf.sort_values(noise_type, ascending=False)
+        best  = sorted_df.head(k)
+        worst = sorted_df.tail(k).iloc[::-1]
+
+        fig, axes = plt.subplots(2, k, figsize=(5.5 * k, 7), squeeze=False)
+        fig.suptitle(f"Noise Robustness — {noise_type} — Best/Worst Examples — {run_name}",
+                     fontsize=12, fontweight="bold")
+
+        for row_i, (status, group) in enumerate([("BEST", best), ("WORST", worst)]):
+            for col_i, (_, r) in enumerate(group.iterrows()):
+                ax = axes[row_i][col_i]
+                idx = int(r["index"])
+                ax.plot(clean[idx], label="Clean", color="black", linewidth=1.2)
+                ax.plot(noisy[noise_type][idx], label=f"Noisy ({noise_type})", alpha=0.7, linewidth=1)
+                ax.set_title(f"{status} | idx={idx} | Emb Sim: {r[noise_type]:.4f}", fontsize=9)
+                ax.grid(alpha=0.3)
+                if row_i == 0 and col_i == 0:
+                    ax.legend(fontsize=8)
+
+        plt.tight_layout()
+        path = _save_fig(fig, os.path.join(output_dir, f"noisy_vs_clean_{noise_type}{suffix}.png"))
+        figures.append((f"Noisy vs clean examples ({noise_type}) — {run_name}", path))
+
+    return figures
+
+
+def _plot_label_reg_scatter(lr_results: dict, output_dir: str, label: str = "") -> list:
+    """
+    True vs predicted parameter_0 scatter for input and embedding probes.
+    Recreation of label_reg_evaluation._scatter_panel styling (s=3 alpha=0.2 scatter,
+    red dashed diagonal, R²/pearson/MAE + distribution stats in the title).
+    """
+    from scipy.stats import pearsonr
+
+    y = lr_results.get("labels")
+    panels = [
+        ("Input probe (raw 245-d signal)",   lr_results.get("y_pred_input"), "#90CAF9"),
+        ("Embedding probe (768-d)",          lr_results.get("y_pred_emb"),   "#1565C0"),
+    ]
+    if y is None or all(p[1] is None for p in panels):
+        return []
+
+    suffix   = f"_{label}" if label else ""
+    run_name = label or "checkpoint"
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig.suptitle(f"Label Regression — True vs Predicted (parameter_0) — {run_name}",
+                 fontsize=12, fontweight="bold")
+
+    for ax, (title, y_pred, color) in zip(axes, panels):
+        if y_pred is None:
+            ax.axis("off")
+            continue
+        y_pred = np.asarray(y_pred)
+        ss_res = np.sum((y - y_pred) ** 2)
+        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        r2_val = 1.0 - ss_res / (ss_tot + 1e-12)
+        pr, _  = pearsonr(y, y_pred)
+        mae    = float(np.mean(np.abs(y - y_pred)))
+        ax.scatter(y, y_pred, s=3, alpha=0.2, color=color, rasterized=True)
+        lo = min(y.min(), y_pred.min()) - 0.05
+        hi = max(y.max(), y_pred.max()) + 0.05
+        ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.2)
+        ax.set_title(
+            f"{title}\n"
+            f"R²={r2_val:.3f}  r={float(pr):.3f}  MAE={mae:.3f}\n"
+            f"true μ={y.mean():.2f} σ={y.std():.2f}  |  pred μ={y_pred.mean():.2f} σ={y_pred.std():.2f}",
+            fontsize=8.5,
+        )
+        ax.set_xlabel("True", fontsize=8)
+        ax.set_ylabel("Pred", fontsize=8)
+        ax.grid(True, alpha=0.2)
+        ax.tick_params(labelsize=7)
+
+    plt.tight_layout()
+    path = _save_fig(fig, os.path.join(output_dir, f"label_reg_true_vs_pred{suffix}.png"))
+    return [(f"Label regression true vs predicted — {run_name}", path)]
+
+
+def _plot_ksimilar_examples(emb_results: dict, output_dir: str, label: str = "",
+                            k: int = 5, n_examples: int = 3) -> list:
+    """
+    k-similar neighbor grids for best/worst match-score queries.
+    Exact recreation of evaluation_runner.plot_embedding_vs_input_similarity_comparison:
+    3×(k+1) grid — query in column 0, top-k embedding neighbors (row 1),
+    top-k input neighbors (row 2), row 3 reserved.
+    """
+    match_df = emb_results.get("results_df")
+    inputs   = emb_results.get("inputs")
+    if match_df is None or match_df.empty or inputs is None:
+        return []
+
+    suffix   = f"_{label}" if label else ""
+    run_name = label or "checkpoint"
+    figures  = []
+
+    sorted_df = match_df.sort_values("match_score", ascending=False)
+    best_indices  = sorted_df.head(n_examples)["index"].values
+    worst_indices = sorted_df.tail(n_examples)["index"].values
+
+    for status, indices in [("best", best_indices), ("worst", worst_indices)]:
+        for query_idx in indices:
+            row = match_df[match_df["index"] == query_idx].iloc[0]
+            query_stack = row["stack_idx"]
+
+            topk_emb_idx   = row["embedding_neighbors"][:k]
+            topk_input_idx = row["input_neighbors"][:k]
+            emb_sims       = row["embedding_similarities"][:k]
+            input_sims     = row["input_similarities"][:k]
+
+            fig, axes = plt.subplots(3, k + 1, figsize=(3.5 * (k + 1), 9))
+            fig.suptitle(
+                f"Run: {run_name}\n"
+                f"{status.upper()} | Query idx={query_idx} | stack={query_stack} | "
+                f"Match Score: {row['match_score']:.1f} | "
+                f"Emb matches: {len(row['embedding_stack_matches'])} | "
+                f"Input matches: {len(row['input_stack_matches'])}",
+                fontsize=11,
+            )
+
+            row_titles = ["Embedding neighbors", "Input neighbors", "Query signal"]
+
+            for row_idx in range(3):
+                axes[row_idx, 0].plot(inputs[query_idx])
+                axes[row_idx, 0].set_title(f"QUERY\nidx={query_idx}")
+                axes[row_idx, 0].set_xticks([])
+                axes[row_idx, 0].set_ylabel(row_titles[row_idx])
+
+            for j, idx in enumerate(topk_emb_idx):
+                axes[0, j + 1].plot(inputs[idx])
+                axes[0, j + 1].set_title(f"idx={idx}\nsim={emb_sims[j]:.3f}")
+                axes[0, j + 1].set_xticks([])
+
+            for j, idx in enumerate(topk_input_idx):
+                axes[1, j + 1].plot(inputs[idx])
+                axes[1, j + 1].set_title(f"idx={idx}\nsim={input_sims[j]:.3f}")
+                axes[1, j + 1].set_xticks([])
+
+            for j in range(k):
+                axes[2, j + 1].axis("off")
+
+            plt.tight_layout()
+            fname = f"similarity_comparison_{status}_query{query_idx}{suffix}.png"
+            path = _save_fig(fig, os.path.join(output_dir, fname))
+            figures.append((f"k-similar neighbors — {status} query {query_idx} — {run_name}", path))
+
+    return figures
+
+
 def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
     """
     Returns a list of (caption, path, checkpoint_label) triples.
@@ -574,7 +795,6 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
 
         # ── Summary: per-method comparison figures ────────────────────────────
         figures += _plot_noise_robustness_comparison(cdf, output_dir)
-        figures += _plot_signal_completion_comparison(cdf, output_dir)
         figures += _plot_label_regression_comparison(cdf, output_dir)
 
     # ── Per-checkpoint figures ────────────────────────────────────────────────
@@ -590,10 +810,21 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
                 cl_figs = _plot_clustering_scatter(clust, output_dir, label=cp_label)
                 figures += [(cap, path, cp_label) for cap, path in cl_figs]
 
-            comp = cp_res.get("signal_completion", {})
-            if comp and not comp.get("skipped"):
-                sc_figs = _plot_signal_completion_histogram(comp, output_dir, label=cp_label)
-                figures += [(cap, path, cp_label) for cap, path in sc_figs]
+            noise = cp_res.get("noise_robustness", {})
+            if noise:
+                nz_figs = _plot_noise_example_grid(noise, output_dir, label=cp_label)
+                nz_figs += _plot_noise_examples(noise, output_dir, label=cp_label)
+                figures += [(cap, path, cp_label) for cap, path in nz_figs]
+
+            lr = cp_res.get("label_regression", {})
+            if lr:
+                lr_figs = _plot_label_reg_scatter(lr, output_dir, label=cp_label)
+                figures += [(cap, path, cp_label) for cap, path in lr_figs]
+
+            emb = cp_res.get("embedding_similarity", {})
+            if emb:
+                ks_figs = _plot_ksimilar_examples(emb, output_dir, label=cp_label)
+                figures += [(cap, path, cp_label) for cap, path in ks_figs]
 
     return figures
 
@@ -728,14 +959,26 @@ def _html_section_embedding(results: dict, figures: list) -> str:
     return f"<section>\n<h2>Embedding Similarity</h2>\n{cards}\n{fig_html}\n</section>"
 
 
-def _html_section_signal_completion(results: dict, figures: list) -> str:
-    r = results.get("signal_completion", {})
+def _html_section_signal_reconstruction(results: dict, figures: list) -> str:
+    r = results.get("signal_reconstruction", {})
     if r.get("skipped"):
-        body = "<p><em>Skipped — model has no completion_head.</em></p>"
+        body = f"<p><em>Skipped — {r.get('error', 'no reconstruction checkpoints given')}.</em></p>"
     else:
-        body = _html_metric_cards({"Average MSE": r.get("avg_mse", "N/A")})
+        cards = {}
+        for key, label in (("fe", "FE"), ("proj", "Projection"), ("tr", "Transformer")):
+            if f"recon_{key}_mse_mean" in r:
+                cards[f"{label} recon mean MSE"] = f"{r[f'recon_{key}_mse_mean']:.3e}"
+        cards["normalize"] = str(r.get("normalize"))
+        body = _html_metric_cards(cards)
         body += "\n" + "\n".join(_html_figure(cap, path) for cap, path in figures)
-    return f"<section>\n<h2>Signal Completion</h2>\n{body}\n</section>"
+    return f"<section>\n<h2>Signal Reconstruction</h2>\n{body}\n</section>"
+
+
+def _html_section_generic(title: str, cards: dict, figures: list) -> str:
+    """Section with optional metric cards + figures, for standalone evals."""
+    body = _html_metric_cards(cards) if cards else ""
+    body += "\n" + "\n".join(_html_figure(cap, path) for cap, path in figures)
+    return f"<section>\n<h2>{title}</h2>\n{body}\n</section>"
 
 
 def _html_section_noise(results: dict, figures: list) -> str:
@@ -903,16 +1146,31 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
     figures_by_eval: dict[str, list] = {}
 
     if "embedding_similarity" in results:
-        figures_by_eval["embedding_similarity"] = _plot_embedding_similarity(
-            results["embedding_similarity"], run_dir
+        figures_by_eval["embedding_similarity"] = (
+            _plot_embedding_similarity(results["embedding_similarity"], run_dir)
+            + _plot_ksimilar_examples(results["embedding_similarity"], run_dir)
         )
-    if "signal_completion" in results:
-        figures_by_eval["signal_completion"] = _plot_signal_completion(
-            results["signal_completion"], run_dir
+    if "signal_reconstruction" in results:
+        figures_by_eval["signal_reconstruction"] = _plot_signal_reconstruction(
+            results["signal_reconstruction"], run_dir
         )
     if "noise_robustness" in results:
-        figures_by_eval["noise_robustness"] = _plot_noise_robustness(
-            results["noise_robustness"], run_dir
+        figures_by_eval["noise_robustness"] = (
+            _plot_noise_robustness(results["noise_robustness"], run_dir)
+            + _plot_noise_example_grid(results["noise_robustness"], run_dir)
+            + _plot_noise_examples(results["noise_robustness"], run_dir)
+        )
+    if "clustering" in results:
+        figures_by_eval["clustering"] = _plot_clustering_scatter(
+            results["clustering"], run_dir
+        )
+    if "label_regression" in results:
+        figures_by_eval["label_regression"] = _plot_label_reg_scatter(
+            results["label_regression"], run_dir
+        )
+    if "structured_similarity" in results:
+        figures_by_eval["structured_similarity"] = _plot_structured_similarity_maps(
+            results["structured_similarity"], run_dir
         )
     if "checkpoint_comparison" in results:
         figures_by_eval["checkpoint_comparison"] = _plot_checkpoint_comparison(
@@ -953,17 +1211,18 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         for cap, path in figures_by_eval.get("embedding_similarity", []):
             lines += ["", f"![{cap}]({os.path.basename(path)})"]
 
-    if "signal_completion" in results:
-        r = results["signal_completion"]
-        lines += ["", "## Signal Completion"]
+    if "signal_reconstruction" in results:
+        r = results["signal_reconstruction"]
+        lines += ["", "## Signal Reconstruction"]
         if r.get("skipped"):
-            lines.append("*Skipped — model has no completion_head.*")
+            lines.append(f"*Skipped — {r.get('error', 'no reconstruction checkpoints given')}.*")
         else:
-            lines += [
-                "", "| Metric | Value |", "|--------|-------|",
-                f"| Average MSE | {r.get('avg_mse', 'N/A'):.6f} |",
-            ]
-            for cap, path in figures_by_eval.get("signal_completion", []):
+            lines += ["", "| Metric | Value |", "|--------|-------|"]
+            for key, label in (("fe", "FE"), ("proj", "Projection"), ("tr", "Transformer")):
+                if f"recon_{key}_mse_mean" in r:
+                    lines.append(f"| {label} recon mean MSE | {r[f'recon_{key}_mse_mean']:.6e} |")
+            lines.append(f"| normalize | {r.get('normalize')} |")
+            for cap, path in figures_by_eval.get("signal_reconstruction", []):
                 lines += ["", f"![{cap}]({os.path.basename(path)})"]
 
     if "noise_robustness" in results:
@@ -975,6 +1234,36 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             for k, v in summary.items():
                 lines.append(f"| {k} | {v:.4f} |")
         for cap, path in figures_by_eval.get("noise_robustness", []):
+            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+
+    if "clustering" in results:
+        r = results["clustering"]
+        lines += ["", "## Clustering", ""]
+        if "comp_cluster_error" in r:
+            lines.append(f"*Skipped — {r['comp_cluster_error']}*")
+        else:
+            lines += ["| Metric | Value |", "|--------|-------|"]
+            for key in ("comp_cluster_ari", "comp_cluster_nmi", "comp_cluster_vmeasure",
+                        "comp_cluster_silhouette", "comp_cluster_knn_precision",
+                        "comp_cluster_retrieval_map"):
+                if key in r:
+                    lines.append(f"| {key.replace('comp_cluster_', '')} | {r[key]:.4f} |")
+        for cap, path in figures_by_eval.get("clustering", []):
+            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+
+    if "label_regression" in results:
+        r = results["label_regression"]
+        lines += ["", "## Label Regression (parameter_0)", ""]
+        lines += ["| Metric | Value |", "|--------|-------|"]
+        for key in ("label_reg_input_r2", "label_reg_emb_r2", "label_reg_improvement_r2"):
+            if key in r:
+                lines.append(f"| {key} | {r[key]:.4f} |")
+        for cap, path in figures_by_eval.get("label_regression", []):
+            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+
+    if "structured_similarity" in results:
+        lines += ["", "## Structured Similarity (canonical 100-sample panel)"]
+        for cap, path in figures_by_eval.get("structured_similarity", []):
             lines += ["", f"![{cap}]({os.path.basename(path)})"]
 
     if "checkpoint_comparison" in results:
@@ -1001,13 +1290,34 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         sections.append(_html_section_embedding(
             results, figures_by_eval.get("embedding_similarity", [])
         ))
-    if "signal_completion" in results:
-        sections.append(_html_section_signal_completion(
-            results, figures_by_eval.get("signal_completion", [])
+    if "signal_reconstruction" in results:
+        sections.append(_html_section_signal_reconstruction(
+            results, figures_by_eval.get("signal_reconstruction", [])
         ))
     if "noise_robustness" in results:
         sections.append(_html_section_noise(
             results, figures_by_eval.get("noise_robustness", [])
+        ))
+    if "clustering" in results:
+        r = results["clustering"]
+        cards = {k.replace("comp_cluster_", ""): f"{v:.4f}"
+                 for k, v in r.items()
+                 if k.startswith("comp_cluster_") and isinstance(v, (int, float))}
+        sections.append(_html_section_generic(
+            "Clustering", cards, figures_by_eval.get("clustering", [])
+        ))
+    if "label_regression" in results:
+        r = results["label_regression"]
+        cards = {k: f"{v:.4f}" for k, v in r.items()
+                 if k.startswith("label_reg_") and isinstance(v, (int, float))}
+        sections.append(_html_section_generic(
+            "Label Regression (parameter_0)", cards,
+            figures_by_eval.get("label_regression", [])
+        ))
+    if "structured_similarity" in results:
+        sections.append(_html_section_generic(
+            "Structured Similarity (canonical panel)", {},
+            figures_by_eval.get("structured_similarity", [])
         ))
     if "checkpoint_comparison" in results:
         sections.append(_html_section_comparison(
@@ -1018,12 +1328,36 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         f.write(_build_html(results, config, ts, sections))
 
     # ── CSV exports ───────────────────────────────────────────────────────────
+    # Nested-DataFrame export names mirror the old evaluation_runner conventions
+    # (match_df_<run>.csv for the per-query same-stack results, noise_df_<run>.csv, ...)
+    _CSV_NAMES = {
+        "embedding_similarity": "match_df",
+        "noise_robustness":     "noise_df",
+        "signal_reconstruction": "recon_df",
+        "label_regression":     "label_reg_df",
+        "clustering":           "clustering_df",
+    }
+
     for eval_name, r in results.items():
         if not isinstance(r, dict):
             continue
+        # Top-level DataFrames (single-checkpoint evals + comparison_df)
         for key, val in r.items():
             if isinstance(val, pd.DataFrame):
-                val.to_csv(os.path.join(run_dir, f"{eval_name}_{key}.csv"), index=False)
+                base = _CSV_NAMES.get(eval_name, eval_name)
+                name = base if key == "results_df" else f"{eval_name}_{key}"
+                val.to_csv(os.path.join(run_dir, f"{name}.csv"), index=False)
+        # Per-checkpoint DataFrames inside checkpoint_comparison
+        for cp_label, cp_res in (r.get("per_checkpoint") or {}).items():
+            if not isinstance(cp_res, dict):
+                continue
+            for sub_name, sub_res in cp_res.items():
+                if not isinstance(sub_res, dict):
+                    continue
+                rdf = sub_res.get("results_df")
+                if isinstance(rdf, pd.DataFrame):
+                    base = _CSV_NAMES.get(sub_name, sub_name)
+                    rdf.to_csv(os.path.join(run_dir, f"{base}_{cp_label}.csv"), index=False)
 
     total_figs = len(all_figures)
     print(f"[Report] Run dir  : {run_dir}")

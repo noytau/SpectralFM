@@ -1,0 +1,18 @@
+# SpectralFM evaluation suite — plain-pip requirements, NO fairseq needed.
+# Install into a fresh venv:  pip install -r requirements.txt
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+scikit-learn>=1.2.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+soundfile>=0.12.0
+tabulate>=0.9.0
+# fairseq-format checkpoints store their config as OmegaConf objects;
+# omegaconf lets torch.load unpickle them without installing fairseq.
+omegaconf>=2.0.0
+# Optional: UMAP projection in the clustering scatter (falls back to t-SNE only).
+umap-learn>=0.5.0

@@ -15,11 +15,51 @@ def _detect_checkpoint_type(state: dict) -> str:
     """Detect checkpoint format."""
     if "cfg" in state and "model" in state:
         return "fairseq"
+    if "data2vec_audio" in state:
+        return "3ae"           # 3AE recon checkpoint: embedded backbone + mirror heads
     if "encoder" in state and "layer_norm" in state and "decoder" in state:
         return "fe_recon"      # FE-only reconstruction checkpoint
     if "transformer_mirror" in state and "backbone_ckpt" in state:
         return "tr_recon"      # transformer-mirror reconstruction (backbone stored separately)
     return "state_dict"
+
+
+# Aux monitoring decoders saved inside 3AE backbone states — not part of the model
+_3AE_AUX_PREFIXES = ("fe_recon_decoder.", "trans_recon_decoder.")
+
+
+def load_3ae_backbone(state: dict, arch: str = "conv1d"):
+    """
+    Build the HF Data2VecAudioModel from the backbone embedded in a 3AE checkpoint
+    (`data2vec_audio` key, fairseq key format). Handles the v1 single weight-normed
+    positional conv (pos_conv.0.weight_g/v) by swapping in SingleLayerPosConv.
+    """
+    from .model import SingleLayerPosConv
+
+    raw = state["data2vec_audio"]
+    model = Data2VecAudioModel.from_pretrained("facebook/data2vec-audio-base")
+    model.feature_extractor = FairseqConvFeatureExtractor(
+        [(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]
+    )
+
+    single_pos = "encoder.pos_conv.0.weight_v" in raw
+    if single_pos:
+        dim, group_in, kernel = raw["encoder.pos_conv.0.weight_v"].shape
+        model.encoder.pos_conv_embed = SingleLayerPosConv(
+            dim=dim, kernel=kernel, groups=dim // group_in
+        )
+
+    weights = _remap_fairseq_keys(raw)
+    if single_pos:
+        for suf in ("weight_g", "weight_v", "bias"):
+            weights[f"encoder.pos_conv_embed.conv.{suf}"] = raw[f"encoder.pos_conv.0.{suf}"]
+            weights.pop(f"encoder.pos_conv.0.{suf}", None)
+    weights = {k: v for k, v in weights.items() if not k.startswith(_3AE_AUX_PREFIXES)}
+
+    result = model.load_state_dict(weights, strict=False)
+    print(f"[CheckpointLoader] 3AE embedded backbone loaded "
+          f"(missing={len(result.missing_keys)}, unexpected={len(result.unexpected_keys)})")
+    return model
 
 
 # Keys that exist only in fairseq and have no HF equivalent
@@ -117,6 +157,10 @@ class CheckpointLoader:
             model.feature_extractor.load_state_dict(state["encoder"], strict=True)
             model.feature_projection.layer_norm.load_state_dict(state["layer_norm"], strict=True)
             print(f"[CheckpointLoader] Loaded FE-recon checkpoint (encoder + layer_norm): {path}")
+        elif ckpt_type == "3ae":
+            # Full backbone embedded in the checkpoint (fine-tuned weights) — use it directly
+            model = load_3ae_backbone(state, arch=arch)
+            print(f"[CheckpointLoader] Loaded 3AE checkpoint (embedded backbone): {path}")
         elif ckpt_type == "tr_recon":
             # The backbone is stored at backbone_ckpt; the transformer_mirror is a separate decoder
             backbone_path = state["backbone_ckpt"]
@@ -221,6 +265,9 @@ class CheckpointLoader:
                 model.feature_extractor.load_state_dict(state["encoder"], strict=True)
                 model.feature_projection.layer_norm.load_state_dict(state["layer_norm"], strict=True)
                 print(f"  FE-recon: loaded encoder + layer_norm")
+            elif ckpt_type == "3ae":
+                model = load_3ae_backbone(state, arch=arch)
+                print("  3AE: loaded embedded backbone")
             elif ckpt_type == "tr_recon":
                 backbone_path = state["backbone_ckpt"]
                 print(f"  TR-recon: loading backbone from {backbone_path}")

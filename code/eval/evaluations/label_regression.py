@@ -68,8 +68,12 @@ def run(
     X = _normalize_like_fairseq(inputs)
     emb = _embed(model, X, device, batch_size)
 
-    m_in  = compute_linear_probing_metrics(X,   y, probe_type="ridge", n_folds=n_folds, task="regression")
-    m_emb = compute_linear_probing_metrics(emb, y, probe_type="ridge", n_folds=n_folds, task="regression")
+    m_in  = compute_linear_probing_metrics(X,   y, probe_type="ridge", n_folds=n_folds,
+                                           task="regression", return_predictions=True)
+    m_emb = compute_linear_probing_metrics(emb, y, probe_type="ridge", n_folds=n_folds,
+                                           task="regression", return_predictions=True)
+    y_pred_input = m_in.pop("predictions", None)
+    y_pred_emb   = m_emb.pop("predictions", None)
 
     results = {
         **_rename_probe_metrics(m_in, "input"),
@@ -88,4 +92,6 @@ def run(
 
     results["labels"] = y
     results["embeddings"] = emb
+    results["y_pred_input"] = y_pred_input   # cross-val predictions, for true-vs-pred scatter
+    results["y_pred_emb"] = y_pred_emb
     return results

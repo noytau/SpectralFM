@@ -61,10 +61,12 @@ def run(
 
     summary = {}
     per_sample = {nt: [] for nt in noise_types}
+    noisy_data_by_type = {}
 
     for noise_type in noise_types:
         fn = NOISE_CONFIGS[noise_type]
         noisy_data = np.stack([fn(row.astype(float)) for row in clean_data])
+        noisy_data_by_type[noise_type] = noisy_data
         noisy_embs = _embed_batch(model, noisy_data, device, batch_size)
 
         # Cosine similarity per sample (clean_emb vs noisy_emb)
@@ -78,8 +80,11 @@ def run(
 
     results_df = pd.DataFrame(per_sample)
     results_df.insert(0, "stack_idx", df["stack_idx"].values)
+    results_df.insert(0, "index", np.arange(len(results_df)))
 
     return {
         "results_df": results_df,
         "summary": summary,
+        "clean_data": clean_data,           # [N, L] for best/worst example plots
+        "noisy_data": noisy_data_by_type,   # {noise_type: [N, L]}
     }

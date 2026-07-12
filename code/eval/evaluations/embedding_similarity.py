@@ -113,6 +113,7 @@ def run(
         "input_stack_match_rate": inp_rate,
         "match_score_avg": results_df["match_score"].mean(),
         "embeddings": embeddings,
+        "inputs": input_matrix,   # raw signals, for neighbor example plots
         "similarity_distributions": sim_dists,
     }
 

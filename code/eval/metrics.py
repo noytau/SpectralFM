@@ -184,6 +184,7 @@ def compute_linear_probing_metrics(
     probe_type: str = "ridge",
     n_folds: int = 5,
     task: str = "regression",
+    return_predictions: bool = False,
 ) -> Dict[str, float]:
     """
     Linear probing evaluation.
@@ -250,6 +251,8 @@ def compute_linear_probing_metrics(
         metrics[f"{prefix}_mae"] = mae
         metrics[f"{prefix}_pearson_r"] = float(pearson_r)
         metrics[f"{prefix}_spearman_rho"] = float(spearman_rho)
+        if return_predictions:
+            metrics["predictions"] = y_pred
 
     elif task == "classification":
         if probe_type == "ridge":

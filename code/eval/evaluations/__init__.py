@@ -1,5 +1,5 @@
 from . import embedding_similarity as _emb
-from . import signal_completion as _sig
+from . import signal_reconstruction as _recon
 from . import noise_robustness as _noise
 from . import checkpoint_comparison as _cmp
 from . import clustering as _clust
@@ -10,8 +10,8 @@ class EmbeddingSimilarityEval:
     run = staticmethod(_emb.run)
 
 
-class SignalCompletionEval:
-    run = staticmethod(_sig.run)
+class SignalReconstructionEval:
+    run = staticmethod(_recon.run)
 
 
 class NoiseRobustnessEval:
