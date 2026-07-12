@@ -351,35 +351,55 @@ def _ss_heatmap(ax, sim_matrix, title: str, ylabel: str = None,
         ax.set_ylabel(ylabel, fontsize=9)
 
 
+def _struct_sim_panel(ax, sim, title: str, vmin: float = 0.0, vmax: float = 1.0,
+                      ylabel: str = None) -> None:
+    """
+    Shared panel styling for ALL structured-similarity figures (single-model and
+    all-models): viridis heatmap, (mean=, std=) appended to the title, and
+    'Sample Index (N=…)' axis labels — matching compare_checkpoints._plot_similarity_rows.
+    """
+    import seaborn as sns
+
+    if sim is None:
+        ax.text(0.5, 0.5, "N/A", ha="center", va="center")
+        ax.axis("off")
+        return
+    sim = np.asarray(sim, dtype=np.float64)
+    triu = np.triu_indices_from(sim, k=1)
+    sns.heatmap(sim, ax=ax, cmap="viridis",
+                xticklabels=False, yticklabels=False, vmin=vmin, vmax=vmax)
+    ax.set_title(f"{title}\n(mean={sim[triu].mean():.3f}, std={sim[triu].std():.3f})",
+                 fontsize=11, fontweight="bold")
+    ax.set_xlabel(f"Sample Index (N={len(sim)})", fontsize=10)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=10)
+
+
 def _plot_structured_similarity_maps(results: dict, output_dir: str, label: str = "") -> list:
     """
-    2×2 cosine similarity heatmaps for one checkpoint — all 4 representation stages:
-      (0,0) Input space     (0,1) FE output  (raw conv, 512-dim)
-      (1,0) Projection      (1,1) Embedding  (transformer output)
-    All panels use vmin=-1, vmax=1 for consistent, unclipped comparison.
+    Single-checkpoint structured similarity — one row across the 4 pipeline stages:
+      Input Space | FE Output | Projection | Embeddings
+    Styled identically to the all-models comparison figure (same panel helper).
     """
     panels = [
-        ("sim_matrix_inp",  "Input Space",        "Stage →"),
-        ("sim_matrix_fe",   "FE Output (512d)",   None),
-        ("sim_matrix_proj", "Projection (768d)",  "Stage →"),
-        ("sim_matrix_emb",  "Embedding (768d)",   None),
+        ("sim_matrix_inp",  "Input Space (Raw Signals)"),
+        ("sim_matrix_fe",   "FE Output (512d)"),
+        ("sim_matrix_proj", "Projection (768d)"),
+        ("sim_matrix_emb",  "Embeddings (768d)"),
     ]
 
     suffix   = f"_{label}" if label else ""
     run_name = label or "checkpoint"
 
-    groups = results.get("groups") or []
+    fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 5), squeeze=False)
+    for ax, (key, title) in zip(axes[0], panels):
+        _struct_sim_panel(ax, results.get(key), title,
+                          ylabel="Sample Index" if key == "sim_matrix_inp" else None)
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 10), squeeze=False)
-    for ax, (key, title, ylabel) in zip(axes.flat, panels):
-        mat = results.get(key)
-        mat = np.array(mat, dtype=np.float32) if mat is not None else None
-        _ss_heatmap(ax, mat, title, ylabel=ylabel, vmin=0.0, vmax=1.0, groups=groups)
-
-    fig.suptitle(f"Cosine Similarity Maps — {run_name}", fontsize=12, fontweight="bold")
+    fig.suptitle(f"Structured Similarity — {run_name}", fontsize=14, fontweight="bold")
     plt.tight_layout()
     path = _save_fig(fig, os.path.join(output_dir, f"struct_sim{suffix}.png"))
-    return [(f"Cosine similarity maps — {run_name}", path)]
+    return [(f"Structured similarity (4 pipeline stages) — {run_name}", path)]
 
 
 def _plot_label_regression_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
@@ -796,29 +816,17 @@ def _plot_struct_sim_all_models(per_cp: dict, output_dir: str, centered: bool = 
     fig, axes = plt.subplots(n_rows, n_models, figsize=(5 * n_models, 5 * n_rows), squeeze=False)
 
     def _panel(ax, vectors, title, ylabel=None):
-        if vectors is None:
-            ax.text(0.5, 0.5, "N/A", ha="center", va="center")
-            ax.axis("off")
-            return
-        sim = _cosim(vectors)
-        triu = np.triu_indices_from(sim, k=1)
-        sns.heatmap(sim, ax=ax, cmap="viridis",
-                    xticklabels=False, yticklabels=False, vmin=vmin, vmax=vmax)
-        ax.set_title(f"{title}\n(mean={sim[triu].mean():.3f}, std={sim[triu].std():.3f})",
-                     fontsize=11, fontweight="bold")
-        ax.set_xlabel(f"Sample Index (N={len(vectors)})", fontsize=10)
-        if ylabel:
-            ax.set_ylabel(ylabel, fontsize=10)
+        sim = _cosim(vectors) if vectors is not None else None
+        _struct_sim_panel(ax, sim, title, vmin=vmin, vmax=vmax, ylabel=ylabel)
 
     # Input column: never centered — raw inputs have no common-mode problem
-    _panel(axes[0][0], np.asarray(inputs, dtype=np.float64) if inputs is not None else None,
-           "Input Space", ylabel="Embeddings\nSample Index")
+    inp_vecs = np.asarray(inputs, dtype=np.float64) if inputs is not None else None
+    _panel(axes[0][0], inp_vecs, "Input Space (Raw Signals)", ylabel="Embeddings\nSample Index")
     for col, (name, _, emb, _fe) in enumerate(entries, start=1):
-        _panel(axes[0][col], _prep(emb), name)
+        _panel(axes[0][col], _prep(emb), f"{name}\n(Embeddings)")
 
     if has_fe:
-        _panel(axes[1][0], np.asarray(inputs, dtype=np.float64) if inputs is not None else None,
-               "Input Space", ylabel="FE Output\nSample Index")
+        _panel(axes[1][0], inp_vecs, "Input Space (Raw Signals)", ylabel="FE Output\nSample Index")
         for col, (name, _, _emb, fe) in enumerate(entries, start=1):
             _panel(axes[1][col], _prep(fe), f"{name}\n(FE Output)")
 
