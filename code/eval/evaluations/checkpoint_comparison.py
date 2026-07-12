@@ -96,9 +96,11 @@ def run(
                     max_samples=label_reg_max_samples,
                 )
                 checkpoint_results["label_regression"] = lr_results
-                row["label_reg_input_r2"] = lr_results.get("label_reg_input_r2")
-                row["label_reg_emb_r2"] = lr_results.get("label_reg_emb_r2")
-                row["label_reg_improvement_r2"] = lr_results.get("label_reg_improvement_r2")
+                for sfx in ("", "_2c", "_3c"):
+                    for key in ("label_reg_input_r2", "label_reg_emb_r2",
+                                "label_reg_improvement_r2"):
+                        if f"{key}{sfx}" in lr_results:
+                            row[f"{key}{sfx}"] = lr_results[f"{key}{sfx}"]
             except Exception as e:
                 print(f"[CheckpointComparison] Label regression skipped: {e}")
 

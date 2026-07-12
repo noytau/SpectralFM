@@ -5,6 +5,7 @@ No fairseq dependency.
 """
 import os
 import random
+import re
 import numpy as np
 import pandas as pd
 import torch
@@ -74,39 +75,64 @@ def load_data(source: str, sample_rate: int = 16000, stack_size: int = 10) -> pd
     raise FileNotFoundError(f"Source not found: {source}")
 
 
+_LABELED_PATTERN = re.compile(r"dataset(\d+)_comp(\d+)_spec_(\d+)\.wav")
+
+
 def load_labeled_data(
     labeled_data_dir: str,
     max_samples: int = 2000,
     target_length: int = 245,
     seed: int = 42,
+    comps: tuple = (0,),
 ) -> tuple:
     """
     Load labeled spectrograms for the parameter_0 regression probe.
-    Ported from eval_label_regression.py::load_labeled_spectrograms.
+    Ported from eval_label_regression.py::load_labeled_spectrograms, with
+    multi-channel support from label_reg_evaluation.py::_build_merged.
 
     Expects `labels.tsv` (filename \\t parameter_0) in labeled_data_dir and wavs
-    under `wav/`, `wavs/`, or the directory itself.
+    under `wav/`, `wavs/`, or the directory itself. Wavs follow
+    `dataset<D>_comp<C>_spec_<S>.wav`; components of the same (dataset, spec)
+    share one label.
 
-    Returns (inputs [N, target_length] float32, labels [N] float64).
+    comps: which components to stack per spectrum, e.g. (0,), (0, 1), (0, 1, 2).
+    Only spectra that have ALL requested components are kept.
+
+    Returns (inputs [N, len(comps), target_length] float32, labels [N] float64).
     """
     import glob
 
     labels_path = os.path.join(labeled_data_dir, "labels.tsv")
     if not os.path.isfile(labels_path):
         raise FileNotFoundError(labels_path)
-    pairs = []
+
+    # (dataset, spec) → {comp: filename}, label
+    spec_files: dict = {}
+    spec_label: dict = {}
     with open(labels_path) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             parts = line.split("\t")
-            if len(parts) >= 2:
-                pairs.append((parts[0], float(parts[1])))
+            if len(parts) < 2:
+                continue
+            m = _LABELED_PATTERN.match(parts[0])
+            if m is None:
+                continue
+            ds, comp, spec = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            spec_files.setdefault((ds, spec), {})[comp] = parts[0]
+            spec_label[(ds, spec)] = float(parts[1])
+
+    keys = sorted(k for k, files in spec_files.items()
+                  if all(c in files for c in comps))
+    if not keys:
+        raise RuntimeError(f"No spectra with components {comps} under {labeled_data_dir}")
     rng = np.random.default_rng(seed)
-    if len(pairs) > max_samples:
-        idx = rng.choice(len(pairs), max_samples, replace=False)
-        pairs = [pairs[i] for i in idx]
+    if len(keys) > max_samples:
+        idx = rng.choice(len(keys), max_samples, replace=False)
+        idx.sort()
+        keys = [keys[i] for i in idx]
 
     wav_root = labeled_data_dir
     for sub in ("wav", "wavs"):
@@ -121,24 +147,28 @@ def load_labeled_data(
     except ImportError:
         _read = lambda fp: torchaudio.load(fp)[0].mean(0).numpy()
 
-    inputs, ys = [], []
-    for fname, y in pairs:
+    def _load_one(fname):
         fp = os.path.join(wav_root, fname)
         if not os.path.isfile(fp):
             fp = os.path.join(labeled_data_dir, fname)
         if not os.path.isfile(fp):
-            continue
+            return None
         data = np.asarray(_read(fp)).flatten()
-        if len(data) >= target_length:
-            row = data[:target_length].astype(np.float32, copy=False)
-        else:
-            row = np.zeros(target_length, dtype=np.float32)
-            row[: len(data)] = data.astype(np.float32, copy=False)
-        inputs.append(row)
-        ys.append(y)
+        row = np.zeros(target_length, dtype=np.float32)
+        row[: min(len(data), target_length)] = data[:target_length]
+        return row
+
+    inputs, ys = [], []
+    for key in keys:
+        rows = [_load_one(spec_files[key][c]) for c in comps]
+        if any(r is None for r in rows):
+            continue
+        inputs.append(np.stack(rows, axis=0))          # [n_comps, L]
+        ys.append(spec_label[key])
     if not inputs:
         raise RuntimeError(f"No labeled wavs loaded under {labeled_data_dir}")
-    print(f"[DataLoader] Loaded {len(inputs)} labeled samples from {labeled_data_dir}")
+    print(f"[DataLoader] Loaded {len(inputs)} labeled spectra "
+          f"(comps={comps}) from {labeled_data_dir}")
     return np.stack(inputs, axis=0), np.array(ys, dtype=np.float64)
 
 
