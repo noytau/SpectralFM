@@ -251,6 +251,15 @@ def run(
     def _sim(m):
         return _cosim(m).astype(np.float32) if m is not None else None
 
+    def _sim_centered(m):
+        """Cosine after removing the mean vector (anisotropy correction).
+        Trained models share one dominant common direction (positive GELU
+        activations, mean-pooled) that pushes all raw cosines to ~0.9+;
+        centering reveals the per-sample structure underneath."""
+        if m is None:
+            return None
+        return _cosim(m - m.mean(axis=0, keepdims=True)).astype(np.float32)
+
     return {
         "inputs":          inputs,
         "fe_outputs":      reps["fe"],
@@ -261,4 +270,7 @@ def run(
         "sim_matrix_fe":   _sim(reps["fe"]),
         "sim_matrix_proj": _sim(reps["projection"]),
         "sim_matrix_emb":  _sim(reps["embedding"]),
+        "sim_matrix_fe_centered":   _sim_centered(reps["fe"]),
+        "sim_matrix_proj_centered": _sim_centered(reps["projection"]),
+        "sim_matrix_emb_centered":  _sim_centered(reps["embedding"]),
     }

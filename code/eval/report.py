@@ -758,6 +758,79 @@ def _plot_ksimilar_examples(emb_results: dict, output_dir: str, label: str = "",
     return figures
 
 
+def _plot_struct_sim_all_models(per_cp: dict, output_dir: str, centered: bool = False) -> list:
+    """
+    All-models structured similarity: Input Space | ckpt1 emb | ckpt2 emb | ...
+    (+ second row of FE outputs when available).
+    Exact port of compare_checkpoints._plot_similarity_rows styling: viridis
+    heatmap vmin=0/vmax=1, (mean=, std=) in each title, 'Sample Index (N=…)' labels.
+    centered=True subtracts the mean vector per representation before cosine
+    (anisotropy correction) and switches the scale to vmin=-1/vmax=1.
+    """
+    import seaborn as sns
+    from sklearn.metrics.pairwise import cosine_similarity as _cosim
+
+    entries = []   # (run_name, inputs, embeddings, fe_outputs)
+    for cp_label, cp_res in per_cp.items():
+        ss = cp_res.get("structured_similarity") or {}
+        if ss.get("embeddings") is not None:
+            entries.append((cp_label, ss.get("inputs"), ss["embeddings"], ss.get("fe_outputs")))
+    if not entries:
+        return []
+
+    inputs = entries[0][1]
+
+    def _prep(m):
+        if m is None:
+            return None
+        m = np.asarray(m, dtype=np.float64)
+        if centered:
+            m = m - m.mean(axis=0, keepdims=True)
+        return m
+
+    vmin, vmax = (-1.0, 1.0) if centered else (0.0, 1.0)
+    n_models = 1 + len(entries)
+    has_fe = any(e[3] is not None for e in entries)
+    n_rows = 2 if has_fe else 1
+
+    fig, axes = plt.subplots(n_rows, n_models, figsize=(5 * n_models, 5 * n_rows), squeeze=False)
+
+    def _panel(ax, vectors, title, ylabel=None):
+        if vectors is None:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center")
+            ax.axis("off")
+            return
+        sim = _cosim(vectors)
+        triu = np.triu_indices_from(sim, k=1)
+        sns.heatmap(sim, ax=ax, cmap="viridis",
+                    xticklabels=False, yticklabels=False, vmin=vmin, vmax=vmax)
+        ax.set_title(f"{title}\n(mean={sim[triu].mean():.3f}, std={sim[triu].std():.3f})",
+                     fontsize=11, fontweight="bold")
+        ax.set_xlabel(f"Sample Index (N={len(vectors)})", fontsize=10)
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=10)
+
+    # Input column: never centered — raw inputs have no common-mode problem
+    _panel(axes[0][0], np.asarray(inputs, dtype=np.float64) if inputs is not None else None,
+           "Input Space", ylabel="Embeddings\nSample Index")
+    for col, (name, _, emb, _fe) in enumerate(entries, start=1):
+        _panel(axes[0][col], _prep(emb), name)
+
+    if has_fe:
+        _panel(axes[1][0], np.asarray(inputs, dtype=np.float64) if inputs is not None else None,
+               "Input Space", ylabel="FE Output\nSample Index")
+        for col, (name, _, _emb, fe) in enumerate(entries, start=1):
+            _panel(axes[1][col], _prep(fe), f"{name}\n(FE Output)")
+
+    tag = "centered cosine (mean vector removed)" if centered else "raw cosine"
+    fig.suptitle(f"Input Space vs All Models — structured_similarity ({tag})",
+                 fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    fname = "struct_sim_all_models_centered.png" if centered else "struct_sim_all_models.png"
+    path = _save_fig(fig, os.path.join(output_dir, fname))
+    return [(f"Structured similarity — all models ({tag})", path, "")]
+
+
 def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
     """
     Returns a list of (caption, path, checkpoint_label) triples.
@@ -796,6 +869,11 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
         # ── Summary: per-method comparison figures ────────────────────────────
         figures += _plot_noise_robustness_comparison(cdf, output_dir)
         figures += _plot_label_regression_comparison(cdf, output_dir)
+
+    # ── Summary: all-models structured similarity (raw + centered) ───────────
+    if per_cp:
+        figures += _plot_struct_sim_all_models(per_cp, output_dir, centered=False)
+        figures += _plot_struct_sim_all_models(per_cp, output_dir, centered=True)
 
     # ── Per-checkpoint figures ────────────────────────────────────────────────
     if per_cp:

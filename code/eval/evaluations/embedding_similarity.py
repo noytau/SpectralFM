@@ -20,14 +20,20 @@ def cosine_similarity(a, b):
     return _cosine_sim_sklearn(a, b)
 
 
-def extract_embeddings(model, dataloader, device: str = "cpu") -> torch.Tensor:
-    """Run model on dataloader, return mean-pooled embeddings [N, D]."""
+def extract_embeddings(model, dataloader, device: str = "cpu", use_masked: bool = False) -> torch.Tensor:
+    """
+    Run model on dataloader, return mean-pooled embeddings [N, D].
+    E1 fix: embeddings for retrieval MUST come from clean data — the old default
+    silently used batch['masked_data'] (15% zeros), corrupting the embedding space
+    while the input baseline used clean signals (unfair comparison).
+    """
     model.eval()
     model.to(device)
     all_embs = []
+    key = "masked_data" if use_masked else "data"
     with torch.no_grad():
         for batch in dataloader:
-            inp = batch.get("masked_data", batch.get("data")).to(device)
+            inp = batch.get(key, batch.get("data")).to(device)
             out = model(input_values=inp)
             emb = out.last_hidden_state.mean(dim=1)  # [B, D]
             all_embs.append(emb.cpu())
