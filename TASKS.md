@@ -27,18 +27,43 @@ input → low similarity) and confirm the numbers behave as expected.
       (mean 0.463/std 0.295 vs original 0.452/0.288). Sanity checks: same-input-twice
       cos=1.0 at all stages; probe script preserved. Output:
       `code/eval_outputs/2026-07-12_17-53-03/struct_sim_all_models{,_centered}.png`.
-- [ ] **E1b. Label regression** — the eval is missing the latest training changes that use
+- [x] **E1b. Label regression** — the eval is missing the latest training changes that use
       2–3 channels. There were additional runs with better results that aren't reflected.
       Find those runs/checkpoints, make the label-regression eval support the multi-channel
       inputs, and include those runs.
+      **IMPLEMENTED (2026-07-12, commit bf94422); evaluation run in progress.**
+      Found: the multi-channel machinery was `label_reg_evaluation.py::_build_merged`
+      (components of the same spectrum concatenated: 1-comp raw 245 / emb 768,
+      2-comp 490/1536, 3-comp 735/2304), with the better runs on the Apr-15 checkpoints
+      `checkpoints/runai/recon_loss_experiment_3/recon-fe1.0_recon-tr{0,1}.0_frozen-enc{False,True}_5k.pt`
+      (prior outputs: `code/eval_results/label_reg_20260415_*`).
+      Implemented: `load_labeled_data(comps=...)` groups `dataset<D>_comp<C>_spec_<S>.wav`
+      per spectrum (labels verified shared across comps); `label_regression.run` evaluates
+      1/2/3-comp configs on the SAME spectra (metrics suffixed `_2c`/`_3c`);
+      comparison table exports the new columns.
+      Root cause of the old bad numbers: the previous loader sampled component files as
+      independent samples — input R² ~0.006. Fixed loader on the Apr-15 fe-recon ckpt:
+      input R² 0.41 (1-comp) → 0.71 (3-comp, 500-sample smoke), emb R² 0.30 → 0.36.
+      **Missing:** full 2000-spectra × 3-checkpoint evaluation is running
+      (`/tmp/eval_run11.log` on Geoffrey, GPU 5) — results table + output dir to be
+      added here when it lands. Multi-channel figures (per-config scatter) not yet added;
+      the 1-comp true-vs-pred scatter and comparison bars are wired.
 - Acceptance: sanity checks pass, and the embedding scores are explainable (you can say
   WHY each number is what it is).
+  **Status: E1a verified; E1b implemented and being re-run. General embedding-source
+  verification done (probe: same-input cos=1.0 at fe/proj/emb stages; extraction =
+  final encoder layer, temporal mean pooling, clean inputs). Post-fix full analysis
+  (Jan-07 / Feb-25 / tv_fe_short_3, corrected retrieval embeddings) running as
+  `/tmp/eval_run10.log` (GPU 4). E1 awaits user review when both runs land.**
 
 ### E2. Pre- vs post-reconstruction checkpoint comparison (blocked by E1; run after E3)
 Once E1 is fixed and verified, run the full comparison eval on exactly 2 checkpoints:
 one from before any reconstruction training, one from after. Goal: analyze what
 reconstruction training changed. Deliverable: the eval output dir + a short written
 analysis of the differences per metric/figure.
+**Status: NOT STARTED (per instructions: waits for E1 user review, runs after E3).
+Candidate checkpoint pair to confirm with user: pre = `runai_long_train_2026-02-25`
+(SSL only), post = an Apr-15 `recon_loss_experiment_3` ckpt or `tv_fe_short_3` (3AE).**
 
 ### E3. Clean up the eval output directory structure
 Currently all figures/CSVs from a run land flat in one timestamped directory
@@ -69,6 +94,7 @@ eval method, e.g.:
   new relative paths (the HTML embeds figures — verify it still renders self-contained).
 - Acceptance: run the suite once and confirm no file lands in the run-dir root except
   the reports and run_info.md, and both reports display all figures correctly.
+**Status: NOT STARTED (next after E1 review, before E2).**
 
 ## Training pipeline
 

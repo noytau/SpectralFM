@@ -238,10 +238,23 @@ Figures: PCA(50) → t-SNE and UMAP scatters colored by KMeans cluster.
 **Question:** Do embeddings encode `parameter_0` better than the raw signal?
 
 RidgeCV (5-fold cross-val) probe on inputs vs embeddings, using
-`--labeled_data_dir` (`labels.tsv` + wavs, default 2,000 samples).
+`--labeled_data_dir` (`labels.tsv` + wavs, default 2,000 spectra).
 
-Returns: `label_reg_input_*` and `label_reg_emb_*` (r2/mse/rmse/mae/pearson/spearman),
-`label_reg_improvement_r2` = emb R² − input R², cross-val predictions.
+**Multi-channel:** wavs follow `dataset<D>_comp<C>_spec_<S>.wav`; components of the
+same spectrum share one label. The eval runs three configurations on the SAME spectra
+(only those having all 3 components), matching `label_reg_evaluation.py`:
+
+| Config | Raw input | Embedding |
+|--------|-----------|-----------|
+| 1-comp (C0) | 245 | 768 |
+| 2-comp (C0,C1) | 490 | 1536 |
+| 3-comp (C0,C1,C2) | 735 | 2304 |
+
+Raw channels are concatenated; embeddings are extracted per component then concatenated.
+
+Returns: `label_reg_input_*` / `label_reg_emb_*` (r2/mse/rmse/mae/pearson/spearman)
+per config (suffix `''` / `_2c` / `_3c`), `label_reg_improvement_r2*` = emb R² − input R²,
+cross-val predictions (1-comp).
 Figures: true-vs-predicted scatter per probe; R² + ΔR² bars across checkpoints.
 
 ---

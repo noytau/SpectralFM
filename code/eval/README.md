@@ -159,14 +159,19 @@ KMeans on embeddings with k = number of stacks, scored against true `stack_idx`.
 - **Figures:** `kmeans_clustered_then_tsne[_<ckpt>].png` and `..._umap...png` —
   PCA(50) → t-SNE/UMAP scatter colored by KMeans cluster.
 
-### 5. `label_regression` — parameter_0 linear probe
+### 5. `label_regression` — parameter_0 linear probe (multi-channel)
 
 RidgeCV (5-fold) predicting `parameter_0` from raw inputs vs from embeddings,
-on samples from `--labeled_data_dir` (`labels.tsv` + wavs).
+on spectra from `--labeled_data_dir` (`labels.tsv` + wavs named
+`dataset<D>_comp<C>_spec_<S>.wav`; components of a spectrum share one label).
+Runs three configurations on the same spectra: 1-comp (raw 245 / emb 768),
+2-comp (490 / 1536), 3-comp (735 / 2304) — raw channels concatenated,
+per-component embeddings concatenated.
 
 - **Metrics:** `label_reg_input_r2`, `label_reg_emb_r2`,
   `label_reg_improvement_r2` (= emb − input; positive ⇒ embeddings add
-  label-relevant information), plus MSE/RMSE/MAE/pearson/spearman per probe.
+  label-relevant information) per config (suffix `''`/`_2c`/`_3c`),
+  plus MSE/RMSE/MAE/pearson/spearman per probe.
 - **Figures:** `label_reg_true_vs_pred[_<ckpt>].png` — true-vs-predicted scatter
   for both probes; `label_regression_comparison.png` — R² bars + ΔR² across
   checkpoints (comparison mode).
