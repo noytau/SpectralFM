@@ -44,10 +44,21 @@ input → low similarity) and confirm the numbers behave as expected.
       Root cause of the old bad numbers: the previous loader sampled component files as
       independent samples — input R² ~0.006. Fixed loader on the Apr-15 fe-recon ckpt:
       input R² 0.41 (1-comp) → 0.71 (3-comp, 500-sample smoke), emb R² 0.30 → 0.36.
-      **Missing:** full 2000-spectra × 3-checkpoint evaluation is running
-      (`/tmp/eval_run11.log` on Geoffrey, GPU 5) — results table + output dir to be
-      added here when it lands. Multi-channel figures (per-config scatter) not yet added;
-      the 1-comp true-vs-pred scatter and comparison bars are wired.
+      **DONE — full evaluation (2,000 spectra, Apr-15 checkpoints), output:
+      `code/eval_outputs/2026-07-12_20-51-45/`:**
+
+      | Checkpoint | emb R² 1c | emb R² 2c | emb R² 3c |
+      |---|---|---|---|
+      | (raw-input baseline) | 0.406 | 0.723 | 0.789 |
+      | fe-recon 5k | 0.305 | 0.510 | 0.506 |
+      | fe+tr-recon 5k | 0.308 | 0.504 | 0.514 |
+      | fe-recon frozen-enc 5k | **0.400** | **0.557** | **0.576** |
+
+      The previously-missing better results are reproduced (old broken numbers: ~0.04).
+      frozen-enc gives the best embeddings. Raw input still beats embeddings at every
+      config (improvement negative) — a finding, not a bug.
+      Remaining nice-to-have: per-config (2c/3c) scatter figures — only the 1-comp
+      true-vs-pred scatter is plotted.
 - Acceptance: sanity checks pass, and the embedding scores are explainable (you can say
   WHY each number is what it is).
   **Status: E1a verified; E1b implemented and being re-run. General embedding-source
