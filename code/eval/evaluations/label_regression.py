@@ -115,9 +115,10 @@ def run(
             print(f"[LabelRegression] comps={comps}  n={len(y)}  input R²={in_r2:.4f}  "
                   f"emb R²={emb_r2:.4f}  improvement={emb_r2 - in_r2:+.4f}")
 
-        if suffix == "":  # 1-comp predictions feed the true-vs-pred scatter
-            results["y_pred_input"] = y_pred_input
-            results["y_pred_emb"] = y_pred_emb
+        # Cross-val predictions per config, for the true-vs-pred scatter rows
+        results[f"y_pred_input{suffix}"] = y_pred_input
+        results[f"y_pred_emb{suffix}"] = y_pred_emb
+        if suffix == "":
             results["embeddings"] = emb
 
     return results

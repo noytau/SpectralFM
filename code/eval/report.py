@@ -405,62 +405,73 @@ def _plot_structured_similarity_maps(results: dict, output_dir: str, label: str 
 
 def _plot_label_regression_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
     """
-    Label regression bars across checkpoints.
-    Exact recreation of eval_label_regression._plot_label_regression:
-    Panel 1: input vs embedding R² grouped bars; Panel 2: ΔR² green/red bars.
+    Label regression bars across checkpoints, one COLUMN per multi-channel config
+    (1/2/3 components). Per config: top panel input vs embedding R² grouped bars
+    (eval_label_regression._plot_label_regression styling), bottom panel ΔR² bars.
     """
-    needed = {"label_reg_input_r2", "label_reg_emb_r2", "label_reg_improvement_r2"}
-    if not needed.issubset(cdf.columns):
+    configs = [(sfx, cfg_label) for sfx, cfg_label in _LR_CONFIGS
+               if f"label_reg_input_r2{sfx}" in cdf.columns
+               and f"label_reg_emb_r2{sfx}" in cdf.columns]
+    if not configs:
         return []
 
     labels = cdf["checkpoint"].tolist()
-    r2_in  = cdf["label_reg_input_r2"].fillna(0.0).tolist()
-    r2_emb = cdf["label_reg_emb_r2"].fillna(0.0).tolist()
-    delta  = cdf["label_reg_improvement_r2"].fillna(0.0).tolist()
     n = len(labels)
     x = np.arange(n)
     w = 0.35
 
-    fig, axes = plt.subplots(1, 2, figsize=(max(10, n * 3), 5))
-    fig.suptitle("Label Regression — Ridge Probe (parameter_0)", fontsize=13, fontweight="bold")
+    fig, axes = plt.subplots(2, len(configs),
+                             figsize=(max(5, n * 2.5) * len(configs), 9), squeeze=False)
+    fig.suptitle("Label Regression — Ridge Probe (parameter_0) — 1/2/3-component configs",
+                 fontsize=13, fontweight="bold")
 
-    # Panel 1: side-by-side R²
-    ax = axes[0]
-    b1 = ax.bar(x - w / 2, r2_in, w, color="#90CAF9", edgecolor="white", label="Input R²")
-    b2 = ax.bar(x + w / 2, r2_emb, w, color="#1565C0", edgecolor="white", label="Embedding R²")
-    for bar, v in zip(b1, r2_in):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
-                f"{v:.4f}", ha="center", va="bottom", fontsize=8, color="#555")
-    for bar, v in zip(b2, r2_emb):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
-                f"{v:.4f}", ha="center", va="bottom", fontsize=8, color="#1565C0", fontweight="bold")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
-    ax.set_ylabel("R²")
-    ax.set_title("Input vs Embedding R²")
-    ax.legend(fontsize=9)
-    ax.grid(True, axis="y", alpha=0.3)
-    ax.axhline(0, color="black", linewidth=0.5)
+    for col, (sfx, cfg_label) in enumerate(configs):
+        r2_in  = cdf[f"label_reg_input_r2{sfx}"].fillna(0.0).tolist()
+        r2_emb = cdf[f"label_reg_emb_r2{sfx}"].fillna(0.0).tolist()
+        delta  = cdf[f"label_reg_improvement_r2{sfx}"].fillna(0.0).tolist() \
+            if f"label_reg_improvement_r2{sfx}" in cdf.columns \
+            else [e - i for e, i in zip(r2_emb, r2_in)]
 
-    # Panel 2: ΔR²
-    ax2 = axes[1]
-    colors = ["#2E7D32" if d > 0 else "#C62828" for d in delta]
-    bars = ax2.bar(x, delta, 0.5, color=colors, edgecolor="white")
-    for bar, v in zip(bars, delta):
-        y_off = 0.001 if v >= 0 else -0.003
-        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + y_off,
-                 f"{v:+.4f}", ha="center", va="bottom" if v >= 0 else "top",
-                 fontsize=9, fontweight="bold")
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
-    ax2.set_ylabel("ΔR² (embedding − input)")
-    ax2.set_title("Improvement over Raw Input")
-    ax2.axhline(0, color="black", linewidth=1)
-    ax2.grid(True, axis="y", alpha=0.3)
+        # Top: side-by-side R²
+        ax = axes[0][col]
+        b1 = ax.bar(x - w / 2, r2_in, w, color="#90CAF9", edgecolor="white", label="Input R²")
+        b2 = ax.bar(x + w / 2, r2_emb, w, color="#1565C0", edgecolor="white", label="Embedding R²")
+        for bar, v in zip(b1, r2_in):
+            ax.text(bar.get_x() + bar.get_width() / 2, max(bar.get_height(), 0) + 0.002,
+                    f"{v:.3f}", ha="center", va="bottom", fontsize=8, color="#555")
+        for bar, v in zip(b2, r2_emb):
+            ax.text(bar.get_x() + bar.get_width() / 2, max(bar.get_height(), 0) + 0.002,
+                    f"{v:.3f}", ha="center", va="bottom", fontsize=8,
+                    color="#1565C0", fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels([_shorten_label(l) for l in labels],
+                           rotation=25, ha="right", fontsize=8)
+        ax.set_ylabel("R²")
+        ax.set_title(cfg_label, fontsize=10)
+        ax.legend(fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.axhline(0, color="black", linewidth=0.5)
+
+        # Bottom: ΔR²
+        ax2 = axes[1][col]
+        colors = ["#2E7D32" if d > 0 else "#C62828" for d in delta]
+        bars = ax2.bar(x, delta, 0.5, color=colors, edgecolor="white")
+        for bar, v in zip(bars, delta):
+            ax2.text(bar.get_x() + bar.get_width() / 2,
+                     bar.get_height() + (0.001 if v >= 0 else -0.003),
+                     f"{v:+.3f}", ha="center", va="bottom" if v >= 0 else "top",
+                     fontsize=8, fontweight="bold")
+        ax2.set_xticks(x)
+        ax2.set_xticklabels([_shorten_label(l) for l in labels],
+                            rotation=25, ha="right", fontsize=8)
+        ax2.set_ylabel("ΔR² (embedding − input)")
+        ax2.set_title("Improvement over Raw Input", fontsize=10)
+        ax2.axhline(0, color="black", linewidth=1)
+        ax2.grid(True, axis="y", alpha=0.3)
 
     plt.tight_layout()
     path = _save_fig(fig, os.path.join(output_dir, "label_regression_comparison.png"))
-    return [("Label regression — ridge probe (parameter_0)", path, "")]
+    return [("Label regression — ridge probe (parameter_0), 1/2/3-comp", path, "")]
 
 
 def _shorten_label(label: str, max_len: int = 28) -> str:
@@ -666,33 +677,40 @@ def _plot_noise_examples(noise_results: dict, output_dir: str, label: str = "", 
     return figures
 
 
+# Multi-channel label regression configs: (suffix, display label)
+_LR_CONFIGS = [("", "1-comp (C0) — raw 245 / emb 768"),
+               ("_2c", "2-comp (C0,C1) — raw 490 / emb 1536"),
+               ("_3c", "3-comp (C0,C1,C2) — raw 735 / emb 2304")]
+
+
 def _plot_label_reg_scatter(lr_results: dict, output_dir: str, label: str = "") -> list:
     """
-    True vs predicted parameter_0 scatter for input and embedding probes.
-    Recreation of label_reg_evaluation._scatter_panel styling (s=3 alpha=0.2 scatter,
+    True vs predicted parameter_0 scatter for input and embedding probes —
+    one row per multi-channel config (1/2/3 components), two columns (input | emb).
+    label_reg_evaluation._scatter_panel styling (s=3 alpha=0.2 scatter,
     red dashed diagonal, R²/pearson/MAE + distribution stats in the title).
     """
     from scipy.stats import pearsonr
 
     y = lr_results.get("labels")
-    panels = [
-        ("Input probe (raw 245-d signal)",   lr_results.get("y_pred_input"), "#90CAF9"),
-        ("Embedding probe (768-d)",          lr_results.get("y_pred_emb"),   "#1565C0"),
-    ]
-    if y is None or all(p[1] is None for p in panels):
+    configs = [(sfx, cfg_label) for sfx, cfg_label in _LR_CONFIGS
+               if lr_results.get(f"y_pred_input{sfx}") is not None
+               or lr_results.get(f"y_pred_emb{sfx}") is not None]
+    if y is None or not configs:
         return []
 
     suffix   = f"_{label}" if label else ""
     run_name = label or "checkpoint"
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig, axes = plt.subplots(len(configs), 2, figsize=(11, 4.6 * len(configs)),
+                             squeeze=False)
     fig.suptitle(f"Label Regression — True vs Predicted (parameter_0) — {run_name}",
                  fontsize=12, fontweight="bold")
 
-    for ax, (title, y_pred, color) in zip(axes, panels):
+    def _panel(ax, title, y_pred, color):
         if y_pred is None:
             ax.axis("off")
-            continue
+            return
         y_pred = np.asarray(y_pred)
         ss_res = np.sum((y - y_pred) ** 2)
         ss_tot = np.sum((y - np.mean(y)) ** 2)
@@ -714,9 +732,15 @@ def _plot_label_reg_scatter(lr_results: dict, output_dir: str, label: str = "") 
         ax.grid(True, alpha=0.2)
         ax.tick_params(labelsize=7)
 
+    for row, (sfx, cfg_label) in enumerate(configs):
+        _panel(axes[row][0], f"Input probe — {cfg_label}",
+               lr_results.get(f"y_pred_input{sfx}"), "#90CAF9")
+        _panel(axes[row][1], f"Embedding probe — {cfg_label}",
+               lr_results.get(f"y_pred_emb{sfx}"), "#1565C0")
+
     plt.tight_layout()
     path = _save_fig(fig, os.path.join(output_dir, f"label_reg_true_vs_pred{suffix}.png"))
-    return [(f"Label regression true vs predicted — {run_name}", path)]
+    return [(f"Label regression true vs predicted (1/2/3-comp) — {run_name}", path)]
 
 
 def _plot_ksimilar_examples(emb_results: dict, output_dir: str, label: str = "",
@@ -1349,8 +1373,14 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         if builder is None:
             continue
         figs = builder(r, run_dir)
-        figures_by_eval[key] = _relocate(
-            figs, os.path.join(run_dir, _method_dirname(base, alias)))
+        if base == "signal_reconstruction" and r.get("_model_name"):
+            # File under the recon model's own directory — coincides with the
+            # compared checkpoint's dir when the model is one of them.
+            target = os.path.join(run_dir, r["_model_name"],
+                                  _method_dirname(base, alias))
+        else:
+            target = os.path.join(run_dir, _method_dirname(base, alias))
+        figures_by_eval[key] = _relocate(figs, target)
 
     if "checkpoint_comparison" in results:
         figures_by_eval["checkpoint_comparison"] = _plot_checkpoint_comparison(
@@ -1421,6 +1451,8 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         r = results.get(key, {})
         base, alias = _split_eval_key(key)
         title = _MD_TITLES.get(base, base)
+        if base == "signal_reconstruction" and r.get("_model_name"):
+            title += f" — model: {r['_model_name']}"
         if alias:
             title += f" — dataset: {alias}"
         lines += ["", f"## {title}", ""]
@@ -1479,6 +1511,8 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         r = results.get(key, {})
         base, alias = _split_eval_key(key)
         title = _MD_TITLES.get(base, base)
+        if base == "signal_reconstruction" and r.get("_model_name"):
+            title += f" — model: {r['_model_name']}"
         if alias:
             title += f" — dataset: {alias}"
         if r.get("skipped"):
@@ -1521,9 +1555,13 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             if isinstance(val, pd.DataFrame):
                 base = _CSV_NAMES.get(base_eval, base_eval)
                 name = base if key == "results_df" else key
-                sub = ("comparison" if eval_name == "checkpoint_comparison"
-                       else _method_dirname(base_eval, alias))
-                val.to_csv(os.path.join(_csv_dir(sub), f"{name}.csv"), index=False)
+                if eval_name == "checkpoint_comparison":
+                    parts = ("comparison",)
+                elif base_eval == "signal_reconstruction" and r.get("_model_name"):
+                    parts = (r["_model_name"], _method_dirname(base_eval, alias))
+                else:
+                    parts = (_method_dirname(base_eval, alias),)
+                val.to_csv(os.path.join(_csv_dir(*parts), f"{name}.csv"), index=False)
         # Per-checkpoint DataFrames → <checkpoint>/<method>_<alias>/<base>.csv
         for cp_label, cp_res in (r.get("per_checkpoint") or {}).items():
             if not isinstance(cp_res, dict):

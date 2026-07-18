@@ -312,12 +312,16 @@ class EvalRunner:
 
         # ── signal reconstruction: one result per matrix dataset ──────────────
         if recon_requested:
+            # Reconstruction results are filed under the recon model's own name;
+            # when it matches a compared checkpoint, they land inside its directory.
+            recon_src = cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt
+            recon_model_name = os.path.splitext(os.path.basename(recon_src))[0] if recon_src else ""
             for alias in EVAL_DATASET_MATRIX["signal_reconstruction"]:
                 if alias not in datasets:
                     continue
                 print(f"\n[EvalRunner] Running: signal_reconstruction on {alias}")
                 try:
-                    all_results[f"signal_reconstruction_{alias}"] = SignalReconstructionEval.run(
+                    res = SignalReconstructionEval.run(
                         df=datasets[alias]["df_raw"],
                         recon_ckpt=cfg.recon_ckpt,
                         fe_ckpt=cfg.recon_fe_ckpt,
@@ -329,7 +333,9 @@ class EvalRunner:
                     )
                 except (ValueError, FileNotFoundError, RuntimeError) as e:
                     print(f"[EvalRunner] signal_reconstruction ({alias}) failed: {e}")
-                    all_results[f"signal_reconstruction_{alias}"] = {"skipped": True, "error": str(e)}
+                    res = {"skipped": True, "error": str(e)}
+                res["_model_name"] = recon_model_name
+                all_results[f"signal_reconstruction_{alias}"] = res
 
         # ── single-model evals ────────────────────────────────────────────────
         single_evals = [e for e in cfg.evals
