@@ -64,7 +64,10 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 
 from .checkpoint_loader import CheckpointLoader
-from .data_loader import load_data, build_dataloader, split_stack_holdout, split_partial_stack
+from .data_loader import (
+    load_data, build_dataloader, split_stack_holdout, split_partial_stack,
+    load_manifest_subset,
+)
 from .evaluations import (
     EmbeddingSimilarityEval,
     SignalReconstructionEval,
@@ -81,6 +84,26 @@ EVAL_TYPES = [
     "checkpoint_comparison", "clustering", "label_regression",
     "structured_similarity",
 ]
+
+# ── E4: multi-dataset evaluation ───────────────────────────────────────────────
+# alias → (nova_data subdir, manifest split, default sample count)
+DATASET_SPECS = {
+    "sanity":   ("single_channel_1k",  "train", 100),
+    "in_dist":  ("single_channel_10k", "valid", 500),
+    "multi_ch": ("multi_channel",      "valid", 1000),
+    "samples":  ("sampled_data",       "valid", 1000),
+    # "labeled" is loaded inside label_regression (labels.tsv, comp-grouped)
+}
+
+# Dataset × eval matrix: which datasets each eval runs on by default.
+# label_regression runs only on the labeled set (handled separately);
+# structured_similarity is run-level (its panel already spans datasets).
+EVAL_DATASET_MATRIX = {
+    "embedding_similarity":  ["sanity", "in_dist"],          # single-channel only
+    "clustering":            ["in_dist"],                    # needs enough stacks
+    "noise_robustness":      ["sanity", "in_dist"],
+    "signal_reconstruction": ["sanity", "in_dist", "multi_ch", "samples"],
+}
 CHECKPOINT_MODES = ["hf", "file", "dir", "multiple"]
 SPLIT_MODES = ["none", "stack_holdout", "partial_stack"]
 
@@ -88,7 +111,7 @@ SPLIT_MODES = ["none", "stack_holdout", "partial_stack"]
 @dataclass
 class EvalConfig:
     # Data
-    data_source: str                        # path to dir of .wav files or CSV
+    data_source: Optional[str] = None       # legacy single-dataset mode: .wav dir or CSV
     split_mode: str = "stack_holdout"       # none | stack_holdout | partial_stack
     n_holdout_stacks: int = 5
     holdout_ratio: float = 0.3
@@ -107,7 +130,15 @@ class EvalConfig:
     run_noise_in_comparison: bool = True
     run_clustering_in_comparison: bool = True
     run_label_regression_in_comparison: bool = True
-    label_reg_max_samples: int = 2000
+    label_reg_max_samples: int = 1000
+
+    # Multi-dataset evaluation (E4). Aliases resolve under nova_data_dir; sizes
+    # overridable via eval_set_sizes ("sanity=100,in_dist=500,...") or the global
+    # eval_set_size shortcut. multi_dataset=False falls back to the single
+    # data_source behaviour.
+    multi_dataset: bool = True
+    eval_set_sizes: Optional[str] = None
+    eval_set_size: Optional[int] = None
 
     # Signal reconstruction (per-component checkpoints, independent of checkpoint_mode)
     recon_ckpt: Optional[str] = None         # single 3AE ckpt: all pathways (fe/proj/transformer)
@@ -187,11 +218,174 @@ class EvalRunner:
 
         return df
 
+    # ── Multi-dataset helpers (E4) ────────────────────────────────────────────
+
+    def _dataset_sizes(self) -> dict:
+        cfg = self.cfg
+        sizes = {alias: n for alias, (_, _, n) in DATASET_SPECS.items()}
+        if cfg.eval_set_size:
+            sizes = {alias: int(cfg.eval_set_size) for alias in sizes}
+        if cfg.eval_set_sizes:
+            for part in str(cfg.eval_set_sizes).split(","):
+                alias, _, val = part.strip().partition("=")
+                if alias in sizes and val:
+                    sizes[alias] = int(val)
+        return sizes
+
+    def _needed_aliases(self) -> set:
+        cfg = self.cfg
+        needed = set()
+        comp_subevals = ["embedding_similarity"]
+        if cfg.run_clustering_in_comparison:
+            comp_subevals.append("clustering")
+        if cfg.run_noise_in_comparison:
+            comp_subevals.append("noise_robustness")
+        if "checkpoint_comparison" in cfg.evals:
+            for e in comp_subevals:
+                needed |= set(EVAL_DATASET_MATRIX.get(e, []))
+        for e in cfg.evals:
+            needed |= set(EVAL_DATASET_MATRIX.get(e, []))
+        if cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt:
+            needed |= set(EVAL_DATASET_MATRIX["signal_reconstruction"])
+        return needed
+
+    def _load_datasets(self, aliases: set) -> dict:
+        cfg = self.cfg
+        sizes = self._dataset_sizes()
+        datasets = {}
+        for alias in sorted(aliases):
+            subdir, split, _ = DATASET_SPECS[alias]
+            df_raw = load_manifest_subset(
+                os.path.join(cfg.nova_data_dir, subdir), split=split,
+                n=sizes[alias], seed=42,
+            )
+            loader, df = build_dataloader(
+                df_raw.copy(deep=True),
+                mask_ratio=cfg.mask_ratio, masking_type=cfg.masking_type,
+                batch_size=cfg.batch_size,
+            )
+            datasets[alias] = {"df": df, "loader": loader, "df_raw": df_raw}
+        return datasets
+
     # ── Main run ──────────────────────────────────────────────────────────────
 
     def run(self) -> dict:
         cfg = self.cfg
         print(f"[EvalRunner] Device: {cfg.device}")
+
+        if not (cfg.multi_dataset and cfg.nova_data_dir):
+            return self._run_single_dataset()
+
+        # ── E4: multi-dataset flow ────────────────────────────────────────────
+        aliases = self._needed_aliases()
+        print(f"[EvalRunner] Multi-dataset mode — loading: {sorted(aliases)}")
+        datasets = self._load_datasets(aliases)
+
+        all_results = {"_dataset_info": {
+            "sizes": {a: len(datasets[a]["df"]) for a in datasets},
+            "matrix": {e: list(v) for e, v in EVAL_DATASET_MATRIX.items()},
+        }}
+
+        recon_requested = ("signal_reconstruction" in cfg.evals
+                           or cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt)
+
+        # ── checkpoint_comparison ─────────────────────────────────────────────
+        if "checkpoint_comparison" in cfg.evals:
+            print("\n[EvalRunner] Running: checkpoint_comparison")
+            checkpoints = self._load_model() if cfg.checkpoint_mode == "multiple" else None
+            if checkpoints is None:
+                print("[EvalRunner] checkpoint_comparison requires checkpoint_mode='multiple'. Skipping.")
+            else:
+                all_results["checkpoint_comparison"] = CheckpointComparisonEval.run(
+                    checkpoints=checkpoints,
+                    datasets=datasets,
+                    eval_datasets=EVAL_DATASET_MATRIX,
+                    device=cfg.device,
+                    run_noise=cfg.run_noise_in_comparison,
+                    run_clustering=cfg.run_clustering_in_comparison,
+                    run_label_regression=cfg.run_label_regression_in_comparison,
+                    k=cfg.k,
+                    nova_data_dir=cfg.nova_data_dir,
+                    labeled_data_dir=cfg.labeled_data_dir,
+                    label_reg_max_samples=cfg.label_reg_max_samples,
+                )
+
+        # ── signal reconstruction: one result per matrix dataset ──────────────
+        if recon_requested:
+            for alias in EVAL_DATASET_MATRIX["signal_reconstruction"]:
+                if alias not in datasets:
+                    continue
+                print(f"\n[EvalRunner] Running: signal_reconstruction on {alias}")
+                try:
+                    all_results[f"signal_reconstruction_{alias}"] = SignalReconstructionEval.run(
+                        df=datasets[alias]["df_raw"],
+                        recon_ckpt=cfg.recon_ckpt,
+                        fe_ckpt=cfg.recon_fe_ckpt,
+                        tr_ckpt=cfg.recon_tr_ckpt,
+                        device=cfg.device, arch=cfg.arch,
+                        normalize=cfg.recon_normalize,
+                        max_samples=cfg.recon_max_samples,
+                        batch_size=cfg.batch_size,
+                    )
+                except (ValueError, FileNotFoundError, RuntimeError) as e:
+                    print(f"[EvalRunner] signal_reconstruction ({alias}) failed: {e}")
+                    all_results[f"signal_reconstruction_{alias}"] = {"skipped": True, "error": str(e)}
+
+        # ── single-model evals ────────────────────────────────────────────────
+        single_evals = [e for e in cfg.evals
+                        if e not in ("checkpoint_comparison", "signal_reconstruction")]
+        if single_evals:
+            model = self._load_model() if cfg.checkpoint_mode != "multiple" else None
+            if model is None and cfg.checkpoint_mode == "multiple":
+                print("[EvalRunner] Loading first checkpoint for single-model evals.")
+                model = self._load_model()[0][1]
+            model.to(cfg.device)
+
+            for eval_name in single_evals:
+                if eval_name == "label_regression":
+                    if not cfg.labeled_data_dir:
+                        print("[EvalRunner] label_regression requires labeled_data_dir. Skipping.")
+                    else:
+                        print("\n[EvalRunner] Running: label_regression (labeled)")
+                        all_results[eval_name] = LabelRegressionEval.run(
+                            model=model, labeled_data_dir=cfg.labeled_data_dir,
+                            device=cfg.device, batch_size=cfg.batch_size,
+                            max_samples=cfg.label_reg_max_samples,
+                        )
+                elif eval_name == "structured_similarity":
+                    from .evaluations import structured_similarity as struct_eval
+                    print("\n[EvalRunner] Running: structured_similarity (run-level panel)")
+                    all_results[eval_name] = struct_eval.run(
+                        model, cfg.nova_data_dir, device=cfg.device,
+                        batch_size=cfg.batch_size,
+                    )
+                elif eval_name in EVAL_DATASET_MATRIX:
+                    for alias in EVAL_DATASET_MATRIX[eval_name]:
+                        if alias not in datasets:
+                            continue
+                        ds = datasets[alias]
+                        print(f"\n[EvalRunner] Running: {eval_name} on {alias}")
+                        if eval_name == "embedding_similarity":
+                            all_results[f"{eval_name}_{alias}"] = EmbeddingSimilarityEval.run(
+                                df=ds["df"], model=model, dataloader=ds["loader"],
+                                k=cfg.k, device=cfg.device)
+                        elif eval_name == "noise_robustness":
+                            all_results[f"{eval_name}_{alias}"] = NoiseRobustnessEval.run(
+                                df=ds["df"], model=model, device=cfg.device,
+                                batch_size=cfg.batch_size)
+                        elif eval_name == "clustering":
+                            all_results[f"{eval_name}_{alias}"] = ClusteringEval.run(
+                                df=ds["df"], model=model, device=cfg.device,
+                                batch_size=cfg.batch_size, k=cfg.k)
+                else:
+                    print(f"[EvalRunner] Unknown eval: {eval_name!r}")
+
+        return all_results
+
+    # ── Legacy single-dataset flow (multi_dataset=False) ──────────────────────
+
+    def _run_single_dataset(self) -> dict:
+        cfg = self.cfg
         print(f"[EvalRunner] Loading data from: {cfg.data_source}")
         df = self._load_data()
         print(f"[EvalRunner] Data shape: {df.shape}, stacks: {df['stack_idx'].nunique()}")
@@ -207,10 +401,11 @@ class EvalRunner:
             masking_type=cfg.masking_type,
             batch_size=cfg.batch_size,
         )
+        datasets = {"data": {"df": df, "loader": dataloader, "df_raw": df_raw}}
+        matrix = {e: ["data"] for e in EVAL_DATASET_MATRIX}
 
         all_results = {}
 
-        # ── checkpoint_comparison handles its own model loading ───────────────
         if "checkpoint_comparison" in cfg.evals:
             print("\n[EvalRunner] Running: checkpoint_comparison")
             checkpoints = self._load_model() if cfg.checkpoint_mode == "multiple" else None
@@ -219,8 +414,8 @@ class EvalRunner:
             else:
                 all_results["checkpoint_comparison"] = CheckpointComparisonEval.run(
                     checkpoints=checkpoints,
-                    df=df,
-                    dataloader=dataloader,
+                    datasets=datasets,
+                    eval_datasets=matrix,
                     device=cfg.device,
                     run_noise=cfg.run_noise_in_comparison,
                     run_clustering=cfg.run_clustering_in_comparison,
@@ -231,7 +426,6 @@ class EvalRunner:
                     label_reg_max_samples=cfg.label_reg_max_samples,
                 )
 
-        # ── signal reconstruction: own per-component checkpoints ──────────────
         if ("signal_reconstruction" in cfg.evals
                 or cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt):
             print("\n[EvalRunner] Running: signal_reconstruction")
@@ -241,8 +435,7 @@ class EvalRunner:
                     recon_ckpt=cfg.recon_ckpt,
                     fe_ckpt=cfg.recon_fe_ckpt,
                     tr_ckpt=cfg.recon_tr_ckpt,
-                    device=cfg.device,
-                    arch=cfg.arch,
+                    device=cfg.device, arch=cfg.arch,
                     normalize=cfg.recon_normalize,
                     max_samples=cfg.recon_max_samples,
                     batch_size=cfg.batch_size,
@@ -251,7 +444,6 @@ class EvalRunner:
                 print(f"[EvalRunner] signal_reconstruction failed: {e}")
                 all_results["signal_reconstruction"] = {"skipped": True, "error": str(e)}
 
-        # ── single-model evals ────────────────────────────────────────────────
         single_evals = [e for e in cfg.evals
                         if e not in ("checkpoint_comparison", "signal_reconstruction")]
         if single_evals:
@@ -259,7 +451,6 @@ class EvalRunner:
             if model is None and cfg.checkpoint_mode == "multiple":
                 print("[EvalRunner] Loading first checkpoint for single-model evals.")
                 model = self._load_model()[0][1]
-
             model.to(cfg.device)
 
             for eval_name in single_evals:
@@ -342,7 +533,17 @@ def main():
         epilog=_CLI_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--data_source", required=True, help="Path to .wav directory or CSV")
+    parser.add_argument("--data_source", default=None,
+                        help="Legacy single-dataset mode: path to .wav directory or CSV "
+                             "(with --single_dataset). Multi-dataset mode (default) draws "
+                             "the E4 datasets from --nova_data_dir instead.")
+    parser.add_argument("--single_dataset", action="store_true",
+                        help="Disable E4 multi-dataset mode; evaluate --data_source only.")
+    parser.add_argument("--eval_set_sizes", default=None,
+                        help="Per-dataset sample counts, e.g. 'sanity=100,in_dist=500,"
+                             "multi_ch=1000,samples=1000'. Defaults per DATASET_SPECS.")
+    parser.add_argument("--eval_set_size", type=int, default=None,
+                        help="Global sample-count override for all datasets (smoke runs).")
     parser.add_argument("--checkpoint_mode", default="file", choices=CHECKPOINT_MODES)
     parser.add_argument("--checkpoint_path", default=None, help="Path to .pt file or checkpoint dir")
     parser.add_argument("--checkpoint_paths", nargs="+", default=None,
@@ -381,6 +582,8 @@ def main():
     args = parser.parse_args()
     if args.recon_normalize is not None:
         args.recon_normalize = args.recon_normalize == "true"
+    args.multi_dataset = not args.single_dataset
+    del args.single_dataset
     runner = EvalRunner.from_args(args)
     results = runner.run()
     md_path, html_path = runner.report(results)

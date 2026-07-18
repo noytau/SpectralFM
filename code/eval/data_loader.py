@@ -75,6 +75,67 @@ def load_data(source: str, sample_rate: int = 16000, stack_size: int = 10) -> pd
     raise FileNotFoundError(f"Source not found: {source}")
 
 
+_MANIFEST_REMAPS = [("/storage/noy/", "/mnt5/noy/"), ("/storage/", "/mnt5/")]
+
+
+def load_manifest_subset(
+    dataset_dir: str,
+    split: str = "valid",
+    n: int = 500,
+    seed: int = 42,
+    stack_size: int = 10,
+) -> pd.DataFrame:
+    """
+    Load a deterministic n-sample subset from a fairseq manifest (train.tsv/valid.tsv).
+
+    Samples WHOLE stacks (contiguous blocks of `stack_size` manifest rows) so the
+    stack structure needed by the stack-query/clustering evals survives the draw:
+    n // stack_size blocks are chosen with a seeded RNG, each contributing its
+    `stack_size` consecutive rows. TSV roots written for RunAI (/storage/...) are
+    remapped to the Geoffrey mount (/mnt5/...).
+
+    Returns a DataFrame with 'data', 'stack_idx', 'filename' columns.
+    """
+    tsv = os.path.join(dataset_dir, f"{split}.tsv")
+    if not os.path.isfile(tsv):
+        raise FileNotFoundError(tsv)
+    with open(tsv) as f:
+        root = f.readline().strip()
+        rows = [ln.strip().split("\t")[0] for ln in f if ln.strip()]
+    for src, dst in _MANIFEST_REMAPS:
+        if root.startswith(src):
+            root = dst + root[len(src):]
+            break
+
+    n_blocks_total = len(rows) // stack_size
+    n_blocks = max(1, min(n // stack_size, n_blocks_total))
+    rng = np.random.default_rng(seed)
+    chosen = np.sort(rng.choice(n_blocks_total, n_blocks, replace=False))
+
+    all_rows = []
+    for stack_idx, b in enumerate(chosen):
+        for fname in rows[b * stack_size : (b + 1) * stack_size]:
+            path = os.path.join(root, fname)
+            try:
+                waveform, _ = torchaudio.load(path)
+                if waveform.shape[0] > 1:
+                    waveform = waveform.mean(dim=0, keepdim=True)
+                all_rows.append({
+                    "data": waveform.squeeze(0).tolist(),
+                    "stack_idx": stack_idx,
+                    "filename": fname,
+                })
+            except Exception as e:
+                print(f"[DataLoader] Skipping {fname}: {e}")
+
+    if not all_rows:
+        raise RuntimeError(f"No wavs loaded from {tsv}")
+    df = pd.DataFrame(all_rows)
+    print(f"[DataLoader] {os.path.basename(dataset_dir)}/{split}: "
+          f"{len(df)} samples ({n_blocks} stacks, seed={seed})")
+    return df
+
+
 _LABELED_PATTERN = re.compile(r"dataset(\d+)_comp(\d+)_spec_(\d+)\.wav")
 
 

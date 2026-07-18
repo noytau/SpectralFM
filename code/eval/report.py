@@ -134,8 +134,9 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     figures = []
     rdf = results.get("results_df")
 
+    # Unstructured cosine similarity maps removed per E4 decision;
+    # the distribution histograms remain.
     sim_dists = results.get("similarity_distributions", {})
-    figures += _plot_cosine_similarity_maps(sim_dists, output_dir)
     figures += _plot_cosine_sim_distributions(sim_dists, output_dir)
 
     if rdf is None:
@@ -470,14 +471,18 @@ def _shorten_label(label: str, max_len: int = 28) -> str:
     return label[:half] + "…" + label[-half:]
 
 
-def _plot_noise_robustness_comparison(cdf: pd.DataFrame, output_dir: str) -> list:
+def _plot_noise_robustness_comparison(cdf: pd.DataFrame, output_dir: str,
+                                      alias: str = "") -> list:
     """
     Noise robustness grouped bars across checkpoints.
     Recreation of evaluation_runner.plot_noise_robustness_comparison panel 1
     (embedding similarity per noise type). Legend sits outside the axes and
     checkpoint labels are shortened so nothing overlaps the title.
+    alias filters the E4 dataset-suffixed columns (noise_<type>_<alias>).
     """
     noise_cols = [c for c in cdf.columns if c.startswith("noise_")]
+    if alias:
+        noise_cols = [c for c in noise_cols if c.endswith(f"_{alias}")]
     if not noise_cols:
         return []
 
@@ -487,10 +492,14 @@ def _plot_noise_robustness_comparison(cdf: pd.DataFrame, output_dir: str) -> lis
 
     fig, ax = plt.subplots(figsize=(max(8, len(run_labels) * 2.5 + 3), 4.5))
     for i, col in enumerate(noise_cols):
-        ax.bar(x + i * width, cdf[col].fillna(0.0), width, label=col.replace("noise_", ""))
+        lbl = col.replace("noise_", "")
+        if alias and lbl.endswith(f"_{alias}"):
+            lbl = lbl[: -len(alias) - 1]
+        ax.bar(x + i * width, cdf[col].fillna(0.0), width, label=lbl)
 
     ax.set_ylabel("Embedding Similarity (higher = more robust)", fontsize=9)
-    ax.set_title("Noise Robustness: Embedding Similarity", fontsize=11)
+    ax.set_title(f"Noise Robustness: Embedding Similarity"
+                 + (f" — {alias}" if alias else ""), fontsize=11)
     ax.set_xticks(x + width * (len(noise_cols) - 1) / 2)
     ax.set_xticklabels(run_labels, rotation=20, ha="right", fontsize=8)
     ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
@@ -498,8 +507,10 @@ def _plot_noise_robustness_comparison(cdf: pd.DataFrame, output_dir: str) -> lis
     ax.set_ylim(0, 1.05)
 
     fig.tight_layout()
-    path = _save_fig(fig, os.path.join(output_dir, "noise_robustness_comparison.png"))
-    return [("Noise robustness — embedding similarity per noise type", path, "")]
+    sfx = f"_{alias}" if alias else ""
+    path = _save_fig(fig, os.path.join(output_dir, f"noise_robustness_comparison{sfx}.png"))
+    return [(f"Noise robustness — embedding similarity per noise type"
+             + (f" ({alias})" if alias else ""), path, "")]
 
 
 def _plot_noise_example_grid(noise_results: dict, output_dir: str, label: str = "",
@@ -850,6 +861,25 @@ _METHOD_DIRS = {
 }
 
 
+def _split_eval_key(key: str) -> tuple:
+    """
+    Split a results key into (base_eval, dataset_alias) — E4 keys carry the
+    dataset alias as a suffix, e.g. 'noise_robustness_sanity' → ('noise_robustness',
+    'sanity'); unsuffixed keys return alias ''.
+    """
+    for base in sorted(_METHOD_DIRS, key=len, reverse=True):
+        if key == base:
+            return base, ""
+        if key.startswith(base + "_"):
+            return base, key[len(base) + 1:]
+    return key, ""
+
+
+def _method_dirname(base: str, alias: str) -> str:
+    d = _METHOD_DIRS.get(base, base)
+    return f"{d}_{alias}" if alias else d
+
+
 def _relocate(figs: list, target_dir: str, strip_label: str = "") -> list:
     """
     Move generated figure files into a per-checkpoint / per-method subdirectory,
@@ -909,52 +939,53 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
             figures.append(("Scalar metrics across checkpoints", path, ""))
 
         # ── Summary: per-method comparison figures ────────────────────────────
-        figures += _plot_noise_robustness_comparison(cdf, output_dir)
-        figures += _plot_label_regression_comparison(cdf, output_dir)
+        # Per-dataset noise comparisons → comparison/<alias>/; label regression
+        # (labeled set) → comparison/labeled/
+        # NB: aliases contain underscores (in_dist, multi_ch) — match against the
+        # known alias set instead of splitting on the last underscore.
+        _KNOWN_ALIASES = ("sanity", "in_dist", "multi_ch", "samples", "labeled", "data")
+        noise_aliases = sorted({a for c in cdf.columns if c.startswith("noise_")
+                                for a in _KNOWN_ALIASES if c.endswith("_" + a)})
+        for alias in noise_aliases:
+            figs = _plot_noise_robustness_comparison(cdf, output_dir, alias=alias)
+            figures += _relocate(figs, os.path.join(output_dir, "comparison", alias))
+        lr_figs = _plot_label_regression_comparison(cdf, output_dir)
+        figures += _relocate(lr_figs, os.path.join(output_dir, "comparison", "labeled"))
 
     # ── Summary: all-models structured similarity (raw + centered) ───────────
     if per_cp:
         figures += _plot_struct_sim_all_models(per_cp, output_dir, centered=False)
         figures += _plot_struct_sim_all_models(per_cp, output_dir, centered=True)
 
-    # Cross-checkpoint figures live in a shared comparison/ subdir
-    figures = _relocate(figures, os.path.join(output_dir, "comparison"))
+    # Remaining cross-checkpoint figures (scalar grid, all-models panels) → comparison/
+    figures = [f for f in figures if os.sep + "comparison" + os.sep in f[1]] + _relocate(
+        [f for f in figures if os.sep + "comparison" + os.sep not in f[1]],
+        os.path.join(output_dir, "comparison"))
 
-    # ── Per-checkpoint figures: <run_dir>/<checkpoint>/<method>/ ─────────────
+    # ── Per-checkpoint figures: <run_dir>/<checkpoint>/<method>_<dataset>/ ────
+    _CP_FIG_BUILDERS = {
+        "structured_similarity": lambda r, d, lbl: _plot_structured_similarity_maps(r, d, label=lbl),
+        "clustering":            lambda r, d, lbl: _plot_clustering_scatter(r, d, label=lbl),
+        "noise_robustness":      lambda r, d, lbl: (_plot_noise_example_grid(r, d, label=lbl)
+                                                    + _plot_noise_examples(r, d, label=lbl)),
+        "label_regression":      lambda r, d, lbl: _plot_label_reg_scatter(r, d, label=lbl),
+        "embedding_similarity":  lambda r, d, lbl: _plot_ksimilar_examples(r, d, label=lbl),
+    }
+
     if per_cp:
         for cp_label, cp_res in per_cp.items():
             cp_dir = os.path.join(output_dir, cp_label)
-
-            def _add(figs, method):
-                target = os.path.join(cp_dir, _METHOD_DIRS[method])
+            for key, res in cp_res.items():
+                if key.startswith("_") or not isinstance(res, dict):
+                    continue
+                base, alias = _split_eval_key(key)
+                builder = _CP_FIG_BUILDERS.get(base)
+                if builder is None:
+                    continue
+                figs = builder(res, output_dir, cp_label)
+                target = os.path.join(cp_dir, _method_dirname(base, alias))
                 for cap, path in _relocate(figs, target, strip_label=cp_label):
                     figures.append((cap, path, cp_label))
-
-            ss = cp_res.get("structured_similarity", {})
-            if ss:
-                _add(_plot_structured_similarity_maps(ss, output_dir, label=cp_label),
-                     "structured_similarity")
-
-            clust = cp_res.get("clustering", {})
-            if clust:
-                _add(_plot_clustering_scatter(clust, output_dir, label=cp_label),
-                     "clustering")
-
-            noise = cp_res.get("noise_robustness", {})
-            if noise:
-                nz_figs = _plot_noise_example_grid(noise, output_dir, label=cp_label)
-                nz_figs += _plot_noise_examples(noise, output_dir, label=cp_label)
-                _add(nz_figs, "noise_robustness")
-
-            lr = cp_res.get("label_regression", {})
-            if lr:
-                _add(_plot_label_reg_scatter(lr, output_dir, label=cp_label),
-                     "label_regression")
-
-            emb = cp_res.get("embedding_similarity", {})
-            if emb:
-                _add(_plot_ksimilar_examples(emb, output_dir, label=cp_label),
-                     "embedding_similarity")
 
     return figures
 
@@ -1173,9 +1204,12 @@ def _html_section_comparison(results: dict, figures: list) -> str:
 def _build_html(results: dict, config, ts: str, sections_html: list) -> str:
     config_meta = ""
     if config is not None:
-        ckpt = getattr(config, "checkpoint_path", "")
-        data = getattr(config, "data_source", "")
-        config_meta = f" &nbsp;|&nbsp; data: <code>{os.path.basename(data)}</code> &nbsp;|&nbsp; ckpt: <code>{os.path.basename(str(ckpt))}</code>"
+        ckpt = getattr(config, "checkpoint_path", "") or ""
+        data = getattr(config, "data_source", "") or ""
+        if not data and getattr(config, "multi_dataset", False):
+            data = "multi-dataset (E4)"
+        config_meta = (f" &nbsp;|&nbsp; data: <code>{os.path.basename(data) or data}</code>"
+                       f" &nbsp;|&nbsp; ckpt: <code>{os.path.basename(str(ckpt))}</code>")
 
     body = "\n".join(s for s in sections_html if s)
     return f"""<!DOCTYPE html>
@@ -1234,6 +1268,24 @@ def _write_run_info(run_dir: str, ts: str, results: dict, config) -> str:
         if labeled_dir:
             lines.append(f"- **Label regression data:** `{labeled_dir}`")
 
+    # E4 dataset matrix + sizes
+    ds_info = results.get("_dataset_info") or {}
+    if ds_info:
+        lines += ["", "## Datasets evaluated (E4 multi-dataset mode)", "",
+                  "| Alias | Samples |", "|-------|---------|"]
+        for alias, n in (ds_info.get("sizes") or {}).items():
+            lines.append(f"| {alias} | {n} |")
+        lines += ["", "## Dataset x eval matrix (excluded combinations were skipped)", "",
+                  "| Eval | Datasets |", "|------|----------|"]
+        all_aliases = set((ds_info.get("sizes") or {}))
+        for ev, aliases in (ds_info.get("matrix") or {}).items():
+            run_on = [a for a in aliases if a in all_aliases]
+            skipped = sorted(all_aliases - set(aliases))
+            note = f" (skipped: {', '.join(skipped)})" if skipped else ""
+            lines.append(f"| {ev} | {', '.join(run_on)}{note} |")
+        lines.append("| label_regression | labeled (only) |")
+        lines.append("| structured_similarity | run-level canonical panel |")
+
     # Checkpoints found in results
     cp_results = results.get("checkpoint_comparison", {})
     cdf = cp_results.get("comparison_df")
@@ -1274,47 +1326,36 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
     os.makedirs(run_dir, exist_ok=True)
 
     # ── Collect figures per eval ──────────────────────────────────────────────
-    figures_by_eval: dict[str, list] = {}
+    # Standalone results may carry an E4 dataset-alias suffix (e.g.
+    # noise_robustness_sanity); figures land in <run_dir>/<method>_<alias>/.
+    _FIG_BUILDERS = {
+        "embedding_similarity": lambda r, d: (_plot_embedding_similarity(r, d)
+                                              + _plot_ksimilar_examples(r, d)),
+        "signal_reconstruction": _plot_signal_reconstruction,
+        "noise_robustness": lambda r, d: (_plot_noise_robustness(r, d)
+                                          + _plot_noise_example_grid(r, d)
+                                          + _plot_noise_examples(r, d)),
+        "clustering": _plot_clustering_scatter,
+        "label_regression": _plot_label_reg_scatter,
+        "structured_similarity": _plot_structured_similarity_maps,
+    }
 
-    if "embedding_similarity" in results:
-        figures_by_eval["embedding_similarity"] = (
-            _plot_embedding_similarity(results["embedding_similarity"], run_dir)
-            + _plot_ksimilar_examples(results["embedding_similarity"], run_dir)
-        )
-    if "signal_reconstruction" in results:
-        figures_by_eval["signal_reconstruction"] = _plot_signal_reconstruction(
-            results["signal_reconstruction"], run_dir
-        )
-    if "noise_robustness" in results:
-        figures_by_eval["noise_robustness"] = (
-            _plot_noise_robustness(results["noise_robustness"], run_dir)
-            + _plot_noise_example_grid(results["noise_robustness"], run_dir)
-            + _plot_noise_examples(results["noise_robustness"], run_dir)
-        )
-    if "clustering" in results:
-        figures_by_eval["clustering"] = _plot_clustering_scatter(
-            results["clustering"], run_dir
-        )
-    if "label_regression" in results:
-        figures_by_eval["label_regression"] = _plot_label_reg_scatter(
-            results["label_regression"], run_dir
-        )
-    if "structured_similarity" in results:
-        figures_by_eval["structured_similarity"] = _plot_structured_similarity_maps(
-            results["structured_similarity"], run_dir
-        )
+    figures_by_eval: dict[str, list] = {}
+    for key, r in results.items():
+        if key.startswith("_") or key == "checkpoint_comparison" or not isinstance(r, dict):
+            continue
+        base, alias = _split_eval_key(key)
+        builder = _FIG_BUILDERS.get(base)
+        if builder is None:
+            continue
+        figs = builder(r, run_dir)
+        figures_by_eval[key] = _relocate(
+            figs, os.path.join(run_dir, _method_dirname(base, alias)))
+
     if "checkpoint_comparison" in results:
         figures_by_eval["checkpoint_comparison"] = _plot_checkpoint_comparison(
             results["checkpoint_comparison"], run_dir
         )
-
-    # Standalone eval figures live in <run_dir>/<method>/ (checkpoint_comparison
-    # organizes its own comparison/ + per-checkpoint subdirs)
-    for eval_name in list(figures_by_eval):
-        if eval_name == "checkpoint_comparison":
-            continue
-        method_dir = os.path.join(run_dir, _METHOD_DIRS.get(eval_name, eval_name))
-        figures_by_eval[eval_name] = _relocate(figures_by_eval[eval_name], method_dir)
 
     # checkpoint_comparison returns (cap, path, cp_label) triples; others return (cap, path) pairs
     all_figures = []
@@ -1338,71 +1379,56 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         for k, v in vars(config).items():
             lines.append(f"| `{k}` | `{v}` |")
 
-    if "embedding_similarity" in results:
-        r = results["embedding_similarity"]
-        lines += [
-            "", "## Embedding Similarity", "",
-            "| Metric | Value |", "|--------|-------|",
-            f"| Embedding stack match rate | {r.get('embedding_stack_match_rate', 'N/A'):.3f} |",
-            f"| Input stack match rate     | {r.get('input_stack_match_rate', 'N/A'):.3f} |",
-            f"| Average match score (0–100)| {r.get('match_score_avg', 'N/A'):.1f} |",
-        ]
-        for cap, path in figures_by_eval.get("embedding_similarity", []):
-            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
+    _MD_TITLES = {
+        "embedding_similarity": "Embedding Similarity (stack query)",
+        "signal_reconstruction": "Signal Reconstruction",
+        "noise_robustness": "Noise Robustness",
+        "clustering": "Clustering",
+        "label_regression": "Label Regression (parameter_0)",
+        "structured_similarity": "Structured Similarity (canonical panel)",
+    }
 
-    if "signal_reconstruction" in results:
-        r = results["signal_reconstruction"]
-        lines += ["", "## Signal Reconstruction"]
-        if r.get("skipped"):
-            lines.append(f"*Skipped — {r.get('error', 'no reconstruction checkpoints given')}.*")
-        else:
-            lines += ["", "| Metric | Value |", "|--------|-------|"]
+    def _md_metric_lines(base, r):
+        out = ["| Metric | Value |", "|--------|-------|"]
+        if base == "embedding_similarity":
+            out.append(f"| Embedding stack match rate | {r.get('embedding_stack_match_rate', 0):.3f} |")
+            out.append(f"| Input stack match rate     | {r.get('input_stack_match_rate', 0):.3f} |")
+            out.append(f"| Average match score (0-100)| {r.get('match_score_avg', 0):.1f} |")
+        elif base == "signal_reconstruction":
             for key, label in (("fe", "FE"), ("proj", "Projection"), ("tr", "Transformer")):
                 if f"recon_{key}_mse_mean" in r:
-                    lines.append(f"| {label} recon mean MSE | {r[f'recon_{key}_mse_mean']:.6e} |")
-            lines.append(f"| normalize | {r.get('normalize')} |")
-            for cap, path in figures_by_eval.get("signal_reconstruction", []):
-                lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
-
-    if "noise_robustness" in results:
-        r = results["noise_robustness"]
-        lines += ["", "## Noise Robustness", ""]
-        summary = r.get("summary", {})
-        if summary:
-            lines += ["| Noise Type | Mean Cosine Sim |", "|------------|-----------------|"]
-            for k, v in summary.items():
-                lines.append(f"| {k} | {v:.4f} |")
-        for cap, path in figures_by_eval.get("noise_robustness", []):
-            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
-
-    if "clustering" in results:
-        r = results["clustering"]
-        lines += ["", "## Clustering", ""]
-        if "comp_cluster_error" in r:
-            lines.append(f"*Skipped — {r['comp_cluster_error']}*")
-        else:
-            lines += ["| Metric | Value |", "|--------|-------|"]
+                    out.append(f"| {label} recon mean MSE | {r[f'recon_{key}_mse_mean']:.6e} |")
+            out.append(f"| normalize | {r.get('normalize')} |")
+        elif base == "noise_robustness":
+            for k, v in (r.get("summary") or {}).items():
+                out.append(f"| {k} | {v:.4f} |")
+        elif base == "clustering":
             for key in ("comp_cluster_ari", "comp_cluster_nmi", "comp_cluster_vmeasure",
                         "comp_cluster_silhouette", "comp_cluster_knn_precision",
                         "comp_cluster_retrieval_map"):
                 if key in r:
-                    lines.append(f"| {key.replace('comp_cluster_', '')} | {r[key]:.4f} |")
-        for cap, path in figures_by_eval.get("clustering", []):
-            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
+                    out.append(f"| {key.replace('comp_cluster_', '')} | {r[key]:.4f} |")
+        elif base == "label_regression":
+            for sfx in ("", "_2c", "_3c"):
+                for key in ("label_reg_input_r2", "label_reg_emb_r2", "label_reg_improvement_r2"):
+                    if f"{key}{sfx}" in r:
+                        out.append(f"| {key}{sfx} | {r[f'{key}{sfx}']:.4f} |")
+        return out if len(out) > 2 else []
 
-    if "label_regression" in results:
-        r = results["label_regression"]
-        lines += ["", "## Label Regression (parameter_0)", ""]
-        lines += ["| Metric | Value |", "|--------|-------|"]
-        for key in ("label_reg_input_r2", "label_reg_emb_r2", "label_reg_improvement_r2"):
-            if key in r:
-                lines.append(f"| {key} | {r[key]:.4f} |")
-        for cap, path in figures_by_eval.get("label_regression", []):
-            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
-
-    if "structured_similarity" in results:
-        lines += ["", "## Structured Similarity (canonical 100-sample panel)"]
-        for cap, path in figures_by_eval.get("structured_similarity", []):
+    for key in sorted(figures_by_eval):
+        if key == "checkpoint_comparison":
+            continue
+        r = results.get(key, {})
+        base, alias = _split_eval_key(key)
+        title = _MD_TITLES.get(base, base)
+        if alias:
+            title += f" — dataset: {alias}"
+        lines += ["", f"## {title}", ""]
+        if r.get("skipped"):
+            lines.append(f"*Skipped — {r.get('error', 'n/a')}.*")
+            continue
+        lines += _md_metric_lines(base, r)
+        for cap, path in figures_by_eval.get(key, []):
             lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "checkpoint_comparison" in results:
@@ -1425,39 +1451,43 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
     html_path = os.path.join(run_dir, "eval_report.html")
     sections = [_html_section_config(config)]
 
-    if "embedding_similarity" in results:
-        sections.append(_html_section_embedding(
-            results, figures_by_eval.get("embedding_similarity", [])
-        ))
-    if "signal_reconstruction" in results:
-        sections.append(_html_section_signal_reconstruction(
-            results, figures_by_eval.get("signal_reconstruction", [])
-        ))
-    if "noise_robustness" in results:
-        sections.append(_html_section_noise(
-            results, figures_by_eval.get("noise_robustness", [])
-        ))
-    if "clustering" in results:
-        r = results["clustering"]
-        cards = {k.replace("comp_cluster_", ""): f"{v:.4f}"
-                 for k, v in r.items()
-                 if k.startswith("comp_cluster_") and isinstance(v, (int, float))}
+    def _html_cards(base, r):
+        if base == "embedding_similarity":
+            return {"Emb stack match rate": f"{r.get('embedding_stack_match_rate', 0):.3f}",
+                    "Input stack match rate": f"{r.get('input_stack_match_rate', 0):.3f}",
+                    "Match score (0-100)": f"{r.get('match_score_avg', 0):.1f}"}
+        if base == "signal_reconstruction":
+            cards = {}
+            for k2, lbl in (("fe", "FE"), ("proj", "Projection"), ("tr", "Transformer")):
+                if f"recon_{k2}_mse_mean" in r:
+                    cards[f"{lbl} recon mean MSE"] = f"{r[f'recon_{k2}_mse_mean']:.3e}"
+            cards["normalize"] = str(r.get("normalize"))
+            return cards
+        if base == "noise_robustness":
+            return {k: f"{v:.4f}" for k, v in (r.get("summary") or {}).items()}
+        if base == "clustering":
+            return {k.replace("comp_cluster_", ""): f"{v:.4f}" for k, v in r.items()
+                    if k.startswith("comp_cluster_") and isinstance(v, (int, float))}
+        if base == "label_regression":
+            return {k: f"{v:.4f}" for k, v in r.items()
+                    if k.startswith("label_reg_") and isinstance(v, (int, float))}
+        return {}
+
+    for key in sorted(figures_by_eval):
+        if key == "checkpoint_comparison":
+            continue
+        r = results.get(key, {})
+        base, alias = _split_eval_key(key)
+        title = _MD_TITLES.get(base, base)
+        if alias:
+            title += f" — dataset: {alias}"
+        if r.get("skipped"):
+            sections.append(f"<section>\n<h2>{title}</h2>\n"
+                            f"<p><em>Skipped — {r.get('error', 'n/a')}.</em></p>\n</section>")
+            continue
         sections.append(_html_section_generic(
-            "Clustering", cards, figures_by_eval.get("clustering", [])
-        ))
-    if "label_regression" in results:
-        r = results["label_regression"]
-        cards = {k: f"{v:.4f}" for k, v in r.items()
-                 if k.startswith("label_reg_") and isinstance(v, (int, float))}
-        sections.append(_html_section_generic(
-            "Label Regression (parameter_0)", cards,
-            figures_by_eval.get("label_regression", [])
-        ))
-    if "structured_similarity" in results:
-        sections.append(_html_section_generic(
-            "Structured Similarity (canonical panel)", {},
-            figures_by_eval.get("structured_similarity", [])
-        ))
+            title, _html_cards(base, r), figures_by_eval.get(key, [])))
+
     if "checkpoint_comparison" in results:
         sections.append(_html_section_comparison(
             results, figures_by_eval.get("checkpoint_comparison", [])
@@ -1483,29 +1513,31 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         return d
 
     for eval_name, r in results.items():
-        if not isinstance(r, dict):
+        if eval_name.startswith("_") or not isinstance(r, dict):
             continue
-        # Top-level DataFrames: comparison_df → comparison/, standalone evals → <method>/
+        base_eval, alias = _split_eval_key(eval_name)
+        # Top-level DataFrames: comparison_df → comparison/, standalone evals → <method>_<alias>/
         for key, val in r.items():
             if isinstance(val, pd.DataFrame):
-                base = _CSV_NAMES.get(eval_name, eval_name)
+                base = _CSV_NAMES.get(base_eval, base_eval)
                 name = base if key == "results_df" else key
                 sub = ("comparison" if eval_name == "checkpoint_comparison"
-                       else _METHOD_DIRS.get(eval_name, eval_name))
+                       else _method_dirname(base_eval, alias))
                 val.to_csv(os.path.join(_csv_dir(sub), f"{name}.csv"), index=False)
-        # Per-checkpoint DataFrames → <checkpoint>/<method>/<base>.csv
+        # Per-checkpoint DataFrames → <checkpoint>/<method>_<alias>/<base>.csv
         for cp_label, cp_res in (r.get("per_checkpoint") or {}).items():
             if not isinstance(cp_res, dict):
                 continue
             for sub_name, sub_res in cp_res.items():
-                if not isinstance(sub_res, dict):
+                if sub_name.startswith("_") or not isinstance(sub_res, dict):
                     continue
                 rdf = sub_res.get("results_df")
                 if isinstance(rdf, pd.DataFrame):
-                    base = _CSV_NAMES.get(sub_name, sub_name)
-                    sub = _METHOD_DIRS.get(sub_name, sub_name)
-                    rdf.to_csv(os.path.join(_csv_dir(cp_label, sub), f"{base}.csv"),
-                               index=False)
+                    sub_base, sub_alias = _split_eval_key(sub_name)
+                    base = _CSV_NAMES.get(sub_base, sub_base)
+                    rdf.to_csv(os.path.join(
+                        _csv_dir(cp_label, _method_dirname(sub_base, sub_alias)),
+                        f"{base}.csv"), index=False)
 
     total_figs = len(all_figures)
     print(f"[Report] Run dir  : {run_dir}")

@@ -1,16 +1,24 @@
 """
 Checkpoint Comparison Evaluation
 ----------------------------------
-Runs embedding_similarity (and optionally noise_robustness) across multiple checkpoints.
+Runs the per-model evals across multiple checkpoints — on multiple datasets (E4).
 Shows how evaluation scores evolve during training.
 
 This is NOT a standalone evaluation — it wraps the other evaluations and produces
 a comparative view across training steps/epochs.
+
+`datasets` maps dataset alias → {"df": normalized_df, "loader": dataloader}.
+Which evals run on which alias comes from `eval_datasets` (the dataset × eval
+matrix, see runner.EVAL_DATASET_MATRIX). Metric columns and per-checkpoint result
+keys carry the alias suffix, e.g. `embedding_stack_match_rate_in_dist`,
+`noise_robustness_sanity`. label_regression (labeled set only) and
+structured_similarity (run-level panel) keep unsuffixed keys.
 """
 from __future__ import annotations
 import datetime
 import os
-from typing import Optional
+from typing import Dict, Optional
+
 import pandas as pd
 
 from . import embedding_similarity as emb_eval
@@ -21,9 +29,9 @@ from . import label_regression as labelreg_eval
 
 
 def run(
-    checkpoints: list,          # [(label, model), ...] from CheckpointLoader.load_multiple
-    df: pd.DataFrame,
-    dataloader,
+    checkpoints: list,             # [(label, model, path), ...] from CheckpointLoader.load_multiple
+    datasets: Dict[str, dict],     # alias → {"df": DataFrame, "loader": DataLoader}
+    eval_datasets: Dict[str, list],  # eval name → list of dataset aliases
     device: str = "cpu",
     run_noise: bool = True,
     run_clustering: bool = True,
@@ -31,17 +39,20 @@ def run(
     k: int = 5,
     nova_data_dir: Optional[str] = None,
     labeled_data_dir: Optional[str] = None,
-    label_reg_max_samples: int = 2000,
+    label_reg_max_samples: int = 1000,
 ) -> dict:
     """
-    For each checkpoint, run embedding similarity (+ optional noise robustness).
+    For each checkpoint, run each eval on its matrix datasets.
 
     Returns dict with:
-      - comparison_df: one row per checkpoint with key metrics
-      - per_checkpoint: {label: full eval results dict}
+      - comparison_df: one row per checkpoint, metric columns suffixed per dataset
+      - per_checkpoint: {label: {f"{eval}_{alias}": results, ...}}
     """
     rows = []
     per_checkpoint = {}
+
+    def _aliases(eval_name):
+        return [a for a in eval_datasets.get(eval_name, []) if a in datasets]
 
     for item in checkpoints:
         label, model = item[0], item[1]
@@ -58,37 +69,50 @@ def run(
         print(f"[CheckpointComparison] Evaluating: {label}  ({ckpt_date})")
         print(f"{'='*50}")
 
-        emb_results = emb_eval.run(df=df, model=model, dataloader=dataloader, k=k, device=device)
+        row = {"checkpoint": label, "date": ckpt_date}
+        checkpoint_results = {}
 
-        row = {
-            "checkpoint": label,
-            "date":       ckpt_date,
-            "embedding_stack_match_rate": emb_results["embedding_stack_match_rate"],
-            "input_stack_match_rate": emb_results["input_stack_match_rate"],
-            "match_score_avg": emb_results["match_score_avg"],
-        }
+        # ── Stack query (embedding similarity) ────────────────────────────────
+        for alias in _aliases("embedding_similarity"):
+            ds = datasets[alias]
+            print(f"[CheckpointComparison] embedding_similarity on {alias}")
+            emb_results = emb_eval.run(df=ds["df"], model=model,
+                                       dataloader=ds["loader"], k=k, device=device)
+            checkpoint_results[f"embedding_similarity_{alias}"] = emb_results
+            row[f"embedding_stack_match_rate_{alias}"] = emb_results["embedding_stack_match_rate"]
+            row[f"input_stack_match_rate_{alias}"] = emb_results["input_stack_match_rate"]
+            row[f"match_score_avg_{alias}"] = emb_results["match_score_avg"]
 
-        checkpoint_results = {"embedding_similarity": emb_results}
-
+        # ── Noise robustness ──────────────────────────────────────────────────
         if run_noise:
-            noise_results = noise_eval.run(df=df, model=model, device=device)
-            checkpoint_results["noise_robustness"] = noise_results
-            for noise_type, mean_sim in noise_results["summary"].items():
-                row[f"noise_{noise_type}"] = mean_sim
+            for alias in _aliases("noise_robustness"):
+                ds = datasets[alias]
+                print(f"[CheckpointComparison] noise_robustness on {alias}")
+                noise_results = noise_eval.run(df=ds["df"], model=model, device=device)
+                checkpoint_results[f"noise_robustness_{alias}"] = noise_results
+                for noise_type, mean_sim in noise_results["summary"].items():
+                    row[f"noise_{noise_type}_{alias}"] = mean_sim
 
+        # ── Clustering ────────────────────────────────────────────────────────
         if run_clustering:
-            try:
-                clust_results = clust_eval.run(
-                    df=df, model=model, device=device, k=k,
-                    embeddings=emb_results.get("embeddings"),
-                )
-                checkpoint_results["clustering"] = clust_results
-                row["clustering_ari"] = clust_results.get("comp_cluster_ari")
-                row["clustering_nmi"] = clust_results.get("comp_cluster_nmi")
-                row["clustering_silhouette"] = clust_results.get("comp_cluster_silhouette")
-            except Exception as e:
-                print(f"[CheckpointComparison] Clustering skipped: {e}")
+            for alias in _aliases("clustering"):
+                ds = datasets[alias]
+                try:
+                    print(f"[CheckpointComparison] clustering on {alias}")
+                    emb_key = f"embedding_similarity_{alias}"
+                    precomputed = (checkpoint_results.get(emb_key) or {}).get("embeddings")
+                    clust_results = clust_eval.run(
+                        df=ds["df"], model=model, device=device, k=k,
+                        embeddings=precomputed,
+                    )
+                    checkpoint_results[f"clustering_{alias}"] = clust_results
+                    row[f"clustering_ari_{alias}"] = clust_results.get("comp_cluster_ari")
+                    row[f"clustering_nmi_{alias}"] = clust_results.get("comp_cluster_nmi")
+                    row[f"clustering_silhouette_{alias}"] = clust_results.get("comp_cluster_silhouette")
+                except Exception as e:
+                    print(f"[CheckpointComparison] Clustering ({alias}) skipped: {e}")
 
+        # ── Label regression (labeled set only — unsuffixed keys) ─────────────
         if run_label_regression and labeled_data_dir and os.path.isdir(labeled_data_dir):
             try:
                 lr_results = labelreg_eval.run(
@@ -104,6 +128,7 @@ def run(
             except Exception as e:
                 print(f"[CheckpointComparison] Label regression skipped: {e}")
 
+        # ── Structured similarity (run-level canonical panel) ─────────────────
         if nova_data_dir and os.path.isdir(nova_data_dir):
             try:
                 print(f"[CheckpointComparison] Structured similarity: {label}")
