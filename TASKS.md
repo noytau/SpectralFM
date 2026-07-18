@@ -37,6 +37,16 @@ Dataset × eval matrix (defaults; excluded combinations are skipped and noted in
   overrides; global `--eval_set_size N` shortcut for smoke runs.
 - Acceptance: one full run produces the hierarchy above with per-dataset results,
   skipped cells listed in run_info.md, and reports rendering all figures.
+**DONE (2026-07-18).** Implemented in commits 4606bf3 + 0c0205e: manifest-subset
+loader (whole-stack seeded draws), DATASET_SPECS/EVAL_DATASET_MATRIX, alias-suffixed
+metrics, `<checkpoint>/<method>_<dataset>/` layout, `comparison/<alias>/`,
+alias-aware reports/CSVs, unstructured cosine maps removed, --eval_set_sizes/--eval_set_size.
+Extras: label-reg plots per 1/2/3-comp config; reconstruction outputs filed under
+their model's directory (inside the matching compared checkpoint's dir).
+Accepted on the full-size run `code/eval_outputs/2026-07-18_19-49-10/`
+(Feb-25 SSL vs 3ae_norm_exp2_long, 66 figures, skips noted in run_info.md).
+Known minor gap: `labeled` size not yet wired to --eval_set_sizes
+(label_reg_max_samples governs it separately).
 
 ### E5. Input-space comparison baselines (after E4)
 Show the input-space counterpart next to the embedding result wherever applicable:
