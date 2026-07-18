@@ -1,10 +1,75 @@
 # SpectralFM — Remaining Tasks
 
-Work through sections in order within each track. E2 is blocked by E1 and should run after E3.
-T1's reporting step is blocked by E1 (don't trust eval numbers until E1 is verified).
+Work through sections in order within each track.
+**Priority order (2026-07-18): E4 → E5 → E6 come FIRST, above everything else in the
+eval track. Then E2 (E1 and E3 are done). T1's reporting waits for the verified eval.**
 Mark tasks done with a short note: what changed, how it was verified, where the outputs are.
 
-## Evaluation pipeline
+## Evaluation pipeline — NEW HIGH-PRIORITY TASKS (do first, in order)
+
+### E4. Multi-dataset evaluation as the default
+Run each eval on the following datasets SEPARATELY (deterministic seed-42 draws):
+
+| Alias | Source | Split | Size |
+|---|---|---|---|
+| `sanity` | `nova_data/single_channel_1k` (fixed) | **train.tsv** | 100 |
+| `in_dist` | `nova_data/single_channel_10k` | valid.tsv | 500 (max) |
+| `multi_ch` | `nova_data/multi_channel` | valid.tsv | 1,000 |
+| `labeled` | `nova_data/labeled_data` | labels.tsv (comp-grouped) | 1,000 |
+| `samples` | `nova_data/sampled_data` | valid.tsv | 1,000 |
+
+Dataset × eval matrix (defaults; excluded combinations are skipped and noted in run_info.md):
+
+| Eval | sanity | in_dist | multi_ch | labeled | samples |
+|---|---|---|---|---|---|
+| stack query (embedding_similarity) | ✓ | ✓ | — (single-channel only) | — | — |
+| clustering | — (only 10 stacks at n=100) | ✓ | — (single-channel only) | — | — |
+| noise robustness | ✓ | ✓ | — | — | — |
+| label regression | — | — | — | ✓ | — |
+| signal reconstruction | ✓ | ✓ | ✓ | — | ✓ |
+| structured similarity | run-level, once per checkpoint (it already spans datasets) |
+
+- The **unstructured cosine similarity maps are REMOVED** from the suite entirely.
+- Directory layout: NO extra nesting level — results go to
+  `run_dir/<checkpoint>/<method>_<dataset>/` (e.g. `similarity_in_dist/`,
+  `noise_robustness_sanity/`); cross-checkpoint figures to `comparison/<dataset>/`.
+- Sizes: per-dataset defaults above; `--eval_set_sizes sanity=100,in_dist=500,...`
+  overrides; global `--eval_set_size N` shortcut for smoke runs.
+- Acceptance: one full run produces the hierarchy above with per-dataset results,
+  skipped cells listed in run_info.md, and reports rendering all figures.
+
+### E5. Input-space comparison baselines (after E4)
+Show the input-space counterpart next to the embedding result wherever applicable:
+- stack query: already computed & shown — additionally put the input bar next to the
+  embedding bar in the comparison scalar grid.
+- structured similarity: already has the Input Space panel — no change.
+- label regression: input R² already computed — extend the R² bar figure to the
+  `_2c`/`_3c` configs (input vs embedding per config).
+- clustering: NEW — run the identical clustering metrics on raw inputs; grouped bars
+  ARI/NMI/silhouette input-vs-embedding.
+- noise robustness / signal reconstruction: NO input-space comparison (per decision).
+- Acceptance: every applicable figure shows the input counterpart side by side.
+
+### E6. Per-checkpoint training metadata + upgraded HTML report (after E5)
+Metadata card per evaluated checkpoint: training data (+n_samples), trained vs frozen,
+AE reconstruction stages, per-component init (FE/proj/transformer: base_libri / past
+ckpt / random), lr, loss, batch size, steps/epochs.
+Recoverability (verified 2026-07-18): fairseq SSL ckpts → `cfg.task.data`,
+`cfg.optimization`, criterion; 3AE ckpts → `freeze_map`, `init_manifest` (exact init
+source per component), `components` (param counts), lambdas, lr/steps/batch —
+missing only the training-data path; old fe/tr-recon ckpts → lr/steps/batch/tag
+hints only.
+- Implement `read_checkpoint_metadata()` per format; every missing field renders as
+  **"unknown"** — never guessed.
+- Going forward: training scripts write `metadata.yaml` next to each checkpoint.
+- One-time backfill: ONLY the ~10 checkpoints evaluated so far
+  (`checkpoints/metadata_backfill.yaml`, reviewed by user before use).
+- HTML: metadata card at the top of each checkpoint section; side-by-side comparison
+  plots + report stay at the run root (E3 layout).
+- Acceptance: a mixed-format run (SSL + 3AE + old recon) renders correct cards with
+  honest unknowns.
+
+## Evaluation pipeline — original tasks
 
 ### E1. Debug the embedding source (BLOCKING — do first)
 The embedding-based scores don't look right. Trace where embeddings are extracted for the
