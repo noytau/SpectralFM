@@ -839,11 +839,45 @@ def _plot_struct_sim_all_models(per_cp: dict, output_dir: str, centered: bool = 
     return [(f"Structured similarity — all models ({tag})", path, "")]
 
 
+# Eval name → output subdirectory name (E3 restructure)
+_METHOD_DIRS = {
+    "embedding_similarity":  "similarity",
+    "noise_robustness":      "noise_robustness",
+    "clustering":            "clustering",
+    "label_regression":      "label_regression",
+    "structured_similarity": "structured_similarity",
+    "signal_reconstruction": "reconstruction",
+}
+
+
+def _relocate(figs: list, target_dir: str, strip_label: str = "") -> list:
+    """
+    Move generated figure files into a per-checkpoint / per-method subdirectory,
+    stripping the checkpoint-name suffix from filenames (redundant once the file
+    lives inside the checkpoint's own directory). Returns figs with updated paths;
+    tuple tails (captions, extra fields) are preserved.
+    """
+    os.makedirs(target_dir, exist_ok=True)
+    out = []
+    for fig in figs:
+        cap, path, rest = fig[0], fig[1], fig[2:]
+        fname = os.path.basename(path)
+        if strip_label:
+            fname = fname.replace(f"_{strip_label}", "")
+        new_path = os.path.join(target_dir, fname)
+        if os.path.abspath(path) != os.path.abspath(new_path):
+            os.replace(path, new_path)
+        out.append((cap, new_path, *rest))
+    return out
+
+
 def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
     """
     Returns a list of (caption, path, checkpoint_label) triples.
     checkpoint_label="" for summary figures, checkpoint name for per-checkpoint figures.
-    Callers use the label to group figures under per-checkpoint sections in the report.
+    Figures are organized on disk as:
+      <run_dir>/comparison/…                      cross-checkpoint figures
+      <run_dir>/<checkpoint>/<method>/…           per-checkpoint figures (short names)
     """
     figures = []   # (caption, path, cp_label)
     cdf     = results.get("comparison_df")
@@ -883,34 +917,44 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
         figures += _plot_struct_sim_all_models(per_cp, output_dir, centered=False)
         figures += _plot_struct_sim_all_models(per_cp, output_dir, centered=True)
 
-    # ── Per-checkpoint figures ────────────────────────────────────────────────
+    # Cross-checkpoint figures live in a shared comparison/ subdir
+    figures = _relocate(figures, os.path.join(output_dir, "comparison"))
+
+    # ── Per-checkpoint figures: <run_dir>/<checkpoint>/<method>/ ─────────────
     if per_cp:
         for cp_label, cp_res in per_cp.items():
+            cp_dir = os.path.join(output_dir, cp_label)
+
+            def _add(figs, method):
+                target = os.path.join(cp_dir, _METHOD_DIRS[method])
+                for cap, path in _relocate(figs, target, strip_label=cp_label):
+                    figures.append((cap, path, cp_label))
+
             ss = cp_res.get("structured_similarity", {})
             if ss:
-                ss_figs = _plot_structured_similarity_maps(ss, output_dir, label=cp_label)
-                figures += [(cap, path, cp_label) for cap, path in ss_figs]
+                _add(_plot_structured_similarity_maps(ss, output_dir, label=cp_label),
+                     "structured_similarity")
 
             clust = cp_res.get("clustering", {})
             if clust:
-                cl_figs = _plot_clustering_scatter(clust, output_dir, label=cp_label)
-                figures += [(cap, path, cp_label) for cap, path in cl_figs]
+                _add(_plot_clustering_scatter(clust, output_dir, label=cp_label),
+                     "clustering")
 
             noise = cp_res.get("noise_robustness", {})
             if noise:
                 nz_figs = _plot_noise_example_grid(noise, output_dir, label=cp_label)
                 nz_figs += _plot_noise_examples(noise, output_dir, label=cp_label)
-                figures += [(cap, path, cp_label) for cap, path in nz_figs]
+                _add(nz_figs, "noise_robustness")
 
             lr = cp_res.get("label_regression", {})
             if lr:
-                lr_figs = _plot_label_reg_scatter(lr, output_dir, label=cp_label)
-                figures += [(cap, path, cp_label) for cap, path in lr_figs]
+                _add(_plot_label_reg_scatter(lr, output_dir, label=cp_label),
+                     "label_regression")
 
             emb = cp_res.get("embedding_similarity", {})
             if emb:
-                ks_figs = _plot_ksimilar_examples(emb, output_dir, label=cp_label)
-                figures += [(cap, path, cp_label) for cap, path in ks_figs]
+                _add(_plot_ksimilar_examples(emb, output_dir, label=cp_label),
+                     "embedding_similarity")
 
     return figures
 
@@ -1205,8 +1249,9 @@ def _write_run_info(run_dir: str, ts: str, results: dict, config) -> str:
         "| `eval_report.html` | Self-contained HTML report with all figures embedded |",
         "| `eval_report.md` | Markdown version of the report |",
         "| `run_info.md` | This file |",
-        "| `*.png` | Individual figure PNGs |",
-        "| `*.csv` | Exported metric tables |",
+        "| `comparison/` | Cross-checkpoint figures + comparison CSVs |",
+        "| `<checkpoint>/<method>/` | Per-checkpoint figures + CSVs (one dir per eval method) |",
+        "| `<method>/` | Standalone-eval figures + CSVs (single-model runs) |",
     ]
 
     path = os.path.join(run_dir, "run_info.md")
@@ -1263,6 +1308,14 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             results["checkpoint_comparison"], run_dir
         )
 
+    # Standalone eval figures live in <run_dir>/<method>/ (checkpoint_comparison
+    # organizes its own comparison/ + per-checkpoint subdirs)
+    for eval_name in list(figures_by_eval):
+        if eval_name == "checkpoint_comparison":
+            continue
+        method_dir = os.path.join(run_dir, _METHOD_DIRS.get(eval_name, eval_name))
+        figures_by_eval[eval_name] = _relocate(figures_by_eval[eval_name], method_dir)
+
     # checkpoint_comparison returns (cap, path, cp_label) triples; others return (cap, path) pairs
     all_figures = []
     for eval_name, figs in figures_by_eval.items():
@@ -1295,7 +1348,7 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             f"| Average match score (0–100)| {r.get('match_score_avg', 'N/A'):.1f} |",
         ]
         for cap, path in figures_by_eval.get("embedding_similarity", []):
-            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "signal_reconstruction" in results:
         r = results["signal_reconstruction"]
@@ -1309,7 +1362,7 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
                     lines.append(f"| {label} recon mean MSE | {r[f'recon_{key}_mse_mean']:.6e} |")
             lines.append(f"| normalize | {r.get('normalize')} |")
             for cap, path in figures_by_eval.get("signal_reconstruction", []):
-                lines += ["", f"![{cap}]({os.path.basename(path)})"]
+                lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "noise_robustness" in results:
         r = results["noise_robustness"]
@@ -1320,7 +1373,7 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             for k, v in summary.items():
                 lines.append(f"| {k} | {v:.4f} |")
         for cap, path in figures_by_eval.get("noise_robustness", []):
-            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "clustering" in results:
         r = results["clustering"]
@@ -1335,7 +1388,7 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
                 if key in r:
                     lines.append(f"| {key.replace('comp_cluster_', '')} | {r[key]:.4f} |")
         for cap, path in figures_by_eval.get("clustering", []):
-            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "label_regression" in results:
         r = results["label_regression"]
@@ -1345,12 +1398,12 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             if key in r:
                 lines.append(f"| {key} | {r[key]:.4f} |")
         for cap, path in figures_by_eval.get("label_regression", []):
-            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "structured_similarity" in results:
         lines += ["", "## Structured Similarity (canonical 100-sample panel)"]
         for cap, path in figures_by_eval.get("structured_similarity", []):
-            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     if "checkpoint_comparison" in results:
         r = results["checkpoint_comparison"]
@@ -1363,7 +1416,7 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
                 lines.append(cdf.to_string(index=False))
         for fig in figures_by_eval.get("checkpoint_comparison", []):
             cap, path = fig[0], fig[1]
-            lines += ["", f"![{cap}]({os.path.basename(path)})"]
+            lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     with open(md_path, "w") as f:
         f.write("\n".join(lines))
@@ -1424,16 +1477,23 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         "clustering":           "clustering_df",
     }
 
+    def _csv_dir(*parts):
+        d = os.path.join(run_dir, *parts)
+        os.makedirs(d, exist_ok=True)
+        return d
+
     for eval_name, r in results.items():
         if not isinstance(r, dict):
             continue
-        # Top-level DataFrames (single-checkpoint evals + comparison_df)
+        # Top-level DataFrames: comparison_df → comparison/, standalone evals → <method>/
         for key, val in r.items():
             if isinstance(val, pd.DataFrame):
                 base = _CSV_NAMES.get(eval_name, eval_name)
-                name = base if key == "results_df" else f"{eval_name}_{key}"
-                val.to_csv(os.path.join(run_dir, f"{name}.csv"), index=False)
-        # Per-checkpoint DataFrames inside checkpoint_comparison
+                name = base if key == "results_df" else key
+                sub = ("comparison" if eval_name == "checkpoint_comparison"
+                       else _METHOD_DIRS.get(eval_name, eval_name))
+                val.to_csv(os.path.join(_csv_dir(sub), f"{name}.csv"), index=False)
+        # Per-checkpoint DataFrames → <checkpoint>/<method>/<base>.csv
         for cp_label, cp_res in (r.get("per_checkpoint") or {}).items():
             if not isinstance(cp_res, dict):
                 continue
@@ -1443,7 +1503,9 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
                 rdf = sub_res.get("results_df")
                 if isinstance(rdf, pd.DataFrame):
                     base = _CSV_NAMES.get(sub_name, sub_name)
-                    rdf.to_csv(os.path.join(run_dir, f"{base}_{cp_label}.csv"), index=False)
+                    sub = _METHOD_DIRS.get(sub_name, sub_name)
+                    rdf.to_csv(os.path.join(_csv_dir(cp_label, sub), f"{base}.csv"),
+                               index=False)
 
     total_figs = len(all_figures)
     print(f"[Report] Run dir  : {run_dir}")

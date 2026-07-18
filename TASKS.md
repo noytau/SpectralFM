@@ -105,7 +105,14 @@ eval method, e.g.:
   new relative paths (the HTML embeds figures — verify it still renders self-contained).
 - Acceptance: run the suite once and confirm no file lands in the run-dir root except
   the reports and run_info.md, and both reports display all figures correctly.
-**Status: NOT STARTED (next after E1 review, before E2).**
+**DONE (2026-07-15, verified on run `2026-07-15_11-08-48`).** Implemented via a
+`_relocate` helper in `report.py`: cross-checkpoint figures + `comparison_df.csv` →
+`comparison/`; per-checkpoint figures/CSVs → `<checkpoint>/<method>/` with the
+checkpoint suffix stripped from filenames (methods: similarity, noise_robustness,
+clustering, label_regression, structured_similarity); standalone-eval runs use
+`<method>/` at root; signal reconstruction → `reconstruction/`. Markdown image links
+are run-dir-relative; HTML stays self-contained (base64). Verified: root contains
+only eval_report.{html,md} + run_info.md + directories; MD links resolve; 37 figures.
 
 ## Training pipeline
 
