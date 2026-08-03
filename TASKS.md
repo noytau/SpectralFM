@@ -285,14 +285,32 @@ T4 best-TV + λ=0 control, T2 best MLP + linear control, T5 checkpoint; plus a
 help? what did the trained transformer change?).
 - Acceptance: one eval run dir with all checkpoints in `comparison/comparison_df.csv`,
   HTML report renders, verdicts written here.
-**IN PROGRESS (2026-08-03).** Reconstruction-pathway comparison DONE
-(`code/eval_outputs/recon_quick_20260803/` — table + 4 overlay figures, see
-T4/T2/T5 notes). Full embedding suite running on Geoffrey
-(6 checkpoints: Feb-25 baseline, tv0p1 [T4 backbone rep.], projlin/mlp768/mlp2048,
-3ae_norm_exp2_long; log `code/eval_outputs/t6_full_eval_20260803.log`).
+**EMBEDDING SUITE DONE (2026-08-03, run `2026-08-03_19-42-31`); verdicts below.**
+Reconstruction-pathway comparison also done (`code/eval_outputs/recon_quick_20260803/`).
 Lineup note: all four T4 ckpts share one frozen backbone (only head_fe differs) and
 T5's backbone ≡ Feb-25 baseline, so their embedding rows are represented by tv0p1
 and the baseline respectively.
+- **Label regression is the decisive metric: Feb-25 SSL baseline emb R²=0.44
+  (beats input baseline 0.38); ALL recon-stack backbones (tv0p1, projlin,
+  mlp768, mlp2048, exp2_long) score ≈0** (−0.01…0.17, far below the 2c/3c input
+  baselines too). The recon stacks share the base_libri (speech) transformer +
+  apr28 FE — reconstruction-oriented training does not produce label-informative
+  embeddings; SSL on NOVA data does. Which transformer dominates every
+  second-order choice (TV weight, proj arch).
+- Stack retrieval (sanity): proj-trained backbones best (projlin 0.114,
+  mlp768 0.116 vs baseline 0.064); in_dist retrieval ≈ input level for all.
+- Noise robustness: mlp2048 most robust (gaussian_std 0.90); mlp768 lowest (0.78).
+- Clustering: ARI ≈ 0 for every model (NMI 0.39–0.44, baseline highest) — no
+  k-means-recoverable stack structure in any embedding.
+- Verdict for the program: reconstruction quality and representation quality are
+  currently DECOUPLED. The promising direction is T5b-style: keep the Feb-25 SSL
+  backbone (label-informative) and add reconstruction capability via decoders —
+  not replace the backbone with recon-trained stacks.
+Overnight round (2026-08-04, orchestrated on Geoffrey): TV-long λ∈{0.1,0.5,1,1.5,2}
+×10k steps batch-1000; projlinL/mlp768L/mlp2048L ×10k steps; T5b (3AE frozen Feb-25,
+apr28 sched) finishing; auto-chained: 3-way T5 vs exp2_long vs T5b eval, full
+evals + histograms + overlays for TV-long and proj-long
+(`recon_full_{tvL,projL,3way}_20260804/`).
 
 ### T3. Evaluate transformer without masking (eval experiment, no training)
 Find where masking is applied in the transformer forward path and run the evaluation with
