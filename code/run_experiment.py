@@ -75,7 +75,7 @@ if __name__ == "__main__":
         parser.add_argument("--eval_method", type=str, choices=["signal_completion", "noise_robustness", "compare_embeddings", "classifier_head"], default="signal_completion")
         parser.add_argument("--test_method", type=str, choices=["index_out_of_distribution", "index_in_distribution_stack_holdout", "test_in_distribution_partial_stack"], default="index_in_distribution_stack_holdout")
         parser.add_argument('--model_path', type=str,
-                            default='/mnt5/noy/fairseq/outputs/2025-12-01/08-13-50/checkpoints/checkpoint_best.pt',
+                            default='/mnt5/noy/fairseq/outputs/2025-12-27/09-59-50/checkpoints/checkpoint_best.pt',
                             help='Path to saved model')
         #                            default='/mnt5/noy/code/weights/experiment-mask=0.25-epoch=1_batch=32_loss_fn=mse_datalen=1000000_model_after_training.pt',
 
