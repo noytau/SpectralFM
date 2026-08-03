@@ -152,3 +152,23 @@ This env has torch 2.8, transformers 4.57, torchaudio 2.8 — all eval deps sati
 - `signal_completion` eval requires a `completion_head` on the model — it skips gracefully if not present.
 - The old `model_loader.py` imports `from fairseq import checkpoint_utils` — do not use it in the eval path.
 - All new eval code must remain importable without fairseq installed.
+
+---
+
+## Overnight mode
+
+When the user says they're going to sleep (or asks to run things overnight), do ALL of the following:
+
+1. **Keep the Mac awake:** start `caffeinate -dis` as a background Bash task
+   (prevents idle sleep while the session runs; remind the user: plugged in, lid open).
+2. **Make the work session-independent:** every long-running job must run on
+   Geoffrey under `nohup`, and any multi-step chain (train → eval → next launch)
+   must be orchestrated by a `nohup`'d watcher script ON GEOFFREY — never only by
+   local background tasks. Watchers key on recorded PIDs (`ps -p`) and
+   checkpoint-file existence — NEVER `pgrep -f <pattern>` (the ssh wrapper's own
+   command line matches the pattern and the watcher hangs forever).
+3. **VPN-drop tolerance:** local monitoring loops must retry `ssh Geoffry` (poll
+   interval ≥ 30 min for overnight horizons) so a VPN reconnect only delays a ping.
+4. **Sign-off summary:** before ending the turn, list what is running (GPU, run
+   name, ETA), what is auto-chained on the server, and what the morning
+   deliverables will be. Worst case (Mac dies) must lose nothing but reporting.
