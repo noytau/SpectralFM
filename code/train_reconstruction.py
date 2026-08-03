@@ -192,13 +192,15 @@ class TransformerMirrorDecoder(nn.Module):
         return self.decoder(x)
 
 
-def _spectralfm_data2vec_audio_cfg():
+def _spectralfm_data2vec_audio_cfg(proj_type: str = "linear", proj_mlp_hidden: int = 1536):
     """OmegaConf for ``Data2VecAudioModel`` matching SpectralFM FE conv stack (245 bins → 47 steps)."""
     from omegaconf import OmegaConf, open_dict
     from data2vec.models.data2vec_audio import Data2VecAudioConfig
 
     sc = OmegaConf.structured(Data2VecAudioConfig)
     with open_dict(sc):
+        sc.post_extract_proj_type = (proj_type or "linear").strip().lower()
+        sc.post_extract_proj_mlp_hidden = int(proj_mlp_hidden)
         sc.max_update = 21000
         sc.ema_anneal_end_step = 21000
         sc.conv_feature_layers = (
@@ -216,7 +218,7 @@ def _spectralfm_data2vec_audio_cfg():
     return sc
 
 
-def build_data2vec_audio_backbone(device, ckpt_path=None):
+def build_data2vec_audio_backbone(device, ckpt_path=None, proj_type="linear", proj_mlp_hidden=1536):
     """Build ``Data2VecAudioModel`` (fixed SpectralFM cfg), optionally merge weights like Fairseq ``build_model``.
 
     Always constructs the **audio** architecture from YAML-equivalent config, then loads tensors from
@@ -228,6 +230,8 @@ def build_data2vec_audio_backbone(device, ckpt_path=None):
     Args:
         device: Torch device.
         ckpt_path: Fairseq ``.pt`` with ``state["model"]`` dict, or ``None`` / ``"none"`` for random init.
+        proj_type: ``post_extract_proj`` architecture — 'linear' or 'mlp_gelu'.
+        proj_mlp_hidden: hidden dim when ``proj_type='mlp_gelu'``.
 
     Returns:
         ``Data2VecAudioModel`` on ``device``.
@@ -235,7 +239,7 @@ def build_data2vec_audio_backbone(device, ckpt_path=None):
     from fairseq import checkpoint_utils
     from data2vec.models.data2vec_audio import Data2VecAudioModel
 
-    cfg = _spectralfm_data2vec_audio_cfg()
+    cfg = _spectralfm_data2vec_audio_cfg(proj_type=proj_type, proj_mlp_hidden=proj_mlp_hidden)
     model = Data2VecAudioModel(cfg).to(device)
 
     ck = (ckpt_path or "").strip()
@@ -571,6 +575,9 @@ def _build_save_obj_3ae(
         "micro_batch_size": micro_bs,
         "effective_batch_size": eff_bs,
         "random_init_proj":   bool(getattr(args, "random_init_proj", False)),
+        "lambda_tv_fe": float(getattr(args, "lambda_tv_fe", 0.0)),
+        "post_extract_proj_type": (getattr(args, "post_extract_proj_type", "linear") or "linear"),
+        "post_extract_proj_mlp_hidden": int(getattr(args, "post_extract_proj_mlp_hidden", 1536)),
     }
     if head_fe is not None:
         so["fe_mirror"] = head_fe.state_dict()
@@ -595,14 +602,18 @@ def _run_train_transformer_autoencoder(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
     # ── 1) Build backbone (legacy --ckpt path keeps current Feb-25 / random behavior) ──
+    proj_type = (getattr(args, "post_extract_proj_type", "linear") or "linear").strip().lower()
+    proj_mlp_hidden = int(getattr(args, "post_extract_proj_mlp_hidden", 1536))
     ckpt_arg = (args.ckpt or "").strip()
     if not ckpt_arg or ckpt_arg.lower() == "none":
-        backbone = build_data2vec_audio_backbone(args.device, None)
+        backbone = build_data2vec_audio_backbone(args.device, None,
+                                                 proj_type=proj_type, proj_mlp_hidden=proj_mlp_hidden)
         ckpt_label = "random_backbone"
     else:
         if not os.path.isfile(ckpt_arg):
             raise FileNotFoundError(f"--ckpt not found: {ckpt_arg}")
-        backbone = build_data2vec_audio_backbone(args.device, ckpt_arg)
+        backbone = build_data2vec_audio_backbone(args.device, ckpt_arg,
+                                                 proj_type=proj_type, proj_mlp_hidden=proj_mlp_hidden)
         ckpt_label = ckpt_arg
 
     fe_extra = (getattr(args, "fe_ckpt", None) or "").strip()
@@ -1899,6 +1910,12 @@ if __name__ == "__main__":
                         help="After all --ckpt / --init_*_ckpt loads, reset backbone.post_extract_proj to "
                              "random init. Useful when --ckpt brings in a trained proj you want to discard "
                              "(e.g. 3-AE: keep transformer + FE/LN from ckpt, but proj must train from scratch).")
+    g_init.add_argument("--post_extract_proj_type", default="linear", choices=["linear", "mlp_gelu"],
+                        help="Backbone post_extract_proj architecture: 'linear' (legacy single Linear) or "
+                             "'mlp_gelu' (Linear -> GELU -> Linear). A legacy Linear ckpt cannot be merged "
+                             "into an MLP proj (shape-safe merge skips it) — combine with --random_init_proj.")
+    g_init.add_argument("--post_extract_proj_mlp_hidden", type=int, default=1536,
+                        help="Hidden dim for --post_extract_proj_type mlp_gelu.")
 
     # ── Per-component freezing (transformer path) ──
     g_fr = parser.add_argument_group("Per-component freeze")
