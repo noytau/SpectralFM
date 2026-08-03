@@ -816,6 +816,9 @@ def _run_train_transformer_autoencoder(args):
         print(f"Lazy loader: {n} samples from {args.manifest}")
     else:
         source_all, _ = load_data(args.data_dir, args.n_samples, args.device)
+        if normalize:
+            # per-sample zero-mean unit-std, same as LazyWavDataset(normalize=True)
+            source_all = F.layer_norm(source_all, source_all.shape[-1:])
         target_all = source_all[:, :245].float()
         n = source_all.shape[0]
         micro_bs, accum_steps, eff_bs = resolve_micro_batch_accum(
