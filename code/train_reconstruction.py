@@ -1161,23 +1161,37 @@ def run_train_mode(args):
 
     fe_init_manifest = {"ckpt": args.ckpt}
 
+    # Per-component freeze (decoder always trains — it IS the autoencoder head).
+    freeze_fe = bool(getattr(args, "freeze_fe_v2", False))
+    freeze_ln = bool(getattr(args, "freeze_ln", False))
+    if freeze_fe:
+        for p in encoder.parameters():
+            p.requires_grad_(False)
+        encoder.eval()
+    if freeze_ln:
+        for p in layer_norm.parameters():
+            p.requires_grad_(False)
+        layer_norm.eval()
+
     ln_params = sum(p.numel() for p in layer_norm.parameters())
     enc_params = sum(p.numel() for p in encoder.parameters())
     dec_params = sum(p.numel() for p in decoder.parameters())
     fe_rows = [
-        {"name": "fe",      "class": type(encoder).__name__,
-         "total": enc_params, "trainable": enc_params, "frozen": 0},
-        {"name": "ln",      "class": type(layer_norm).__name__,
-         "total": ln_params,  "trainable": ln_params,  "frozen": 0},
+        {"name": "fe",      "class": type(encoder).__name__, "total": enc_params,
+         "trainable": 0 if freeze_fe else enc_params, "frozen": enc_params if freeze_fe else 0},
+        {"name": "ln",      "class": type(layer_norm).__name__, "total": ln_params,
+         "trainable": 0 if freeze_ln else ln_params, "frozen": ln_params if freeze_ln else 0},
         {"name": "decoder", "class": type(decoder).__name__,
          "total": dec_params, "trainable": dec_params, "frozen": 0},
     ]
     print(f"\n{'='*60}")
-    print(f"TRAIN FE-AE  [{tag}]")
+    print(f"TRAIN FE-AE  [{tag}]" + ("  (fe frozen)" if freeze_fe else "")
+          + ("  (ln frozen)" if freeze_ln else ""))
     rc.print_component_summary(fe_rows, tag=f"FE-AE components [{tag}]")
     print(f"{'='*60}")
 
-    all_params = list(encoder.parameters()) + list(layer_norm.parameters()) + list(decoder.parameters())
+    all_params = [p for p in (list(encoder.parameters()) + list(layer_norm.parameters())
+                              + list(decoder.parameters())) if p.requires_grad]
     optimizer = torch.optim.Adam(all_params, lr=args.lr)
 
     use_cosine = args.warmup > 0
@@ -1242,7 +1256,8 @@ def run_train_mode(args):
             },
         )
 
-    encoder.train()
+    if not freeze_fe:
+        encoder.train()
     decoder.train()
 
     log_interval = max(1, args.steps // 20)
@@ -1318,6 +1333,7 @@ def run_train_mode(args):
         "components": fe_rows,
         "init_manifest": fe_init_manifest,
         "recon_path": "fe",
+        "freeze_map": {"fe": freeze_fe, "ln": freeze_ln},
         "train_reconstruction_format": 3,
     }, ckpt_path)
     print(f"\nCheckpoint saved to {ckpt_path}")
