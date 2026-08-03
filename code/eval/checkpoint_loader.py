@@ -28,6 +28,42 @@ def _detect_checkpoint_type(state: dict) -> str:
 _3AE_AUX_PREFIXES = ("fe_recon_decoder.", "trans_recon_decoder.")
 
 
+def _install_mlp_projection(model, raw_sd: dict, prefix: str = "post_extract_proj.") -> bool:
+    """
+    If the fairseq-format state dict carries an MLP post_extract_proj
+    (mlp_gelu: Linear→GELU→Linear, keys `post_extract_proj.0.*` / `.2.*`),
+    replace the HF single-Linear `feature_projection.projection` with a matching
+    nn.Sequential so the remapped keys land instead of being silently dropped.
+    Dims are inferred from the tensors. Returns True if installed.
+    """
+    import torch.nn as nn
+
+    w0 = raw_sd.get(prefix + "0.weight")
+    w2 = raw_sd.get(prefix + "2.weight")
+    if w0 is None or w2 is None:
+        return False
+    hidden, in_dim = w0.shape
+    out_dim = w2.shape[0]
+    proj = nn.Sequential(nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim))
+    proj.requires_grad_(False)
+    model.feature_projection.projection = proj
+    print(f"[CheckpointLoader] MLP projection detected — installed Sequential "
+          f"({in_dim}→{hidden}→GELU→{out_dim}) at feature_projection.projection")
+    return True
+
+
+def _assert_projection_loaded(result) -> None:
+    """MLP/linear projection keys must never be silently dropped by strict=False loads."""
+    bad_missing = [k for k in result.missing_keys if k.startswith("feature_projection.projection")]
+    bad_unexpected = [k for k in result.unexpected_keys if k.startswith("feature_projection.projection")]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(
+            "Projection keys did not load cleanly: "
+            f"missing={bad_missing}, unexpected={bad_unexpected}. "
+            "Checkpoint projection architecture does not match the built model."
+        )
+
+
 def load_3ae_backbone(state: dict, arch: str = "conv1d"):
     """
     Build the HF Data2VecAudioModel from the backbone embedded in a 3AE checkpoint
@@ -56,7 +92,9 @@ def load_3ae_backbone(state: dict, arch: str = "conv1d"):
             weights.pop(f"encoder.pos_conv.0.{suf}", None)
     weights = {k: v for k, v in weights.items() if not k.startswith(_3AE_AUX_PREFIXES)}
 
+    _install_mlp_projection(model, raw)
     result = model.load_state_dict(weights, strict=False)
+    _assert_projection_loaded(result)
     print(f"[CheckpointLoader] 3AE embedded backbone loaded "
           f"(missing={len(result.missing_keys)}, unexpected={len(result.unexpected_keys)})")
     return model
@@ -146,8 +184,10 @@ class CheckpointLoader:
             if isinstance(layers_cfg, str):
                 layers_cfg = eval(layers_cfg)  # noqa: S307
             model.feature_extractor = FairseqConvFeatureExtractor(layers_cfg)
+            _install_mlp_projection(model, state["model"])
             weights = _remap_fairseq_keys(state["model"])
             result = model.load_state_dict(weights, strict=False)
+            _assert_projection_loaded(result)
             print(f"[CheckpointLoader] Loaded fairseq checkpoint: {path}")
             print(f"  Missing keys: {len(result.missing_keys)}, Unexpected: {len(result.unexpected_keys)}")
         elif ckpt_type == "fe_recon":
@@ -256,8 +296,10 @@ class CheckpointLoader:
                 if isinstance(layers_cfg, str):
                     layers_cfg = eval(layers_cfg)  # noqa: S307
                 model.feature_extractor = FairseqConvFeatureExtractor(layers_cfg)
+                _install_mlp_projection(model, state["model"])
                 weights = _remap_fairseq_keys(state["model"])
                 result = model.load_state_dict(weights, strict=False)
+                _assert_projection_loaded(result)
                 print(f"  Missing: {len(result.missing_keys)}, Unexpected: {len(result.unexpected_keys)}")
             elif ckpt_type == "fe_recon":
                 layers_cfg = [(512,3,1),(512,3,1),(512,3,1),(512,3,1),(512,5,5)]

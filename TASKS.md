@@ -1,8 +1,9 @@
 # SpectralFM — Remaining Tasks
 
 Work through sections in order within each track.
-**Priority order (2026-07-18): E4 → E5 → E6 come FIRST, above everything else in the
-eval track. Then E2 (E1 and E3 are done). T1's reporting waits for the verified eval.**
+**Priority order (2026-08-03): training-improvement round T4 → T2 → T5 → T6 is the
+active work (short runs on Geoffrey + full comparison eval). In the eval track E5 → E6
+remain, then E2 (E1, E3, E4 are done). T1's reporting waits for the verified eval.**
 Mark tasks done with a short note: what changed, how it was verified, where the outputs are.
 
 ## Evaluation pipeline — NEW HIGH-PRIORITY TASKS (do first, in order)
@@ -197,10 +198,101 @@ and results, run the (verified) evaluation on them, and prepare an email-ready s
 what regularization was tried, metrics vs. baseline, key figures attached/linked.
 - Note: run the eval only after E1 is done, otherwise the numbers can't be trusted.
 
-### T2. Improve projection layer
-Current projection output looks noisy. Experiment with a deeper projection head:
-MLP with 1–2 hidden layers, try different hidden dims, consider activation/normalization
-choices. Train the variants and compare with the eval suite.
+### T2. Improve projection layer (MLP) — active 2026-08-03
+Current projection is a single bare `nn.Linear(512→768)` (`post_extract_proj`,
+`fairseq/examples/data2vec/models/data2vec_audio.py:116` — no LN/activation/dropout).
+Plan (confirmed with user): train the MLP variants via the 3AE recon trainer on Geoffrey.
+- Model change (branch `recon/2ae-basemerge`): config fields `proj_mlp_hidden_dim` /
+  `proj_mlp_layers`; when hidden_dim > 0, `post_extract_proj` becomes
+  `Sequential(Linear(512,h), GELU, LayerNorm(h), Linear(h,768))`. Default keeps the
+  legacy single Linear byte-compatible.
+- Trainer: `--proj_mlp_hidden_dim` CLI arg; persist it (and `lambda_tv_fe`) in the
+  3AE save object.
+- Runs (base recipe = T4, but proj trained: `--random_init_proj`, no `--freeze_proj`,
+  `--lambda_recon_proj 1.0 --lambda_recon_fe 1.0`, head_trans frozen):
+  A) linear control (random init), B) MLP hidden 768, C) MLP hidden 2048.
+- Eval side (`eval-methods`): `checkpoint_loader.py` + `model.py` build/remap a matching
+  Sequential at `hf_model.feature_projection.projection`; MLP loads must not silently
+  drop projection keys.
+- Acceptance: all three variants train to completion; eval loader round-trips an MLP
+  checkpoint with zero missing/unexpected projection keys; compared in T6.
+**TRAINING + RECON EVAL DONE (2026-08-03); embedding eval in T6.** Discovery: the
+model side (`build_post_extract_proj`, `post_extract_proj_type`/`_mlp_hidden` cfg)
+already existed uncommitted in Geoffrey's data2vec_audio.py — only trainer plumbing
+was missing (added in be3dbdd). 3 runs completed
+(`fairseq/outputs/signal_recon_proj_mlp_local/`, launcher
+`fairseq/launch_proj_mlp_geoffry.sh`; lr 1e-4, 2000 steps, eff. batch 128,
+950 samples, λ_fe=λ_proj=1, λ_tv=0, proj random-init). Held-out proj-pathway MSE:
+linear=0.09138, **mlp768=0.08139 (best, −11%)**, mlp2048=0.08542. FE-MSE identical
+across variants (same frozen FE) — the MLP projection demonstrably preserves more
+signal information. Eval-side MLP auto-detection added to
+`code/eval/checkpoint_loader.py` (`_install_mlp_projection` +
+`_assert_projection_loaded`); verified missing=0/unexpected=0 on an MLP ckpt and
+legacy ckpts unchanged.
+
+### T4. TV-regularized FE-decoder sweep (short) — active 2026-08-03
+Rerun the already-implemented TV reconstruction training (`--lambda_tv_fe`,
+`code/train_reconstruction.py:458` on `recon/2ae-basemerge`; prior runs tv_fe_short_1–3)
+to see if TV helps. Recipe from `fairseq/submit_signal_recon_tv_fe_runai.sh`, run
+directly on Geoffrey GPUs (as `signal_recon_tv_fe_local` precedent):
+- FE+LN from `apr28_fe_recon_best.pt` (frozen); transformer `base_libri_official.pt`
+  (frozen); proj + 3 heads warm-started from `3ae_norm_exp2_long.pt`; only `head_fe`
+  trained with `--lambda_recon_fe 1.0 --lambda_tv_fe λ --normalize`.
+- Sweep λ_tv ∈ {0 (baseline), 0.01, 0.1, 1.0}, one GPU each; manifest
+  `single_channel_1k` (990→950 samples; `_with_valid` variant doesn't exist),
+  steps 2000, warmup 200, lr 1e-4, effective batch 128.
+- Acceptance: 4 completed checkpoints with logged `recon_fe` + `recon_fe_tv_loss`
+  curves; best λ picked for T2; compared in T6.
+**DONE (2026-08-03).** 4 runs completed on Geoffrey GPUs
+(`fairseq/outputs/signal_recon_tv_fe_local/20260803_143012Z_tv*/`, launcher
+`fairseq/launch_tv_fe_geoffry.sh`, commit be3dbdd on recon/2ae-basemerge).
+Held-out recon eval (200 samples, single_channel_10k valid, seed 42 —
+`code/eval_outputs/recon_quick_20260803/recon_results.csv`): FE-MSE
+tv0=0.03735, tv0.01=0.03729, **tv0.1=0.03672 (best, −1.7%)**, tv1.0=0.04194;
+train-final FE-MSE 0.0042/0.0043/0.0048/0.0187. Verdict: mild TV (0.1) improves
+held-out reconstruction; λ=1.0 over-smooths (visible peak flattening in
+`tv_sweep_fe_overlay.png`). Note: these ckpts predate the lambda_tv_fe
+persistence fix — λ values documented here, not in the .pt files. Embeddings
+are identical across the 4 ckpts by construction (only head_fe trains), so T6
+carries one representative (tv0p1).
+
+### T5. Reconstruction heads on the Feb-25 trained transformer — active 2026-08-03
+All prior recon runs used the base_libri transformer. Train the 3 mirror heads from
+scratch on top of the full frozen SSL backbone
+`checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt` (FE+LN+proj+transformer all
+loaded via `--ckpt`, all frozen; heads random-init for clean attribution):
+`--lambda_recon_fe/proj/trans 1.0`, steps 3000, warmup 300, lr 1e-4, same manifest as T4.
+- Optional variant: heads warm-started from `3ae_norm_exp2_long.pt` (spare GPU).
+- Acceptance: completed 3AE checkpoint; all three recon losses decreasing; compared in T6.
+**DONE (2026-08-03).** Run completed
+(`fairseq/outputs/signal_recon_feb25_local/20260803_145436Z_feb25_3ae_scratch/`,
+launcher `fairseq/launch_t5_feb25_recon_geoffry.sh`; 3000 steps, warmup 300, lr 1e-4,
+eff. batch 128; final train L2: trans=0.081, fe=0.047, proj=0.044). Held-out recon:
+fe=0.1361, proj=0.1141, **tr=0.0898**. Key finding: on the Feb-25 SSL backbone
+reconstruction IMPROVES with depth (fe→proj→tr), the exact inverse of the
+base_libri/apr28 stack (fe=0.037 → tr=0.13) — the SpectralFM-trained transformer
+retains ~31% more end-to-end signal information at the encoder output than base_libri,
+while its FE (never trained for reconstructability) is far less decodable than the
+apr28 recon-trained FE. Figures: `backbone_{fe,tr}_overlay.png` in
+`code/eval_outputs/recon_quick_20260803/`. Warm-start variant not run (scratch run
+converged fine; clean attribution preserved).
+
+### T6. Full comparison eval of the training-improvement round — active 2026-08-03
+Run the multi-dataset eval suite (E4 default) on Geoffrey comparing: Feb-25 SSL baseline,
+T4 best-TV + λ=0 control, T2 best MLP + linear control, T5 checkpoint; plus a
+`signal_reconstruction` pass per 3AE checkpoint. Copy run dir to local
+`code/eval_outputs/`, write a short per-task verdict (did TV help? did the MLP proj
+help? what did the trained transformer change?).
+- Acceptance: one eval run dir with all checkpoints in `comparison/comparison_df.csv`,
+  HTML report renders, verdicts written here.
+**IN PROGRESS (2026-08-03).** Reconstruction-pathway comparison DONE
+(`code/eval_outputs/recon_quick_20260803/` — table + 4 overlay figures, see
+T4/T2/T5 notes). Full embedding suite running on Geoffrey
+(6 checkpoints: Feb-25 baseline, tv0p1 [T4 backbone rep.], projlin/mlp768/mlp2048,
+3ae_norm_exp2_long; log `code/eval_outputs/t6_full_eval_20260803.log`).
+Lineup note: all four T4 ckpts share one frozen backbone (only head_fe differs) and
+T5's backbone ≡ Feb-25 baseline, so their embedding rows are represented by tv0p1
+and the baseline respectively.
 
 ### T3. Evaluate transformer without masking (eval experiment, no training)
 Find where masking is applied in the transformer forward path and run the evaluation with
