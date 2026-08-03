@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from fairseq.criterions.model_criterion import ModelCriterionConfig
 from fairseq.dataclass.configs import FairseqConfig
 
-from data2vec.tasks import ImageClassificationConfig, ImagePretrainingConfig
+from tasks import ImageClassificationConfig, ImagePretrainingConfig
 from models.data2vec_image_classification import (
     Data2VecImageClassificationConfig,
     Data2VecImageClassificationModel,

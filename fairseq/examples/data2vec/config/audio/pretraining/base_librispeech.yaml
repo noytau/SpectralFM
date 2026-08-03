@@ -12,29 +12,23 @@ checkpoint:
   keep_interval_updates: 1
   no_epoch_checkpoints: true
 
-hydra:
-  job:
-    env_set:
-      WANDB_PROJECT: train_feature_extractor_only
-      WANDB_NAME: "lr${optimizer.lr[0]}_bs${model.batch_size}_mr${model.mask_prob}_${hydra.job.num}"
-
 task:
   _name: audio_pretraining
-  data: data/single_channel_1m/
-  max_sample_size: 245 # fixme 320000
-  min_sample_size: 245 # fixme 32000
+  data: ???
+  max_sample_size: 320000
+  min_sample_size: 32000
   normalize: true
 
 dataset:
-  num_workers: 8
-  max_tokens: 400000
+  num_workers: 6
+  max_tokens: 3800000
   skip_invalid_size_inputs_valid_test: true
   validate_interval: 5
   required_batch_size_multiple: 1
   disable_validation: true
 
 distributed_training:
-  distributed_world_size: 8
+  distributed_world_size: 16
   ddp_backend: legacy_ddp
 
 criterion:
@@ -67,8 +61,8 @@ model:
   feature_grad_mult: 1.0
   encoder_embed_dim: 768
 
-  mask_prob: 0.5
-  mask_length: 8
+  mask_prob: 0.65
+  mask_length: 10
 
   loss_beta: 0
   loss_scale: null

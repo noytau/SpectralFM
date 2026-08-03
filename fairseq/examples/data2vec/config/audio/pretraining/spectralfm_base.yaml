@@ -1,53 +1,36 @@
-# data2vec_optimized_245.yaml
 # @package _group_
+# SpectralFM pretraining config.
+# Based on base_librispeech.yaml but tuned for short 1D spectrograms (245 frames per sample).
 
 common:
   fp16: true
   log_format: json
-  log_interval: 100
+  log_interval: 10
   tensorboard_logdir: tb
-  user_dir: /mnt5/noy/fairseq/examples/data2vec
-  wandb_project: "spectralfm_batch_sweep"
-  wandb_run_name: "5m_data_bs32_uf2"
-    #wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}  
 
 checkpoint:
-  save_interval: 1
-  save_interval_updates: 500 # fixme change to 1k 
+  save_interval: 5
+  save_interval_updates: 5000
   keep_interval_updates: 3
   no_epoch_checkpoints: true
 
 task:
   _name: audio_pretraining
-  data: /mnt5/noy/fairseq/data/single_channel_all/
-  # Adjusted to safely include your file length of 245
-  max_sample_size: 500  
-  min_sample_size: 200
-  normalize: true # Kept from base config; set to false if your data is pre-normalized
-
-    # hydra:
-    #   job:
-    #     env_set:
-    #       WANDB_PROJECT: train_feature_extractor_optimized
-    #       wandb_run_name: data2vec_245_len_optimized
-    #         # wandb_run_name:  lr${optimizer.lr[0]}_mtok${dataset.max_tokens}_mp${model.mask_prob}_ml${model.mask_length}_${task.data}
+  data: ???                  # override at launch: task.data=/path/to/manifest/dir
+  max_sample_size: 1000      # SpectralFM wavs are 245 frames — well under this cap
+  min_sample_size: 1         # must be 1; base_librispeech uses 32000 which filters everything
+  normalize: true
 
 dataset:
   num_workers: 4
-  # FIXED OOM: Replaced max_tokens with max_sentences (batch size)
-  # Start with 128. If you have memory left, try 256 or 512.
-  # max_sentences: 128
-  batch_size: 320
-  validate_interval_updates: 500 # fixme change to 1k or more  
+  max_tokens: 400000         # scaled down from 3.8M (samples are tiny)
   skip_invalid_size_inputs_valid_test: true
-  validate_interval: 1
-  valid_subset:  valid
+  validate_interval: 5
   required_batch_size_multiple: 1
   disable_validation: false
 
-
 distributed_training:
-  distributed_world_size: 8
+  distributed_world_size: 1  # override at launch for multi-GPU
   ddp_backend: legacy_ddp
 
 criterion:
@@ -58,12 +41,8 @@ criterion:
     - pred_var
 
 optimization:
-  max_update: 21000
-  max_epoch: 22  
-  lr: [0.001]
-  update_freq: [4]
-  # Optional: Increase update_freq to simulate larger batches if needed
-  # update_freq: [1] 
+  max_update: 400000
+  lr: [0.0001]
 
 optimizer:
   _name: adam
@@ -71,10 +50,9 @@ optimizer:
   adam_eps: 1e-06
   weight_decay: 0.01
 
-lr_scheduler: 
-  #_name: fixed
-  _name: tri_stage # fixme removed for now
-  phase_ratio: [0.1, 0.4, 0.5]
+lr_scheduler:
+  _name: tri_stage
+  phase_ratio: [0.03, 0.9, 0.07]
 
 model:
   _name: data2vec_audio
@@ -84,10 +62,9 @@ model:
   dropout_features: 0.0
   feature_grad_mult: 1.0
   encoder_embed_dim: 768
-  
-  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
-  mask_prob: 0.4
-  mask_length: 10
+
+  mask_prob: 0.65
+  mask_length: 1             # span=1 since our sequences are only 49 tokens after conv
 
   loss_beta: 0
   loss_scale: null

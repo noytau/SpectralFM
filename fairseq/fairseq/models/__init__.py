@@ -57,8 +57,6 @@ def build_model(cfg: FairseqDataclass, task, from_checkpoint=False):
 
     model = None
     model_type = getattr(cfg, "_name", None) or getattr(cfg, "arch", None)
-    print(f"MODEL_DATACLASS_REGISTRY = {MODEL_DATACLASS_REGISTRY}") # fixme noy 
-    print(f"DEBUG NOY model_type = {model_type}") # fixme noy 
 
     if not model_type and len(cfg) == 1:
         # this is hit if config object is nested in directory that is named after model type
@@ -86,12 +84,9 @@ def build_model(cfg: FairseqDataclass, task, from_checkpoint=False):
         # set defaults from dataclass. note that arch name and model name can be the same
         dc = MODEL_DATACLASS_REGISTRY[model_type]
 
-        print(cfg) # fixme noy 
         if isinstance(cfg, argparse.Namespace):
-            print("1")
             cfg = dc.from_namespace(cfg)
         else:
-            print("2")
             cfg = merge_with_parent(dc(), cfg, from_checkpoint)
     else:
         if model_type in ARCH_CONFIG_REGISTRY:

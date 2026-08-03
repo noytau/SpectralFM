@@ -426,21 +426,15 @@ class TensorboardProgressBarWrapper(BaseProgressBar):
     def __init__(self, wrapped_bar, tensorboard_logdir):
         self.wrapped_bar = wrapped_bar
         self.tensorboard_logdir = tensorboard_logdir
-        self.writer = None
 
         if SummaryWriter is None:
             logger.warning(
                 "tensorboard not found, please install with: pip install tensorboard"
             )
-        elif not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            self.writer = self._writer("")
 
     def _writer(self, key):
         if SummaryWriter is None:
             return None
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
-            return None # Only rank 0 should write to tensorboard
-
         _writers = _tensorboard_writers
         if key not in _writers:
             _writers[key] = SummaryWriter(os.path.join(self.tensorboard_logdir, key))
@@ -506,13 +500,11 @@ class WandBProgressBarWrapper(BaseProgressBar):
     def log(self, stats, tag=None, step=None):
         """Log intermediate stats to tensorboard."""
         self._log_to_wandb(stats, tag, step)
-        self._log_to_mlflow(stats, tag=tag, step=step)
         self.wrapped_bar.log(stats, tag=tag, step=step)
 
     def print(self, stats, tag=None, step=None):
         """Print end-of-epoch stats."""
         self._log_to_wandb(stats, tag, step)
-        self._log_to_mlflow(stats, tag=tag, step=step)
         self.wrapped_bar.print(stats, tag=tag, step=step)
 
     def update_config(self, config):
@@ -529,7 +521,6 @@ class WandBProgressBarWrapper(BaseProgressBar):
 
         prefix = "" if tag is None else tag + "/"
 
-        print(f"stats keys: {stats.keys()} end")
         for key in stats.keys() - {"num_updates"}:
             if isinstance(stats[key], AverageMeter):
                 wandb.log({prefix + key: stats[key].val}, step=step)
@@ -537,36 +528,11 @@ class WandBProgressBarWrapper(BaseProgressBar):
                 wandb.log({prefix + key: stats[key]}, step=step)
 
 
-    def _log_to_mlflow(self, stats, tag=None, step=None):
-        import mlflow
-        from numbers import Number
-        from fairseq.meters import AverageMeter
-
-        # Skip if MLflow is not initialized
-        if not mlflow.active_run():
-         return
-
-        # Determine step (same logic as wandb)
-        if step is None:
-         step = stats.get("num_updates", None)
-
-        prefix = "" if tag is None else tag + "/"
-
-        for key in stats.keys() - {"num_updates"}:
-         value = stats[key]
-
-         # AverageMeter objects (e.g., loss, accuracy)
-         if isinstance(value, AverageMeter):
-             mlflow.log_metric(prefix + key, value.val, step=step)
-
-         # Plain numeric values
-         elif isinstance(value, Number):
-             mlflow.log_metric(prefix + key, value, step=step)
-
 try:
     from azureml.core import Run
 except ImportError:
     Run = None
+
 
 class AzureMLProgressBarWrapper(BaseProgressBar):
     """Log to Azure ML"""
