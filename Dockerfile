@@ -1,72 +1,31 @@
-# Use an official PyTorch runtime image as a base.
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+# 1. Start from your existing lean image
+FROM noyhassid/spectralfm-lean:v1
 
-WORKDIR /app
-
-# --- GLOBAL SETTINGS ---
-# Prevent interactive prompts (timezone, keyboard layout, etc.)
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Etc/UTC
-
-# Pre-configure timezone file manually to ensure tzdata never asks questions
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-
-# FIX: Use ENV instead of RUN export so the variable persists in the container
-ENV WANDB_API_KEY=0054f721e6f75eecda6594b1f8c0ebf64ff8db66
-
-# --- STEP 1: INSTALL TOOLS ---
+# 2. Install System Compilers (Fixes the g++ error)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    tzdata \
-    build-essential \
-    git \
-    tmux \
-    openssh-server \
-    sudo \
-    nano \
-    vim \
-    wget \
-    curl \
-    unzip \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y build-essential libsndfile1 && \
+    rm -rf /var/lib/apt/lists/*
 
-# pin pip < 24.1 to handle omegaconf’s metadata issues
-RUN python -m pip install --no-cache-dir "pip<24.1"
+# 3. Create the Conda Environment (As requested)
+COPY spectralfm.yml /tmp/spectralfm.yml
+RUN conda env create -f /tmp/spectralfm.yml && \
+    conda clean --all -y
 
-# Clone and install fairseq into /app/fairseq
-# This location is safe because it is NOT in /storage
-RUN git clone https://github.com/facebookresearch/fairseq.git /app/fairseq && \
-    cd /app/fairseq && \
-    pip install --no-cache-dir -e .
+# 4. Set the new environment as Default
+# This ensures 'python' runs inside your new env automatically
+ENV PATH /opt/conda/envs/spectralfm/bin:$PATH
+ENV CONDA_DEFAULT_ENV spectralfm
 
-RUN git clone https://github.com/noytau/SpectralFM.git /app/spectralfm_code
-RUN pip install --no-cache-dir -r /app/spectralfm_code/requirements.txt
+# 5. Downgrade Pip (Safety fix for metadata errors)
+RUN pip install "pip==24.0"
+RUN pip install "omegaconf==2.0.5" "hydra-core==1.0.7" "PyYAML>=5.1,<6.1"
 
-ENV FORCE_CUDA=1
-ENV PYTHONPATH=/storage/noy/spectralfm_code:/app/spectralfm_code
+# 6. Bake the Code (Fixes the slow startup)
+# Copy code from local folder -> inside image
+COPY fairseq /app/fairseq
 
-# --- SSH SETUP ---
-RUN mkdir -p /var/run/sshd
+# Set working directory to the code folder
+WORKDIR /app/fairseq
 
-# Setup Users and Root Login
-# 1. Create user 'sshuser'
-# 2. Set passwords for 'sshuser' and 'root'
-# 3. Grant passwordless sudo to sshuser
-# 4. FIX: Handle sshd_config.d overrides (common in Ubuntu 22.04+) by writing a high-priority config file
-# 5. FIX: Also patch the main sshd_config just in case
-RUN useradd -rm -d /home/sshuser -s /bin/bash -g root -G sudo -u 1000 sshuser && \
-    echo 'sshuser:gYnH1324!' | chpasswd && \
-    echo 'root:gYnH1324!' | chpasswd && \
-    echo "sshuser ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/sshuser && \
-    chmod 0440 /etc/sudoers.d/sshuser && \
-    # Force settings in the override directory (highest priority)
-    mkdir -p /etc/ssh/sshd_config.d && \
-    echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/99-force-root.conf && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config.d/99-force-root.conf && \
-    # Also patch main config for older systems
-    sed -i 's/^.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
-    sed -i 's/^.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-    sed -i 's/session\s*required\s*pam_loginuid.so/session optional pam_loginuid.so/' /etc/pam.d/sshd
-
-EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D"]
+# Install it! (Compiles C++ extensions now, so you don't wait later)
+RUN pip install --no-build-isolation -e .
