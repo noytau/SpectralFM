@@ -306,11 +306,29 @@ and the baseline respectively.
   currently DECOUPLED. The promising direction is T5b-style: keep the Feb-25 SSL
   backbone (label-informative) and add reconstruction capability via decoders —
   not replace the backbone with recon-trained stacks.
-Overnight round (2026-08-04, orchestrated on Geoffrey): TV-long λ∈{0.1,0.5,1,1.5,2}
-×10k steps batch-1000; projlinL/mlp768L/mlp2048L ×10k steps; T5b (3AE frozen Feb-25,
-apr28 sched) finishing; auto-chained: 3-way T5 vs exp2_long vs T5b eval, full
-evals + histograms + overlays for TV-long and proj-long
-(`recon_full_{tvL,projL,3way}_20260804/`).
+**OVERNIGHT LONG ROUND DONE (2026-08-04)** — all results in
+`code/eval_outputs/recon_full_{tvL,projL,3way}_20260804/` (+ overlays dirs), all
+runs 10k steps / effective batch 1000 / lr 1e-4 / warmup 500 / normalize, metadata
+verified in the checkpoints. Verdicts:
+- **TV (final): λ_tv ≈ 0.1 wins everywhere once trained long enough.** in_dist
+  fe-MSE monotone in λ (0.0367 → 0.0614); the short-round "strong TV helps OOD"
+  effect washed out at 10k steps (samples median now also best at λ=0.1).
+  TV = mild regularizer; use 0.1, don't go higher.
+- **Projection (final): capacity ordering flips with training length —
+  mlp2048L best everywhere at 10k steps** (in_dist proj-MSE 0.0451 < mlp768L
+  0.0499 < linear 0.0538; −16% vs linear). Confirms mlp2048 was undertrained at
+  2k. MLP > linear robust across all datasets and both schedules.
+- **T5b (10k-step 3AE on frozen Feb-25): best transformer-stage reconstruction
+  measured** — in_dist tr-MSE 0.0558 (contamination-corrected) vs T5 0.0880 /
+  april 3AE 0.1287. Depth-inversion confirmed: on the SSL backbone deeper =
+  more reconstructable. april 3AE still owns the fe stage (0.047) and OOD.
+- Sanity audit: T5b's `--data_dir` glob overlapped 38/500 in_dist valid files →
+  13/200 eval samples; clean-only numbers reported above, no conclusion flips.
+  The 1k subset (all TV/proj rounds) has ZERO overlap with 10k valid. Known
+  artifacts: `tr` column meaningless for frozen-partially-warm-started heads
+  (TV/proj rows); `samples` means are outlier-driven (use medians);
+  in-memory-loader normalize bug found+fixed (commit 47b18ec side).
+  Future `--data_dir` runs must exclude valid-set files.
 
 ### T3. Evaluate transformer without masking (eval experiment, no training)
 Find where masking is applied in the transformer forward path and run the evaluation with
