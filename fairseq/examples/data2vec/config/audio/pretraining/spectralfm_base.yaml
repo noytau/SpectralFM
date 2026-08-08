@@ -39,6 +39,10 @@ criterion:
     - ema_decay
     - target_var
     - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
 
 optimization:
   max_update: 400000
@@ -83,3 +87,11 @@ model:
 
   require_same_masks: true
   mask_dropout: 0
+
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  # explicit: the merged-in autoencoder branch added a `train_only_fe` gate
+  # that defaults to True (freezes everything except the feature extractor).
+  # This config trains the full model end-to-end, so it must override that.
+  train_only_fe: false

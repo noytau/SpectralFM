@@ -1,0 +1,132 @@
+# @package _group_
+# Collapse Ablation Config — fe_vs_transformer_collapse
+#
+# Single parameterized config for all 9 Tier-1 collapse diagnosis experiments.
+# Run each experiment by overriding the model.* fields listed below from the CLI.
+# See HOW_TO_RUN.md in this directory for the exact command per experiment.
+#
+# Naming convention:  fe-{fe_mode}_trans-frozen-{freeze_encoder}_lv{lambda_var}_lc{lambda_cov}
+# WandB run name is auto-composed from the model config via Hydra interpolation.
+
+common:
+  fp16: false                  # fp32 for precise loss tracking during ablations
+  log_format: json
+  log_interval: 50
+  tensorboard_logdir: tb
+  user_dir: /mnt5/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm_fe_vs_transformer_collapse"
+  wandb_run_name: "fe-${model.fe_mode}_trans-frozen-${model.freeze_encoder}_lv${model.lambda_var}_lc${model.lambda_cov}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 500
+  keep_interval_updates: 3
+  no_epoch_checkpoints: false
+
+task:
+  _name: audio_pretraining
+  data: /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_100
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 64
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  valid_subset: train          # reuse train subset for collapse monitoring
+  required_batch_size_multiple: 1
+  disable_validation: false
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - ema_decay
+    - target_var
+    - pred_var
+    - var                      # variance reg loss scalar (logged when lambda_var > 0)
+    - cov                      # covariance reg loss scalar (logged when lambda_cov > 0)
+    - uniform                  # uniformity loss scalar (logged when lambda_uniform > 0)
+
+optimization:
+  max_update: 100
+  max_epoch: 30
+  lr: [0.0001]
+  update_freq: [1]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 1000
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.0       # disabled for reproducibility in ablations
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  require_same_masks: true
+  mask_dropout: 0
+  mask_seed: 42                # deterministic masking for reproducibility
+
+  train_only_fe: false
+
+  # ---- Ablation knobs (override these from CLI) ----
+  # fe_mode:         train | frozen | identity
+  # freeze_encoder:  false | true
+  # lambda_var:      0.0   | 1.0 (var) | 25.0 (vicreg)
+  # lambda_cov:      0.0   | 1.0 (vicreg)
+  # lambda_uniform:  0.0   | 1.0 (uniform)
+  # var_gamma:       1.0
+  # model_path:      null  | /mnt5/noy/SpectralFM/fairseq/base_libri_official.pt
+  # skip_pretrained_weights: true | false
+  fe_mode: identity
+  freeze_encoder: false
+  lambda_var: 0.0
+  lambda_cov: 0.0
+  lambda_uniform: 0.0
+  var_gamma: 1.0
+  model_path: null
+  skip_pretrained_weights: true
+
+hydra:
+  run:
+    # Single new level under the pre-created base dir — avoids Hydra's mkdir(parents=False) failure.
+    # Pre-create once: mkdir -p /mnt5/noy/SpectralFM/fairseq/outputs/fe_vs_transformer_collapse
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/fe_vs_transformer_collapse/${now:%Y-%m-%d_%H-%M-%S}_fe-${model.fe_mode}_frozen-${model.freeze_encoder}_lv${model.lambda_var}_lc${model.lambda_cov}
+  sweep:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/fe_vs_transformer_collapse/${now:%Y-%m-%d_%H-%M-%S}

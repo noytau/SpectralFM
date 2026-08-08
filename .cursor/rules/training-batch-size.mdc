@@ -1,0 +1,60 @@
+---
+alwaysApply: true
+---
+
+# Training Batch Size Convention
+
+**ALWAYS use `batch_size: 512` and `update_freq: [4]` for SpectralFM training jobs**
+unless the user explicitly requests otherwise.
+
+These two values come from the canonical recipe in
+[fairseq/examples/data2vec/config/audio/pretraining/spectralfm_full_train.yaml](mdc:fairseq/examples/data2vec/config/audio/pretraining/spectralfm_full_train.yaml)
+(lines 41 and 69) and represent the configuration the model was originally trained on.
+The Feb-15 2026 checkpoint
+(`/storage/noy/SpectralFM/checkpoints/checkpoint_best_2026-02-15.pt`,
+or local `/mnt5/noy/SpectralFM/checkpoints/checkpoint_best_2026-02-15.pt`)
+that we warm-start from was trained with these exact values, so changing them shifts
+the gradient-noise distribution that the warm-start was tuned for.
+
+## What the numbers mean
+
+| field | value | meaning |
+|---|---|---|
+| `dataset.batch_size` | **512** | sequences per micro-batch on each GPU |
+| `optimization.update_freq` | **[4]** | gradient-accumulation steps per optimizer update |
+
+Effective optimizer batch = `batch_size * update_freq * world_size`.
+On 1 GPU that is 512 × 4 × 1 = **2048**; on the 8-GPU baseline it is 512 × 4 × 8 = **16,384**.
+
+## Why this matters (don't override unless you know why)
+
+- **Gradient noise**: with `batch_size=16` (the smoke default) we observed `gnorm ≈ 60–90`
+  hitting the `clip_norm=1.0 → ×100` cap every step. With `bsz=512` the per-step variance
+  drops ≈ √32 ≈ 5.6× and `gnorm` settles in the healthy range.
+- **EMA-target convergence**: data2vec's student → EMA-teacher regression loss plateaus
+  when the optimizer cannot reduce noise below the EMA target drift. A small batch keeps
+  the noise floor above the target floor and regression loss appears "stuck".
+- **Reproducibility**: every saved SpectralFM checkpoint was trained at this effective
+  batch size; downstream evaluators expect the same scale of feature statistics.
+
+## When to override
+
+Document the override in the run config + W&B name. Acceptable reasons:
+- **OOM at bsz=512** on a smaller GPU → drop to 256 + `update_freq=8` (keep effective batch).
+  Never just halve the effective batch silently.
+- **Smoke tests** (≤ 100 updates, sanity-check only) → bsz=16 is fine.
+  These checkpoints are not for analysis.
+- **Tiny dataset** (< 10× bsz) → bsz = `min(512, dataset_size)`,
+  keep `update_freq=4`.
+
+## How to set the values
+
+In `submit_signal_recon_hydra_short_runai.sh` (and any similar submit script),
+pass via CLI overrides — the YAML can leave them at the smoke default:
+
+```bash
+dataset.batch_size=512 \
+optimization.update_freq=[4] \
+```
+
+For sanity, also bump `dataset.num_workers` to 4 when raising bsz to 512.

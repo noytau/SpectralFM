@@ -1,0 +1,225 @@
+# @package _group_
+#
+# 2-AE basemerge pretraining for SpectralFM (this PR):
+#   • Init FE + LN from Apr-28 FE-AE best checkpoint (apr28_fe_recon_best.pt)
+#   • Init transformer from base_libri (data2vec_multi blocks.* → fairseq layers.*; 8→12L warning is expected)
+#   • Random init for post_extract_proj + fe_recon_decoder + trans_recon_decoder (MirrorDecoder variant)
+#   • Loss = regression_loss (always-on, weight 1)
+#           + lambda_recon_fe    · recon_fe_loss   (L2)
+#           + lambda_recon_trans · recon_trans_loss (L2)
+#   • Per-component LR via composite optimizer (joint encoder+decoder share a group, per spec):
+#       fe          (feature_extractor + fe_recon_decoder)    lr=1e-5
+#       ln          (layer_norm)                              lr=1e-5
+#       proj        (post_extract_proj)                       lr=1e-4
+#       transformer (encoder + trans_recon_decoder)           lr=1e-5
+#       other       (mask_emb, final_proj)                    lr=1e-4
+#
+# REQUIRES: PYTHONPATH includes /mnt5/noy/SpectralFM/code so data2vec_audio.py
+# can import recon_components.py for the per-component shape-safe loaders + ViT remap.
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 50
+  tensorboard_logdir: tb
+  user_dir: /mnt5/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm_recon_loss"
+  wandb_run_name: "basemerge_2ae_${model.recon_loss_type}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 2000
+  keep_interval_updates: 2
+  no_epoch_checkpoints: false
+
+task:
+  _name: audio_pretraining
+  data: /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_one
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 512
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  valid_subset: train
+  required_batch_size_multiple: 1
+  disable_validation: true
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - recon_fe
+    - recon_trans
+    - regression
+    - target_var
+    - pred_var
+
+optimization:
+  max_update: 100000
+  max_epoch: 200
+  # Required global lr field (composite ignores this; per-group lr is set under optimizer.groups.*.lr).
+  lr: [0]
+  update_freq: [4]
+  clip_norm: 1.0
+
+# Per-component composite optimizer. p.param_group is set by Data2VecAudioModel.build_model
+# (model.tag_param_groups=true), keyed on the natural module-name prefix.
+#
+# IMPORTANT: fairseq/optim/composite.py only consumes ``lr_float`` at the group level
+# (it ignores ``lr:`` here). The per-group LR is injected into ``optimizer.lr`` via
+# ``optimizer_config.lr = [group_cfg.lr_float]``. If you set ``lr:`` instead of ``lr_float``,
+# the optimizer silently runs with lr=0 (interpolated from optimization.lr=[0] above).
+optimizer:
+  _name: composite
+  groups:
+    fe:
+      lr_float: 1.0e-5
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 1000
+        max_update: 100000
+    ln:
+      lr_float: 1.0e-5
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.0
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 1000
+        max_update: 100000
+    proj:
+      lr_float: 1.0e-4
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 1000
+        max_update: 100000
+    transformer:
+      lr_float: 1.0e-5
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 1000
+        max_update: 100000
+    other:
+      lr_float: 1.0e-4
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.98)
+        adam_eps: 1e-06
+        weight_decay: 0.01
+      lr_scheduler:
+        _name: cosine
+        warmup_updates: 1000
+        max_update: 100000
+
+lr_scheduler: pass_through
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.0
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  require_same_masks: true
+  mask_dropout: 0
+
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  recon_only: false
+  recon_loss_type: l2
+  train_only_fe: false
+  freeze_encoder: false
+
+  lambda_var: 0.0
+  lambda_cov: 0.0
+  lambda_uniform: 0.0
+
+  fe_mode: train
+
+  # 2-AE losses (added on top of regression_loss; per user spec, regression is never disabled).
+  lambda_recon_fe:    1.0
+  lambda_recon_trans: 1.0
+
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+  recon_decoder_type: mirror   # ConvTranspose MirrorReconDecoder, sample-aligned
+
+  # Disable model_path: per-component init below replaces the legacy full-checkpoint load.
+  model_path: null
+  skip_pretrained_weights: true
+
+  # Per-component init (this PR). FE+LN from Apr-28 FE-AE best ckpt;
+  # transformer from base_libri (data2vec_multi blocks.* — 8 layers, only first 8 init);
+  # post_extract_proj + both recon decoders stay random.
+  init_fe_ckpt:           /mnt5/noy/SpectralFM/fairseq/apr28_fe_recon_best.pt
+  init_ln_ckpt:           /mnt5/noy/SpectralFM/fairseq/apr28_fe_recon_best.pt
+  init_transformer_ckpt:  /mnt5/noy/SpectralFM/fairseq/base_libri_official.pt
+
+  # Per-component freeze: keep FE + LN frozen so the basemerge transformer learns
+  # to align with the established FE manifold.
+  freeze_fe_v2: true
+  freeze_ln:    true
+
+  # Tag p.param_group on every parameter for the composite optimizer above.
+  tag_param_groups: true
+
+  epoch_cosim_enable: false
+  epoch_cosim_interval_updates: 1000
+  epoch_cosim_subset_path: /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
+  epoch_cosim_structured_entries_path: /mnt5/noy/SpectralFM/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json
+  epoch_cosim_max_samples: 100
+  epoch_cosim_output_subdir: cosim_epoch
+  epoch_cosim_micro_batch: 8
+
+hydra:
+  run:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_basemerge_2ae_${model.recon_loss_type}
+  sweep:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}

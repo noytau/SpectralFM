@@ -1,0 +1,708 @@
+{
+  "seed": 42,
+  "prefer_manifest": "train",
+  "nova_data_dir": "/mnt5/noy/SpectralFM/fairseq/data/nova_data",
+  "n_entries": 100,
+  "entries": [
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772410,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772411,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772412,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772413,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772414,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772415,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772416,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772417,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772418,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 772419,
+      "group": "stack_77241",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664950,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664951,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664952,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664953,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664954,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664955,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664956,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664957,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664958,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 5664959,
+      "group": "stack_566495",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698150,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698151,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698152,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698153,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698154,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698155,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698156,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698157,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698158,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "single_channel_all",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_all",
+      "index": 6698159,
+      "group": "stack_669815",
+      "group_type": "stack"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 417629,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1461397,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1663388,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1706595,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2329750,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2387745,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2471983,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2551871,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2725149,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 3163786,
+      "group": "comp_0",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 209956,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 298780,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 733129,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 895602,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1434136,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1457310,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1797271,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2685128,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2787690,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2882767,
+      "group": "comp_27",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 143853,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 505116,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 636587,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1184427,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1516227,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1614456,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 1771280,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2200378,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2467742,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "multi_channel",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/multi_channel",
+      "index": 2527464,
+      "group": "comp_31",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 2804,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 4210,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 4999,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 7251,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 9780,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 10076,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 11971,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 14254,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 14628,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 17154,
+      "group": "comp_2",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 4395,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 5400,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 7541,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 8517,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 13355,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 14464,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 16535,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 17428,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 17644,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "sampled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/sampled_data",
+      "index": 19213,
+      "group": "comp_11",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 2406,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 7250,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 8920,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 15536,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 27252,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 28528,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 31225,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 34689,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 35419,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 48786,
+      "group": "comp_14",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 1884,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 5674,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 19049,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 21873,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 27608,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 35103,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 35500,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 35793,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 38161,
+      "group": "comp_21",
+      "group_type": "component"
+    },
+    {
+      "dataset": "labeled_data",
+      "path": "/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data",
+      "index": 49851,
+      "group": "comp_21",
+      "group_type": "component"
+    }
+  ]
+}

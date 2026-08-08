@@ -1,0 +1,137 @@
+# @package _group_
+# FE reconstruction-only training. Defaults match local paths (/mnt5/...).
+# RunAI: override task.data, common.user_dir, hydra.run.dir to /storage/... paths.
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 50
+  tensorboard_logdir: tb
+  user_dir: /mnt5/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm_recon_loss"
+  wandb_run_name: "recon_only_${model.recon_loss_type}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 2000
+  keep_interval_updates: 2
+  no_epoch_checkpoints: false
+
+task:
+  _name: audio_pretraining
+  data: /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_one
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 512
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  valid_subset: train
+  required_batch_size_multiple: 1
+  disable_validation: true
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - ema_decay
+    - target_var
+    - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
+
+optimization:
+  max_update: 20000
+  max_epoch: 50
+  lr: [0.0001]
+  update_freq: [4]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 1000
+  max_update: 20000
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.0
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  require_same_masks: true
+  mask_dropout: 0
+
+  # FE→transformer projection (used when recon_only=false); recon_only skips forward past FE
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  # --- FE reconstruction only (transformer/EMA/masking skipped) ---
+  recon_only: true
+  recon_loss_type: l1       # override to l2 via CLI: model.recon_loss_type=l2
+  train_only_fe: true
+  freeze_encoder: true
+
+  lambda_var: 0.0
+  lambda_cov: 0.0
+  lambda_uniform: 0.0
+
+  fe_mode: train
+  lambda_recon_fe: 1.0
+  lambda_recon_trans: 0.0
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+  recon_decoder_type: mlp    # mlp | conv1d | interp | flat
+  model_path: /mnt5/noy/SpectralFM/fairseq/base_libri_official.pt
+  skip_pretrained_weights: false
+
+  # Epoch cosim (off by default; enable via CLI: model.epoch_cosim_enable=true)
+  epoch_cosim_enable: false
+  epoch_cosim_interval_updates: 1000
+  epoch_cosim_subset_path: /mnt5/noy/SpectralFM/fairseq/data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy
+  epoch_cosim_structured_entries_path: /mnt5/noy/SpectralFM/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/structured_similarity_full.json
+  epoch_cosim_max_samples: 100
+  epoch_cosim_output_subdir: cosim_epoch
+  epoch_cosim_micro_batch: 8
+
+hydra:
+  run:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_recon_only_${model.recon_loss_type}
+  sweep:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}

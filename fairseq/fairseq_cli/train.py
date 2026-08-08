@@ -203,6 +203,10 @@ def main(cfg: FairseqConfig) -> None:
 
         # train for one epoch
         valid_losses, should_stop = train(cfg, trainer, task, epoch_itr)
+        try:
+            task.end_epoch(epoch_itr.epoch, trainer)
+        except Exception as e:
+            logger.warning("task.end_epoch failed: %s", e)
         if should_stop:
             break
 
@@ -333,6 +337,8 @@ def train(
         if log_output is not None:  # not OOM, overflow, ...
             # log mid-epoch stats
             num_updates = trainer.get_num_updates()
+            if hasattr(task, "maybe_run_epoch_cosim_on_interval"):
+                task.maybe_run_epoch_cosim_on_interval(trainer, epoch_itr.epoch)
             if num_updates % cfg.common.log_interval == 0:
                 stats = get_training_stats(metrics.get_smoothed_values("train_inner"))
                 progress.log(stats, tag="train_inner", step=num_updates)
@@ -532,6 +538,11 @@ def validate(
         progress.print(stats, tag=subset, step=trainer.get_num_updates())
 
         valid_losses.append(stats[cfg.checkpoint.best_checkpoint_metric])
+    
+    # Save mask memory after validation completes (if enabled)
+    if hasattr(trainer, 'end_valid_epoch'):
+        trainer.end_valid_epoch()
+    
     return valid_losses
 
 

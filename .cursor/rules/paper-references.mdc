@@ -1,0 +1,62 @@
+---
+description: Academic paper references for evaluation metrics - cite in docstrings and results
+---
+
+# Paper References for SpectralFM Evaluations
+
+Every `_eval_*` method docstring MUST cite the relevant paper(s). Use this lookup.
+
+## By Metric Category
+
+### Linear Probing & Downstream Tasks
+- **Alain & Bengio (2017)** "Understanding Intermediate Layers Using Linear Classifier Probes" [arXiv:1610.01644] — layer-wise linear probing standard
+- **Chen et al. / SimCLR (ICML 2020)** [arXiv:2002.05709] — freeze encoder + linear head protocol
+- **Oquab et al. / DINOv2 (2024)** [arXiv:2304.07193] — modern SSL eval standard: k-NN + linear + few-shot
+- **Caron et al. / DINO (ICCV 2021)** [arXiv:2104.14294] — k-NN evaluation protocol
+
+### CKA & Representation Similarity
+- **Kornblith et al. (ICML 2019)** "Similarity of Neural Network Representations Revisited" [proceedings.mlr.press/v97/kornblith19a] — CKA definition
+- **Davari et al. (ICLR 2023)** [openreview.net/forum?id=8HRvyxc606] — CKA reliability caveat: NEVER use CKA alone
+
+### Uniformity & Alignment
+- **Wang & Isola (ICML 2020)** [arXiv:2005.10242] — alignment + uniformity on hypersphere. Low alignment + high uniformity = good
+
+### Collapse Detection
+- **Jing et al. (ICML 2022)** [arXiv:2110.09348] — dimensional collapse in SSL, effective rank diagnostic
+
+### Clustering Metrics
+- **Hubert & Arabie (1985)** "Comparing Partitions" — Adjusted Rand Index (ARI)
+- **Strehl & Ghosh (JMLR 2002)** "Cluster Ensembles" — Normalized Mutual Information (NMI)
+- **Rosenberg & Hirschberg (2007)** "V-Measure: A conditional entropy-based external cluster evaluation" — V-Measure
+
+### Information Theory
+- **Belghazi et al. (ICML 2018)** "Mutual Information Neural Estimation (MINE)" [arXiv:1801.04062] — MI estimation
+- **Oord et al. (2018)** "Representation Learning with Contrastive Predictive Coding" [arXiv:1807.03748] — InfoNCE bound
+- **Friedman & Dieng (ICML 2023)** [arXiv:2210.02410] — Vendi Score (embedding diversity)
+
+### Audio/Speech SSL Benchmarks
+- **Yang et al. (2021)** "SUPERB" [arXiv:2105.01051] — speech SSL benchmark (ASR, speaker ID, emotion)
+- **Turian et al. (NeurIPS 2022)** "HEAR" [arXiv:2203.03022] — general audio representation benchmark
+
+### Foundation & Architecture
+- **Baevski et al. (2022)** "data2vec" [arXiv:2202.03555] — SpectralFM base architecture
+- **He et al. (CVPR 2022)** "Masked Autoencoders Are Scalable Vision Learners" (MAE) [arXiv:2111.06377] — masked prediction methodology
+
+### Scaling Laws
+- **Kaplan et al. (2020)** [arXiv:2001.08361] — power-law scaling, log-linear plot convention
+
+### Meta-Metrics (validating that metrics work)
+- **Wu et al. (2025)** [arXiv:2509.04622] — discriminative capacity of similarity metrics
+- **Bo et al. (2024)** [arXiv:2411.14633] — functional correspondence principle
+
+## Citation Format for Docstrings
+```python
+def _eval_clustering(...):
+    """
+    Unsupervised clustering evaluation.
+
+    Metrics: ARI (Hubert & Arabie, 1985), NMI (Strehl & Ghosh, 2002),
+    Silhouette Score, V-Measure (Rosenberg & Hirschberg, 2007).
+    ...
+    """
+```

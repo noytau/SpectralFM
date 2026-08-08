@@ -165,6 +165,10 @@ class FairseqTask(object):
             raise TypeError("Datasets are expected to be of type FairseqDataset")
         return self.datasets[split]
 
+    def end_epoch(self, epoch: int, trainer) -> None:
+        """Hook after each training epoch (default: no-op). Subclasses may override."""
+        return
+
     def filter_indices_by_size(
         self, indices, dataset, max_positions=None, ignore_invalid_inputs=False
     ):
@@ -528,7 +532,7 @@ class FairseqTask(object):
         model.train()
         model.set_num_updates(update_num)
         with torch.autograd.profiler.record_function("forward"):
-            with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
+            with torch.amp.autocast('cuda', enabled=(isinstance(optimizer, AMPOptimizer))):
                 loss, sample_size, logging_output = criterion(model, sample)
         if ignore_grad:
             loss *= 0

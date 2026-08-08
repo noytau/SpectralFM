@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transformer AE — shapes, projections, and FE freeze (SpectralFM)</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "dark",
+      securityLevel: "loose",
+      flowchart: { curve: "basis", padding: 10 },
+    });
+  </script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e6edf3;
+      --muted: #8b9cb3;
+      --accent: #58a6ff;
+      --border: #30363d;
+      --warn: #d29922;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      line-height: 1.55;
+      max-width: 58rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 { font-size: 1.6rem; font-weight: 600; margin-top: 0; }
+    h2 { font-size: 1.2rem; margin-top: 2rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+    h3 { font-size: 1.02rem; margin-top: 1.25rem; color: var(--muted); font-weight: 600; }
+    p { color: var(--text); }
+    .muted { color: var(--muted); font-size: 0.95rem; }
+    .warn { color: var(--warn); font-size: 0.92rem; }
+    code, .path {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.86em;
+      background: #21262d;
+      padding: 0.12em 0.4em;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    pre {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+    .diagram-wrap {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem 1rem 0.25rem;
+      margin: 1rem 0;
+      overflow-x: auto;
+    }
+    .diagram-wrap pre.mermaid { margin: 0; background: transparent; border: none; padding: 0.5rem 0; }
+    table { width: 100%; border-collapse: collapse; margin: 0.75rem 0 1rem; font-size: 0.88rem; }
+    th, td { border: 1px solid var(--border); padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }
+    th { background: var(--card); color: var(--accent); }
+    td code { font-size: 0.92em; }
+    ul { margin: 0.35rem 0; padding-left: 1.2rem; color: var(--muted); }
+    footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.85rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+
+  <h1>Transformer reconstruction — tensor sizes, projections, LayerNorms, and freezing the FE</h1>
+  <p class="warn"><strong>RunAI / hardware:</strong> transformer signal-recon (<code>--recon_path transformer</code>, default batch) targets <strong>NVIDIA A5000 or A6000</strong>-class GPUs. Use <code>NODE_POOLS</code> that only route to those SKUs. Optional <code>RUNAI_NODE_TYPE=A5000</code> or <code>A6000</code> passes <code>--node-type</code> to pin a label; <strong>leave it unset</strong> in <span class="path">fairseq/submit_signal_recon_100k_grid_runai.sh</span> if jobs stay <code>Pending</code> because few nodes expose <code>run.ai/type=A6000</code>.</p>
+  <p class="muted">
+    Reference: <span class="path">code/train_reconstruction.py</span> (<code>--recon_path transformer</code>),
+    and Fairseq <span class="path">fairseq/examples/data2vec/models/data2vec_audio.py</span> <code>forward(..., features_only=True, mask=False)</code>.
+    Batch size <code>B</code> is arbitrary; time axes depend on input waveform length after striding.
+  </p>
+
+  <h2>Typical tensor shapes (inside <code>Data2VecAudioModel</code> → head)</h2>
+  <p class="muted">
+    <code>C</code> = transformer embedding dim (768 in the bundled SpectralFM-style config).
+    <code>T</code> = number of time frames after the conv FE (depends on input length; the standalone FE+245-bin debug path in this repo uses <strong>T = 47</strong> when the conv stack downsamples to that length).
+  </p>
+  <table>
+    <thead>
+      <tr><th>Stage</th><th>Tensor shape</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Input waveform</td>
+        <td><code>[B, L]</code></td>
+        <td><code>L</code> = samples per clip (Nova manifest WAVs; not limited to 245).</td>
+      </tr>
+      <tr>
+        <td>Conv FE output</td>
+        <td><code>[B, 512, T]</code></td>
+        <td><code>feature_extractor</code> (5-layer SpectralFM conv stack in Hydra-equivalent cfg).</td>
+      </tr>
+      <tr>
+        <td>After transpose + <strong>extractor</strong> LayerNorm</td>
+        <td><code>[B, T, 512]</code></td>
+        <td>Fairseq <code>LayerNorm</code> on the 512-d conv channel dim (<code>model.layer_norm</code> in code) — <strong>not</strong> the same module as the head’s LN below.</td>
+      </tr>
+      <tr>
+        <td><strong><code>post_extract_proj</code></strong> (internal projection)</td>
+        <td><code>[B, T, 512]</code> → <code>[B, T, C]</code></td>
+        <td>Linear or MLP (<code>build_post_extract_proj</code>): maps conv feature dim <strong>512 → C</strong> (768) so the stack can enter <code>TransformerEncoder</code>.</td>
+      </tr>
+      <tr>
+        <td>Transformer encoder out (<code>features_only</code>)</td>
+        <td><code>[B, T, C]</code></td>
+        <td>Returned as <code>out["x"]</code>; this is what the reconstruction head consumes.</td>
+      </tr>
+      <tr>
+        <td>Head <strong><code>stem</code></strong> (<code>Conv1d</code> 1×1)</td>
+        <td><code>[B, C, T]</code> → <code>[B, 512, T]</code></td>
+        <td>Transpose <code>[B,T,C]</code> to channels-first; project <strong>C → 512</strong> so the same <code>MirrorDecoder</code> as the FE path (512-wide) can run.</td>
+      </tr>
+      <tr>
+        <td>Head <strong><code>pre_decoder_ln</code></strong></td>
+        <td><code>[B, T, 512]</code></td>
+        <td><code>torch.nn.LayerNorm(512)</code> over the feature dim — mirrors the FE standalone path’s <code>nn.LayerNorm(512)</code> after the CNN.</td>
+      </tr>
+      <tr>
+        <td><code>MirrorDecoder</code></td>
+        <td><code>[B, 512, T]</code> → <code>[B, 1, 245]</code></td>
+        <td>ConvTranspose stack (same as <code>--recon_path fe</code>).</td>
+      </tr>
+      <tr>
+        <td>Training target</td>
+        <td><code>[B, 245]</code></td>
+        <td>First 245 samples of the input waveform; MSE against <code>recon.squeeze(1)</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Two different “projection” layers (do not confuse them)</h2>
+  <ul>
+    <li><strong><code>post_extract_proj</code></strong> (inside <code>Data2VecAudioModel</code>): part of the official audio encoder; maps <strong>conv 512-d</strong> tokens to <strong>transformer C-d</strong> tokens before self-attention.</li>
+    <li><strong>Head <code>stem</code></strong> (<code>TransformerMirrorDecoder</code>): maps <strong>transformer C-d</strong> sequence back to <strong>512 channels</strong> so the shared <code>MirrorDecoder</code> (designed for the FE’s 512-wide grid) can upsample to 245 bins.</li>
+  </ul>
+
+  <h2>Two different LayerNorms</h2>
+  <ul>
+    <li><strong><code>model.layer_norm</code></strong> (Fairseq, on 512): applied right after the conv FE in <code>data2vec_audio.py</code> (on the <code>[B,T,512]</code> stream).</li>
+    <li><strong><code>pre_decoder_ln</code></strong> in the reconstruction head: <code>LayerNorm(512)</code> on the stem output, matching the <strong>FE reconstruction</strong> script’s <code>layer_norm(fe_out.transpose(...))</code> pattern before <code>MirrorDecoder</code>.</li>
+  </ul>
+
+  <h2>What happens to the FE when training the transformer path?</h2>
+  <ul>
+    <li><strong>Default (no <code>--freeze_fe</code>):</strong> the <strong>entire</strong> <code>Data2VecAudioModel</code> is trained, including <code>feature_extractor</code>, <code>layer_norm</code>, <code>post_extract_proj</code>, <code>TransformerEncoder</code>, and the external head — same end-to-end idea as <code>--recon_path fe</code>, but with the full data2vec audio encoder instead of the standalone CNN.</li>
+    <li><strong>With <code>--freeze_fe</code>:</strong> the <strong>conv FE</strong> (<code>feature_extractor</code>) and the <strong>Fairseq extractor <code>layer_norm</code></strong> (512-d) have <code>requires_grad=False</code>. The script also sets <code>feature_grad_mult = 0</code> so the conv runs inside <code>torch.no_grad</code> (as in the upstream model when FE is frozen): <strong>no optimizer updates and no autograd storage through the conv</strong>. Still trained: <code>post_extract_proj</code>, <code>TransformerEncoder</code>, dropout modules, and the stem + LN + <code>MirrorDecoder</code> head — gradients flow through <code>post_extract_proj</code> into the frozen conv outputs as usual for “frozen feature extractor” setups.</li>
+  </ul>
+
+  <h2>Optional <code>--fe_ckpt</code> (pretrained FE weights)</h2>
+  <p>
+    After building/merging the backbone from the main <code>--ckpt</code>, you can pass <code>--fe_ckpt /path/to.pt</code> to
+    <strong>re-merge only</strong> <code>feature_extractor.*</code> and <code>layer_norm.*</code> from a second Fairseq checkpoint
+    (same key/shape rules as the main loader). Typical pattern: <code>--ckpt none</code> for a fresh transformer, plus
+    <code>--fe_ckpt</code> (e.g. Libri base or a RunAI long-train <code>.pt</code>) to inject conv + extractor LN weights, then <code>--freeze_fe</code> to keep that FE fixed while the transformer and head train.
+  </p>
+
+  <h2>RunAI grid — FE vs frozen-FE transformer (pretrained conv)</h2>
+  <p class="muted">
+    Submit script: <span class="path">fairseq/submit_signal_recon_100k_grid_runai.sh</span> ·
+    PVC manifest: <span class="path">fairseq/data/nova_data/single_channel_one/train_runai_150k.tsv</span> (do not use broken <code>train.tsv</code> that points at <code>/mnt5/.../single_channel_1m</code> on cluster).
+    Outputs: <code>/storage/noy/SpectralFM/fairseq/outputs/signal_recon_100k_grid/&lt;UTC_STAMP&gt;_&lt;job-name&gt;/</code> ·
+    W&amp;B project: <code>spectralfm-runai-signal-recon-100k</code>.
+  </p>
+  <div class="diagram-wrap">
+    <pre class="mermaid">
+flowchart TB
+  PT["Fairseq checkpoint<br/>Feb‑25 long train .pt<br/>(conv FE + LN keys)"]
+  subgraph FEgrid["FE path — train full CNN AE"]
+    PT --> FEe["build_fe_standalone: load FE+LN from --ckpt"]
+    FEe --> De["MirrorDecoder trains"]
+    De --> Lfe["MSE vs 245-bin target"]
+  end
+  subgraph TRgrid["Transformer path — frozen FE + pretrained conv"]
+    RND["Backbone: --ckpt none<br/>(random transformer + head slots)"]
+    RND --> M1["--fe_ckpt: merge FE+LN from Feb25 .pt"]
+    PT --> M1
+    M1 --> FR["--freeze_fe: conv + extractor LN frozen"]
+    FR --> TRN["Train post_extract_proj, encoder, head"]
+    TRN --> Ltr["MSE vs 245-bin target"]
+  end
+    </pre>
+  </div>
+
+  <h3>Shared hyperparameters (grid)</h3>
+  <table>
+    <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td><code>--n_samples</code></td><td>100000 (lazy; capped by manifest rows)</td></tr>
+      <tr><td><code>--steps</code></td><td>10000 or 100000</td></tr>
+      <tr><td><code>--lr</code></td><td><code>1e-4</code> or <code>5e-4</code></td></tr>
+      <tr><td><code>--warmup</code></td><td>10% of steps (1000 @ 10k steps; 10000 @ 100k steps) → cosine to 0</td></tr>
+      <tr><td><code>--batch_size</code> / <code>--grad_accum_steps</code></td><td>512 / 4 (micro-batch 128)</td></tr>
+      <tr><td><code>--manifest</code></td><td><code>.../single_channel_one/train_runai_150k.tsv</code></td></tr>
+      <tr><td>FE source file</td><td><code>checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt</code></td></tr>
+      <tr><td>RunAI GPU request</td><td><code>--gpu-memory 40G</code>; <code>NODE_POOLS=faculty,raja</code>; optional <code>RUNAI_NODE_TYPE</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Job names (refresh status when you return)</h3>
+  <p class="muted">Run: <code>runai list jobs -p raja | grep sfm-sr-</code> · Pods: <code>kubectl get pods -n runai-raja | grep sfm-sr-</code></p>
+  <table>
+    <thead><tr><th>Job name</th><th>Mode</th><th>Steps</th><th>LR</th><th>Status (fill when back)</th></tr></thead>
+    <tbody>
+      <tr><td><code>sfm-sr-fe-s10k-lr1e4</code></td><td>FE</td><td>10k</td><td>1e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-fe-s10k-lr5e4</code></td><td>FE</td><td>10k</td><td>5e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-fe-s100k-lr1e4</code></td><td>FE</td><td>100k</td><td>1e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-fe-s100k-lr5e4</code></td><td>FE</td><td>100k</td><td>5e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-tr-s10k-lr1e4</code></td><td>Transformer <code>freeze_fe</code> + <code>fe_ckpt</code></td><td>10k</td><td>1e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-tr-s10k-lr5e4</code></td><td>Transformer <code>freeze_fe</code> + <code>fe_ckpt</code></td><td>10k</td><td>5e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-tr-s100k-lr1e4</code></td><td>Transformer <code>freeze_fe</code> + <code>fe_ckpt</code></td><td>100k</td><td>1e-4</td><td class="muted">—</td></tr>
+      <tr><td><code>sfm-sr-tr-s100k-lr5e4</code></td><td>Transformer <code>freeze_fe</code> + <code>fe_ckpt</code></td><td>100k</td><td>5e-4</td><td class="muted">—</td></tr>
+    </tbody>
+  </table>
+
+  <h3>After a transformer run finishes — analyze</h3>
+  <p class="muted">Checkpoint: <code>ckpt_*.pt</code> in that job’s <code>out_dir</code> (format 2 includes <code>data2vec_audio</code> + <code>transformer_mirror</code>).</p>
+  <pre><code>conda run -n spectralfm python code/train_reconstruction.py --mode analyze --recon_path transformer \
+  --ckpt_ae /path/to/ckpt_....pt --out_dir autoencoder_experiments/runai_tr_analyze_&lt;tag&gt; \
+  --datasets single_channel_10k --n_stat 100 --device cuda</code></pre>
+  <p class="muted">FE runs: use <code>--recon_path fe</code> (default) and <code>--ckpt_ae</code> pointing at the saved FE AE checkpoint.</p>
+
+  <h2>Training pipeline (full AE)</h2>
+  <div class="diagram-wrap">
+    <pre class="mermaid">
+flowchart TB
+  subgraph IN[Input]
+    W["Waveform [B, L]"]
+  end
+  subgraph D2V[Trainable Data2VecAudioModel]
+    FE["Conv FE → [B,512,T]"]
+    LN0["Fairseq LayerNorm 512 → [B,T,512]"]
+    PEP["post_extract_proj 512→C"]
+    ENC["TransformerEncoder → [B,T,C]"]
+  end
+  subgraph HEAD[Reconstruction head]
+    STEM["Conv1d 1×1 C→512"]
+    LN1["LayerNorm 512 → [B,T,512]"]
+    MD["MirrorDecoder → [B,1,245]"]
+  end
+  TGT["Target [B,245]"]
+  W --> FE --> LN0 --> PEP --> ENC
+  ENC --> STEM --> LN1 --> MD
+  MD --> MSE[MSE]
+  TGT --> MSE
+    </pre>
+  </div>
+
+  <h2>Training pipeline (<code>--freeze_fe</code>)</h2>
+  <div class="diagram-wrap">
+    <pre class="mermaid">
+flowchart TB
+  subgraph FRZ[Frozen no_grad + requires_grad False]
+    FE2["Conv FE"]
+    LN02["Fairseq LayerNorm 512"]
+  end
+  subgraph TR[Trainable]
+    PEP2["post_extract_proj"]
+    ENC2["TransformerEncoder"]
+    H2["Head stem + LN + MirrorDecoder"]
+  end
+  W2[Waveform] --> FE2 --> LN02 --> PEP2 --> ENC2 --> H2 --> M2[MSE vs 245-bin target]
+    </pre>
+  </div>
+
+  <h2>Checkpoint (v2)</h2>
+  <p class="muted">Keys include <code>data2vec_audio</code>, <code>transformer_mirror</code>, <code>train_reconstruction_format</code>, <code>transformer_ae_format</code>, <code>freeze_fe</code>, <code>fe_ckpt</code>, <code>feature_grad_mult_at_save</code> (for analyze to restore the same forward branch).</p>
+
+  <h2>Example commands</h2>
+  <pre><code># Full Data2VecAudio + head, init from one Fairseq checkpoint
+python3 code/train_reconstruction.py --mode train --recon_path transformer \
+  --ckpt fairseq/base_libri_official.pt --manifest ... --out_dir ...
+
+# Libri FE (frozen) + train transformer + head; random init for non-FE weights from --ckpt none
+python3 code/train_reconstruction.py --mode train --recon_path transformer --ckpt none \
+  --fe_ckpt fairseq/base_libri_official.pt --freeze_fe --manifest ... --out_dir ...</code></pre>
+
+  <p class="warn">Full-model training is GPU- and memory-intensive; <code>--freeze_fe</code> reduces conv-side work and optimizer state, but the transformer + head are still large.</p>
+
+  <footer>
+    SpectralFM · <span class="path">code/train_reconstruction.py</span> ·
+    <span class="path">fairseq/examples/data2vec/models/data2vec_audio.py</span>
+  </footer>
+
+</body>
+</html>

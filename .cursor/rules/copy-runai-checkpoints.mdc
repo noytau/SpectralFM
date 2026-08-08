@@ -1,0 +1,63 @@
+---
+description: How to copy checkpoints from RunAI /storage to local /mnt5 via kubectl exec
+alwaysApply: false
+---
+
+# Copying RunAI Checkpoints Locally
+
+`/storage` (RunAI NFS) and `/mnt5` (local NFS) are **separate mounts** of the same physical storage.
+Files written by RunAI jobs to `/storage/...` are NOT immediately visible at `/mnt5/...`.
+The only reliable way to copy is via `kubectl exec` into a running pod.
+
+## Shell Pod
+
+```bash
+kubectl get pods | grep spectralfm-shell   # find pod name, e.g. spectralfm-shell-0-5
+```
+
+## Copy Command
+
+Pipe a bash script via stdin (`-i`) — `kubectl exec -c` syntax doesn't work cleanly for multi-line scripts:
+
+```bash
+cat << 'SCRIPT' | kubectl exec -i spectralfm-shell-0-5 -- bash
+SRC_BASE="/storage/noy/SpectralFM/fairseq/outputs/fe_vs_transformer_collapse"
+DST_DIR="/storage/noy/SpectralFM/checkpoints/runai"
+mkdir -p "$DST_DIR"
+
+for RUN_DIR in "$SRC_BASE"/*/; do
+    CKPT_DIR="$RUN_DIR/checkpoints"
+    [[ -d "$CKPT_DIR" ]] || continue
+
+    # Prefer checkpoint_best.pt; fall back to most recent numbered checkpoint
+    if [[ -f "$CKPT_DIR/checkpoint_best.pt" ]]; then
+        SRC="$CKPT_DIR/checkpoint_best.pt"
+    else
+        SRC=$(ls -t "$CKPT_DIR"/checkpoint_[0-9]*.pt 2>/dev/null | head -1)
+        [[ -n "$SRC" ]] || SRC="$CKPT_DIR/checkpoint_last.pt"
+    fi
+    [[ -f "$SRC" ]] || continue
+
+    # Extract wandb_run_name from hydra_train.log
+    RUN_NAME=$(grep -m1 "wandb_run_name" "$RUN_DIR/hydra_train.log" 2>/dev/null \
+               | grep -oP "(?<=wandb_run_name': ')[^']+" | head -1)
+    [[ -z "$RUN_NAME" ]] && RUN_NAME=$(basename "$RUN_DIR" | sed 's/^[0-9-]*_[0-9-]*_//')
+
+    DATETIME=$(basename "$RUN_DIR" | grep -oP '^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}')
+    DST="$DST_DIR/${RUN_NAME}_${DATETIME}.pt"
+
+    echo "$(basename $SRC)  ->  $(basename $DST)"
+    cp "$SRC" "$DST"
+done
+
+ls -lh "$DST_DIR/"
+SCRIPT
+```
+
+## Key Facts
+
+- **Destination**: `/storage/noy/SpectralFM/checkpoints/runai/` (= `/mnt5/noy/SpectralFM/checkpoints/runai/` once NFS syncs)
+- **Naming**: `<wandb_run_name>_<YYYY-MM-DD>_<HH-MM-SS>.pt`
+- **`checkpoint_best.pt` only exists if validation is enabled** — with `disable_validation=true`, use the latest `checkpoint_N_STEP.pt` instead
+- **Frozen-encoder checkpoints are ~half the size** (~730 MB vs ~1.4 GB) because optimizer state for the transformer is not saved
+- **Re-run after long jobs complete** (at 20k steps) to overwrite interim checkpoints with final ones

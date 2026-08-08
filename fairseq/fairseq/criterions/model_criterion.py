@@ -53,7 +53,11 @@ class ModelCriterion(FairseqCriterion):
         self.can_sum = can_sum
 
     def forward(self, model, sample, reduce=True):
-        net_output = model(**sample["net_input"])
+        # Add sample_indices to net_input if sample IDs are available
+        net_input = dict(sample["net_input"])
+        if "id" in sample and sample["id"] is not None:
+            net_input["sample_indices"] = sample["id"]
+        net_output = model(**net_input)
 
         scaled_losses = {}
 

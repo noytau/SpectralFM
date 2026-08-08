@@ -1,0 +1,29 @@
+---
+description: Metric key naming conventions for evaluation_runner.py EvalResult
+globs:
+  - code/evaluation_runner.py
+---
+
+# Metric Key Naming Convention
+
+All metric keys in `EvalResult.metrics` follow this prefix scheme:
+
+| Prefix | Category | Example |
+|---|---|---|
+| `label_reg_` | Supervised regression on parameter_0 | `label_reg_emb_r2`, `label_reg_improvement_r2` |
+| `comp_cluster_` | Component clustering metrics | `comp_cluster_ari`, `comp_cluster_nmi` |
+| `comp_knn_` | Component KNN/neighbor metrics | `comp_knn_precision_k10` |
+| `repr_` | Representation geometry | `repr_cka_linear`, `repr_uniformity` |
+| `spectral_` | Spectral-domain metrics | `spectral_reconstruction_snr` |
+| `downstream_` | Downstream task results | `downstream_linear_probe_r2` |
+| `noise_` | Noise robustness metrics | `noise_gaussian_robustness_ratio` |
+| `stack_` | Stack/similarity metrics | `stack_match_improvement_pct` |
+| `completion_` | Signal completion | `completion_score` |
+| `eval_` | Validation loss | `eval_loss` |
+
+## Rules
+1. Snake_case only: `label_reg_emb_r2` not `labelRegEmbR2`
+2. Space names in multi-space metrics: `label_reg_emb_r2` vs `label_reg_input_r2`
+3. Improvement metrics: `*_improvement_*` means emb-space minus input-space
+4. Every key MUST have a description in `metric_descriptions` dict of `EvalResult`
+5. Every eval method MUST register at least one plot in `plot_paths`

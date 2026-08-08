@@ -7,12 +7,56 @@
 import logging
 import os
 
+# ---------------------------------------------------------------------------
+# Server-aware path resolution
+# /mnt5  = geoffry (local workstation)
+# /storage = RunAI cluster
+# ---------------------------------------------------------------------------
+_MNT5_BASE = "/mnt5/noy/SpectralFM"
+_STORAGE_BASE = "/storage/noy/SpectralFM"
+
+def _detect_base_path() -> str:
+    """Return the correct repo root for this server.
+
+    Uses __file__ (the path of the running script) as the authoritative signal,
+    since both /mnt5 and /storage may be NFS-mounted on both servers.
+    """
+    this_file = os.path.abspath(__file__)
+    if this_file.startswith(_STORAGE_BASE):
+        return _STORAGE_BASE
+    if this_file.startswith(_MNT5_BASE):
+        return _MNT5_BASE
+    # Fallback: check CWD
+    cwd = os.getcwd()
+    if cwd.startswith(_STORAGE_BASE):
+        return _STORAGE_BASE
+    return _MNT5_BASE
+
+
+def _patch_cfg_paths(obj, src: str, dst: str):
+    """Recursively replace *src* with *dst* in every string value of *obj*
+    (dict or list produced by OmegaConf.to_container)."""
+    if isinstance(obj, dict):
+        return {k: _patch_cfg_paths(v, src, dst) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_patch_cfg_paths(v, src, dst) for v in obj]
+    if isinstance(obj, str):
+        return obj.replace(src, dst)
+    return obj
+
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    
 import hydra
 import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, open_dict
 
-from fairseq import distributed_utils, metrics
+from fairseq import metrics
+import fairseq.distributed.utils as distributed_utils
 from fairseq.dataclass.configs import FairseqConfig
 from fairseq.dataclass.initialize import add_defaults, hydra_init
 from fairseq.dataclass.utils import omegaconf_no_object_check
@@ -20,7 +64,6 @@ from fairseq.utils import reset_logging
 from fairseq_cli.train import main as pre_main
 
 logger = logging.getLogger("fairseq_cli.hydra_train")
-
 
 @hydra.main(config_path=os.path.join("..", "fairseq", "config"), config_name="config")
 def hydra_main(cfg: FairseqConfig) -> float:
@@ -46,6 +89,22 @@ def _hydra_main(cfg: FairseqConfig, **kwargs) -> float:
             OmegaConf.to_container(cfg, resolve=True, enum_to_str=True)
         )
     OmegaConf.set_struct(cfg, True)
+
+    # --- Auto-fix hardcoded paths for the current server ---
+    _base = _detect_base_path()
+    _other = _STORAGE_BASE if _base == _MNT5_BASE else _MNT5_BASE
+    if _other in OmegaConf.to_yaml(cfg):
+        logger.info(
+            f"[server-path] Replacing '{_other}' → '{_base}' in all config paths"
+        )
+        with open_dict(cfg):
+            patched = _patch_cfg_paths(
+                OmegaConf.to_container(cfg, resolve=True, enum_to_str=True),
+                _other,
+                _base,
+            )
+            cfg = OmegaConf.create(patched)
+        OmegaConf.set_struct(cfg, True)
 
     try:
         if cfg.common.profile:

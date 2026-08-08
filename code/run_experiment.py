@@ -50,9 +50,7 @@ class ExperimentRunner:
         return self.df
 
     def run_experiment(self):
-        print("NOY")
         df = self.prepare_data()
-        print("NOY: Data prepared with shape:", df.shape)
         # run training
         model_path = train_model(df, self.args)
         print(f"[+] Model training finished, model saved at: {model_path}")

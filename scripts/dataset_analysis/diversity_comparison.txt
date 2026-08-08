@@ -1,0 +1,77 @@
+DIVERSITY COMPARISON ACROSS DATASETS
+==========================================================================================
+
+Metric                                             single_channel_100   single_channel_all_100rand  single_channel_all_1000rand
+-------------------------------------------------------------------------------------------------------------------------------
+Samples analyzed                                                   99                          100                         1000
+Cosine Sim Mean                                                0.8109                       0.7966                       0.8162
+Cosine Sim Std                                                 0.0838                       0.0994                       0.0838
+Angular Dist Mean                                              0.1947                       0.2015                       0.1917
+Euclidean Dist Mean                                            5.2644                       5.4382                       5.2494
+Euclidean Dist Median                                          5.2302                       5.3207                       5.1651
+PCA Effective Rank                                              14.86                        12.30                        15.29
+PCA Comp for 90% var                                               15                           14                           17
+PCA Top-1 variance                                              24.8%                        34.0%                        28.8%
+Vendi Score                                                      2.69                         2.79                         2.71
+Vendi Score (norm%)                                              2.7%                         2.8%                         0.3%
+Mean 1-NN distance                                             2.9705                       2.9617                       2.3925
+Mean 5-NN distance                                             3.4066                       3.3890                       2.6762
+Std of sample means                                            0.1111                       0.1300                       0.1229
+Range of sample means                                          0.4958                       0.5367                       0.6400
+Unique batches                                                      9                            9                            9
+Batch count std                                                  2.78                         3.44                         5.13
+Unique stacks                                                      97                           95                          981
+Stack range                                                    879315                       883496                       899419
+Index span                                                    8793143                      8834956                      8994190
+
+==========================================================================================
+METRIC EXPLANATIONS
+==========================================================================================
+
+Cosine Similarity: Measures direction alignment between samples.
+  PROBLEM: All non-negative vectors have high cosine sim (>0.3).
+  High mean = samples point in similar directions.
+
+Angular Distance: arccos(cosine_sim)/π. Linearizes cosine sim.
+  Spreads the values more evenly across [0, 1].
+  Higher = more diverse directions.
+
+Euclidean Distance: Captures BOTH direction AND magnitude.
+  Two signals with same shape but different amplitude → different.
+  Higher mean = more diverse dataset. More informative than cosine.
+
+PCA Effective Rank: Information-theoretic dimensionality.
+  exp(entropy(eigenvalues)). Higher = data spans more dimensions.
+  Low effective rank = data is mostly along a few directions.
+
+PCA Components for 90%: How many PCs to explain 90% of variance.
+  More components needed = data is more spread in feature space.
+
+Vendi Score: Information-theoretic diversity from similarity kernel.
+  Range: 1 (all identical) to N (perfectly diverse).
+  Based on eigenvalue entropy of the cosine similarity matrix.
+
+1-NN Distance: How far each sample is from its nearest neighbor.
+  Higher = samples are more spread out (no tight clusters).
+  Low = many near-duplicate or very similar samples.
+
+Std of Sample Means: How much individual sample means vary.
+  Higher = more variety in signal energy levels across samples.
+
+Range of Sample Means: Max - Min of per-sample means.
+  Higher = dataset covers a wider range of signal types.
+
+Unique Batches: How many source batch files are represented.
+  9 batches total (batch0-batch8). All 9 = good coverage.
+
+Batch Count Std: How evenly samples are distributed across batches.
+  Lower = more uniform sampling from each batch.
+  Higher = some batches over/under-represented.
+
+Unique Stacks: Number of distinct stacks (index // 10).
+  Each stack groups ~10 consecutive spectrograms.
+  More unique stacks = samples from more diverse positions.
+
+Stack/Index Range: Span of stack/spectrogram indices covered.
+  Wider = samples drawn from across the full measurement range.
+  Narrow = samples clustered in one region.

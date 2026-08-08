@@ -30,6 +30,12 @@ wheels/
 .idea/
 .DS_Store
 
+# Evaluation outputs (large generated artifacts)
+code/eval_results/
+
+# Pulled RunAI outputs (kubectl cp); keep local only
+artifacts/
+
 # Logs and data
 *.log
 *.sqlite3
@@ -42,7 +48,8 @@ outputs/
 wandb/
 
 # Large files (generic patterns - adapt as needed)
-*.pt  # PyTorch model files
+# PyTorch checkpoints
+*.pt
 *.bin # Binary files
 *.tar
 *.gz

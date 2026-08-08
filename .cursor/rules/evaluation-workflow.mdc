@@ -1,0 +1,229 @@
+---
+description: Evaluation implementation workflow - test, display, review, then submit
+globs: code/evaluation_runner.py,code/evaluate.py,code/run_full_evaluation.py,code/eval_metrics.py,code/eval_plots.py,code/eval_utils.py
+alwaysApply: false
+---
+# Evaluation Function Implementation Workflow
+
+Every time a new evaluation function or metric is added to the evaluation framework, follow this strict pipeline:
+
+## Step 1: Implement
+- Add the new `_eval_*` method to [evaluation_runner.py](mdc:code/evaluation_runner.py)
+- Pure metric math goes in [eval_metrics.py](mdc:code/eval_metrics.py); plots in [eval_plots.py](mdc:code/eval_plots.py); data loading helpers in [eval_utils.py](mdc:code/eval_utils.py)
+- Use metric key names from the plan's Metrics Key Dictionary (prefixes: `label_reg_`, `comp_cluster_`, `repr_`, `spectral_`, `downstream_`)
+- Include a docstring with: what the metric measures, expected range, relevant paper reference
+
+## Step 2: Test on Checkpoints
+- Run the new evaluation against **at least 2 checkpoints** to verify it works and produces discriminative results
+- **Also compare against "random" weights** (base_libri checkpoint) to establish a lower-bound baseline — metrics should be meaningfully better than random
+- **Always specify the evaluation dataset and sample count** via CLI flags (see Running Instructions below)
+- If the eval method doesn't exist yet in CLI args, add it to the `--eval_methods` choices and the `--all_methods` list
+
+## Step 3: Display Results
+- Print a clear summary showing:
+  - Metric name and value for each checkpoint tested
+  - Whether values differ across checkpoints (sanity check: metrics should vary)
+  - Any warnings or edge cases encountered
+- If the metric produces plots, show the plot paths
+
+## Step 4: Ask for Review
+- **STOP and ask the user to review the results before proceeding**
+- Present: "Here are the results from the new `_eval_<name>` metric. Please review and approve before I commit."
+- Show the metric values, any plots generated, and note any concerns
+- Wait for explicit approval
+
+## Step 5: Submit
+- Only after user approval, finalize the implementation
+- Update the plan file under `/home/noy/.cursor/plans/` to mark the relevant task as completed
+
+---
+
+## Running Instructions
+
+### evaluation_runner.py — Single-Checkpoint Evaluation
+
+This is the primary evaluation script. It loads ONE checkpoint, extracts embeddings, and runs selected `_eval_*` methods.
+
+**Basic usage:**
+```bash
+python code/evaluation_runner.py \
+  --checkpoint /path/to/checkpoint_best.pt \
+  --eval_methods embedding_similarity \
+  --eval_data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_eval_samples 100
+```
+
+**Multiple methods:**
+```bash
+python code/evaluation_runner.py \
+  --checkpoint /path/to/checkpoint_best.pt \
+  --eval_methods embedding_similarity knn_retrieval component_clustering repr_geometry \
+  --eval_data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_eval_samples 500
+```
+
+**All methods at once:**
+```bash
+python code/evaluation_runner.py \
+  --checkpoint /path/to/checkpoint_best.pt \
+  --all_methods \
+  --eval_data_dir /mnt5/noy/fairseq/data/labeled_data/ \
+  --max_eval_samples 200
+```
+
+**With random weight baseline comparison:**
+```bash
+python code/evaluation_runner.py \
+  --checkpoint /path/to/checkpoint_best.pt \
+  --eval_methods embedding_similarity \
+  --include_random_weights \
+  --eval_data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_eval_samples 100
+```
+
+**Auto-discover and evaluate all best checkpoints:**
+```bash
+python code/evaluation_runner.py \
+  --checkpoint_dir /mnt5/noy/fairseq/outputs \
+  --best_only \
+  --eval_methods embedding_similarity clustering \
+  --eval_data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_eval_samples 100
+```
+
+**Specific run names only:**
+```bash
+python code/evaluation_runner.py \
+  --checkpoint_dir /mnt5/noy/fairseq/outputs \
+  --run_names 2026-01-07_21-50-07 2026-02-15_10-30-00 \
+  --eval_methods embedding_similarity \
+  --eval_data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_eval_samples 100
+```
+
+**Available `--eval_methods`:**
+`embedding_similarity`, `noise_robustness`, `stack_similarity`, `signal_completion`, `validation_loss`, `label_regression`, `clustering`, `knn_retrieval`, `component_clustering`, `repr_geometry`, `downstream_probing`, `fewshot`, `component_detection`, `parameter_verification`, `baselines`, `efficiency`, `attention`, `failure_analysis`, `augmentation_invariance`
+
+**Key flags:**
+| Flag | Description |
+|---|---|
+| `--checkpoint <path>` | Path to a specific `.pt` checkpoint file |
+| `--checkpoint_dir <path>` | Base directory to auto-discover checkpoints |
+| `--eval_methods <m1> <m2> ...` | Which evaluation methods to run |
+| `--all_methods` | Run all available evaluation methods |
+| `--eval_data_dir <path>` | Dataset to evaluate on |
+| `--max_eval_samples <N>` | Number of samples (default 100; use 1000+ for clustering) |
+| `--include_random_weights` | Add random weight baseline (5-way comparison) |
+| `--best_only` | Only evaluate `checkpoint_best.pt` files |
+| `--latest_only` | Only evaluate the most recent checkpoint |
+| `--custom_dataset_path <path>` | Additional dataset for 4-way comparison |
+| `--dim_reduction pca tsne umap` | Dim reduction methods for clustering plots |
+| `--debug` | Save debug plots of evaluated samples |
+
+### run_full_evaluation.py — Multi-Checkpoint Orchestration
+
+Use this for cross-checkpoint analysis: scaling laws, transfer, training dynamics, ablation, or light mode (no fairseq).
+
+**Full evaluation on one checkpoint:**
+```bash
+python code/run_full_evaluation.py \
+  --mode full \
+  --checkpoint /path/to/checkpoint_best.pt \
+  --data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_samples 500 \
+  --include_random_weights
+```
+
+**Scaling law sweep (across dataset sizes):**
+```bash
+python code/run_full_evaluation.py \
+  --mode scaling_laws \
+  --checkpoint_dir /mnt5/noy/fairseq/outputs \
+  --max_samples 200
+```
+
+**Cross-dataset transfer:**
+```bash
+python code/run_full_evaluation.py \
+  --mode transfer \
+  --checkpoint /path/to/checkpoint_best.pt \
+  --max_samples 200
+```
+
+**Light mode (no fairseq needed):**
+```bash
+python code/run_full_evaluation.py \
+  --mode light \
+  --data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --model_path /path/to/hf_model/  \
+  --max_samples 200
+```
+
+**Training dynamics (intermediate checkpoints):**
+```bash
+python code/run_full_evaluation.py \
+  --mode training_dynamics \
+  --checkpoint_dir /mnt5/noy/fairseq/outputs \
+  --eval_data_dir /mnt5/noy/fairseq/data/single_channel_1m/ \
+  --max_samples 200
+```
+
+**Generate ablation configs:**
+```bash
+python code/run_full_evaluation.py --mode ablation
+```
+
+---
+
+## Plots & Metrics Reference
+
+### Embedding Similarity Histogram (`_plot_embedding_similarity_scatter`)
+
+**What it shows:** Overlaid histograms of all pairwise cosine similarities in input space (orange) and embedding space (blue). For N samples there are N·(N−1)/2 unique pairs; each pair contributes one value to each histogram.
+
+**How to read it:**
+- Orange distribution = how similar the raw 245-length spectrograms are to each other
+- Blue distribution = how similar the model's 768-d embeddings are to each other
+- Dashed/dotted vertical lines = distribution means
+- A good model reshapes the distribution (separates clusters) without collapsing it to a spike
+
+**Annotated metrics (shown in the box):**
+
+| Metric | Formula | Interpretation |
+|---|---|---|
+| **Pearson r** | \( r = \frac{\sum (x_i - \bar{x})(y_i - \bar{y})}{\sqrt{\sum (x_i - \bar{x})^2 \sum (y_i - \bar{y})^2}} \) where \(x_i\) = input-space cosine sim for pair \(i\), \(y_i\) = embedding-space cosine sim for same pair | Measures **linear** correlation between input similarity and embedding similarity. Range [−1, 1]. **r ≈ 1**: pairs that are similar as raw inputs are also similar as embeddings (structure preserved). **r ≈ 0**: no linear relationship (random embeddings). |
+| **Spearman ρ** | \( \rho = 1 - \frac{6 \sum d_i^2}{n(n^2 - 1)} \) where \(d_i\) = difference in ranks of the \(i\)-th pair between the two spaces | Measures **rank** correlation — does the ordering of pairs by similarity stay the same? More robust to non-linear monotonic relationships than Pearson. **ρ ≈ 1**: ranking fully preserved. |
+| **Variance ratio** | \( \text{VR} = \frac{\sigma_{\text{emb}}}{\sigma_{\text{input}}} \) where \(\sigma\) is the std of pairwise cosine similarities | Detects **representation collapse**. **VR ≈ 0**: all embeddings are nearly identical (collapsed). **VR ≈ 1**: embeddings have similar spread to inputs. **VR > 1**: embeddings amplify distinctions. |
+| **Fit slope** | Slope \(m\) from ordinary least-squares: \( y = mx + b \) where \(x\) = input sims, \(y\) = embedding sims | The linear mapping strength. **slope > 0**: positive similarity transfer. **slope ≈ 0**: the model doesn't use input similarity information. **slope > 1**: the model amplifies similarity differences. |
+
+**What "good" looks like:**
+- Pearson r > 0.5, Spearman ρ > 0.5 → model preserves similarity structure
+- Variance ratio > 0.3 → no collapse
+- Slope > 0 → positive relationship
+- Blue histogram has visible structure (not a single narrow spike)
+
+### Embedding Similarity Comparison (`_plot_embedding_similarity_comparison`)
+
+**What it shows:** Side-by-side N×N cosine similarity heatmaps for input space, current model embeddings, frozen encoder embeddings, and optionally random-weight embeddings. Same samples in all panels.
+
+**How to read it:** Visual block structure in the heatmap indicates the model groups certain samples together. Compare block patterns across panels: a good model should show clearer blocks than the frozen/random baselines.
+
+### Signal Completion Plot (`_plot_signal_completion`)
+
+**What it shows:** 3-panel plot: (1) histogram of per-sample cosine similarity between ground-truth and predicted embeddings at masked positions, (2) MSE distribution, (3) scatter of cos-sim vs MSE.
+
+**Key metric:** `completion_cos_sim_mean` — mean cosine similarity at masked positions. A random predictor scores ≈ 0; perfect reconstruction scores 1.0.
+
+---
+
+## Available Test Checkpoints
+- Fairseq outputs: `/mnt5/noy/fairseq/outputs/` (date/time/checkpoints structure)
+- RunAI checkpoints: `/mnt5/noy/SpectralFM/checkpoints/runai/` (named by config)
+- Random weights baseline: `base_libri_100` (pre-trained on LibriSpeech, untrained on spectral data)
+
+## Important Notes
+- Never skip the test step — untested metrics are unacceptable
+- If a metric returns constant values across different checkpoints, flag it as potentially broken
+- If a test fails or produces unexpected results, debug before asking for review
+- For "light mode" metrics (no fairseq), test with `torchaudio` data loading path
+- Reference the evaluation plan: `/home/noy/.cursor/plans/spectralfm_evaluation_suite_10f99c29.plan.md`

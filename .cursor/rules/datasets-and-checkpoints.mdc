@@ -1,0 +1,92 @@
+---
+description: Dataset paths, sizes, WAV structure, and checkpoint locations for SpectralFM
+---
+
+# Datasets & Checkpoints
+
+> Full statistics, per-component breakdowns, and conversion scripts are in
+> [`fairseq/data/nova_data/datasets_summary.md`](mdc:fairseq/data/nova_data/datasets_summary.md).
+
+---
+
+## Data Root
+
+| Environment | Base path |
+|---|---|
+| Local | `/mnt5/noy/SpectralFM/fairseq/data/nova_data/` |
+| RunAI | `/storage/noy/SpectralFM/fairseq/data/nova_data/` |
+
+> **RunAI gotcha — do NOT use `/mnt5` paths in any RunAI job, YAML, or `runai exec` command.**
+> Inside RunAI pods `/mnt5` does **not** exist; the PVC is mounted at `/storage`.
+> All datasets, checkpoints, configs, and code referenced by a RunAI run must live under
+> `/storage/noy/SpectralFM/...`. When inheriting a Hydra YAML that has `/mnt5` defaults
+> (e.g. `spectralfm_recon_loss_basemerge.yaml`), override **every** `/mnt5/...` field —
+> `task.data`, `model.init_*_ckpt`, `common.user_dir`, `hydra.run.dir`, `model.epoch_cosim_*`,
+> `checkpoint.save_dir`, etc. Prefer passing `task.data=...` as a CLI override in the
+> submit script so it always wins over inherited YAML defaults.
+
+**WAV subdir convention**: each dataset dir contains a `wav/` (or occasionally `wavs/`) subdirectory with the actual `.wav` files.
+`load_wav_files_torchaudio` auto-detects both — pass the dataset root, not the `wav/` subdir.
+
+**Fairseq `task.data` convention**: for `audio_pretraining` (Hydra), `task.data` is the **manifest directory**
+that contains `train.tsv` (and optionally `valid.tsv`), **not** the `wav/` subdir. The first line of
+`train.tsv` already encodes the wav-root prefix, so just point Hydra at the parent.
+
+| Dataset | RunAI `task.data` (manifest dir) |
+|---|---|
+| `single_channel_100` | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100` |
+| `single_channel_1k`  | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_1k` |
+| `single_channel_10k` | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k` |
+| `single_channel_one` | `/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_one` |
+| `multi_channel`      | `/storage/noy/SpectralFM/fairseq/data/nova_data/multi_channel` |
+
+---
+
+## Key Datasets for Evaluation
+
+| Dataset | Samples | Best for | `--eval_data_dir` value |
+|---|---|---|---|
+| `single_channel_100` | 100 | Quick smoke tests | `fairseq/data/nova_data/single_channel_100` |
+| `single_channel_1k` | 1,000 | Fast FE-decoder tests (≤1k split) | `fairseq/data/nova_data/single_channel_1k` |
+| `single_channel_10k` | 22,222 | **Default for decode_fe** (1k+1k split) | `fairseq/data/nova_data/single_channel_10k` |
+| `single_channel_one` | 1,000,000 | Large-scale embedding eval | `fairseq/data/nova_data/single_channel_one` |
+| `multi_channel` | 3,412,476 | Multi-component clustering | `fairseq/data/nova_data/multi_channel` |
+| `labeled_data` | 66,024 | Supervised probing / label regression | `fairseq/data/nova_data/labeled_data` |
+| `sampled_data` | 22,428 | Diverse component coverage | `fairseq/data/nova_data/sampled_data` |
+
+---
+
+## Epoch-cosim index file (pretraining monitor)
+
+| | Path (under data root above) |
+|---|---|
+| Precomputed **structured similarity** panel remapped to train `FileAudioDataset` indices for `single_channel_all` | `metadata/epoch_cosim/structured_similarity_single_channel_all.npy` |
+
+Built by `code/precompute_epoch_cosim_indices.py` from `build_structured_similarity_subset` (not the full train corpus). Not under `code/eval_results/` — that tree is for eval **outputs**; this is **dataset-derived metadata** for training.
+
+---
+
+## Recommended Data for `eval_fe_decoder.py`
+
+For the 1k-train / 1k-eval setup (default `--max_eval_samples 2000`):
+
+```bash
+--eval_data_dir fairseq/data/nova_data/single_channel_10k
+```
+
+For a quick test (500 train / 500 eval):
+
+```bash
+--eval_data_dir fairseq/data/nova_data/single_channel_1k --max_eval_samples 1000
+```
+
+---
+
+## Checkpoint Locations
+
+| Description | Path |
+|---|---|
+| Compare single vs multi run | `/mnt5/noy/SpectralFM/checkpoints/runai/2026-03-10-compare-single-to-multi/` |
+| Individual run dirs (best checkpoints) | `/mnt5/noy/SpectralFM/checkpoints/runai/<run-name>/checkpoint_best.pt` |
+
+Both layouts are supported by `--checkpoint_dir` in `eval_fe_decoder.py` and `evaluation_runner.py`.

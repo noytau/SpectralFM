@@ -1,0 +1,183 @@
+# @package _group_
+#
+# Short RunAI smoke for transformer signal-reconstruction.
+#
+# BASELINE: spectralfm_full_train (the standard SpectralFM pretraining recipe).
+# This file is intentionally SELF-CONTAINED (no Hydra `defaults:` import) — the
+# other recon_loss YAMLs are self-contained too, and importing sibling configs
+# across `# @package _group_` boundaries is unreliable in fairseq's Hydra setup.
+# All fields below are copied 1:1 from spectralfm_full_train.yaml except for
+# the smoke overrides flagged with "[SMOKE]".
+#
+# SMOKE OVERRIDES vs baseline:
+#   - 1 GPU, batch_size=16, max_update=100, max_epoch=100, warmup=10
+#   - W&B project = spectralfm-runai-signal-recon
+#   - data = /storage/.../single_channel_100   (RunAI; never /mnt5)
+#   - Add recon-loss log_keys (regression / loss_recon_fe / loss_recon_trans)
+#   - Init the full SpectralFM stack (FE+LN+proj+encoder+final_proj+mask_emb)
+#     from the Feb-15 2026 checkpoint via the legacy model_path path.  base_libri
+#     was data2vec v2 layout (`blocks.N.attn.qkv.weight` × 8) and matched only
+#     8 of our 12 fairseq-layout encoder layers; the Feb-15 ckpt has matching
+#     12-layer fairseq layout + matching FE shapes + final_proj + mask_emb.
+#   - Freeze FE + LN + proj + mask_emb + fe_recon_decoder.
+#     UNFREEZE encoder + final_proj + trans_recon_decoder (`freeze_*: false` is
+#     honored as an explicit-unfreeze since the May-17 patch to
+#     `_maybe_apply_recon_components`, overriding train_only_fe).
+#   - lambda_recon_trans=1.0, lambda_recon_fe=0.0
+#   - recon_decoder_type=mirror (MirrorReconDecoder)
+#   - LR=1e-5 for everything (only trainable params actually update)
+#
+# CLI overrides in submit_signal_recon_hydra_short_runai.sh pin: hydra.run.dir,
+# checkpoint.save_dir, optimization.max_update/epoch, and all model.* fields,
+# as belt-and-suspenders.
+
+common:
+  fp16: false               # [SMOKE] no fp16 for the tiny job
+  log_format: json
+  log_interval: 10          # [SMOKE] more frequent than baseline's 100
+  tensorboard_logdir: tb
+  user_dir: /storage/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm-runai-signal-recon"   # [SMOKE]
+  wandb_run_name: "tr_signal_short_lr${optimization.lr.0}_${get_data_size:${task.data}}_${now:%Y%m%d_%H%M}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 50          # [SMOKE]
+  keep_interval_updates: 2           # [SMOKE]
+  no_epoch_checkpoints: true
+
+task:
+  _name: audio_pretraining
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_100   # [SMOKE]
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
+
+dataset:
+  num_workers: 2           # [SMOKE]
+  batch_size: 16           # [SMOKE]
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  valid_subset: valid
+  required_batch_size_multiple: 1
+  disable_validation: true # [SMOKE]
+  max_tokens: null
+
+distributed_training:
+  distributed_world_size: 1   # [SMOKE]
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - ema_decay
+    - target_var
+    - pred_var
+    - regression          # [SMOKE] data2vec EMA loss
+    - loss_recon_fe       # [SMOKE] FE reconstruction L2 (off here)
+    - loss_recon_trans    # [SMOKE] transformer reconstruction L2
+
+optimization:
+  max_update: 100          # [SMOKE]
+  max_epoch: 100           # [SMOKE]
+  lr: [1.0e-5]             # [SMOKE] from 1e-4 → 1e-5 (per spec)
+  update_freq: [1]         # [SMOKE]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 10       # [SMOKE] from 4000 → 10
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.05
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  require_same_masks: true
+  mask_dropout: 0
+
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  # ---- [SMOKE] recon-loss specific (added by recon_loss work) ----
+  recon_only: false
+  recon_loss_type: l2
+  lambda_recon_fe: 0.0
+  lambda_recon_trans: 1.0
+  recon_decoder_type: mirror
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+
+  # Load the FULL Feb-15 SpectralFM checkpoint via the legacy model_path path.
+  # Every key (FE × 5 conv layers, layer_norm, post_extract_proj, encoder × 12 layers,
+  # final_proj, mask_emb) shape-matches this YAML 1-to-1, so a single load covers
+  # what used to be 4 separate per-component init paths.
+  model_path: /storage/noy/SpectralFM/checkpoints/checkpoint_best_2026-02-15.pt
+  skip_pretrained_weights: false
+  fe_mode: train                       # selects `model.load_state_dict(ckpt, strict=False)` branch
+  train_only_fe: false                 # do NOT run freeze_all_except_feature_extractor()
+
+  # Per-component init: null (the Feb-15 model_path already covers FE/LN/proj/encoder/final_proj/mask_emb).
+  # trans_recon_decoder stays at random init; it's tiny (~4M params) and is the main thing we train.
+  init_fe_ckpt:                  null
+  init_ln_ckpt:                  null
+  init_proj_ckpt:                null
+  init_transformer_ckpt:         null
+  init_fe_recon_decoder_ckpt:    null
+  init_trans_recon_decoder_ckpt: null
+
+  # Per-component freeze. With the patched _maybe_apply_recon_components:
+  #   true  → freeze (requires_grad=False; FE also sets feature_grad_mult=0)
+  #   false → UNFREEZE (requires_grad=True) even if train_only_fe etc already froze it.
+  # We unfreeze encoder + final_proj + trans_recon_decoder so the student regression
+  # loss can actually go down (encoder updates → EMA target moves → final_proj adapts).
+  freeze_fe_v2:               true
+  freeze_ln:                  true
+  freeze_proj:                true
+  freeze_fe_recon_decoder:    true
+  freeze_mask_emb:            true
+  freeze_transformer_v2:      false
+  freeze_final_proj:          false
+  freeze_trans_recon_decoder: false
+
+  # Single Adam → no composite optimizer → no param_group tagging needed.
+  tag_param_groups: false
+
+  # Smoke skips the epoch-cosim monitor.
+  epoch_cosim_enable: false
+
+hydra:
+  run:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_tr_signal_short
+  sweep:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss
