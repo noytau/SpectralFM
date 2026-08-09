@@ -93,6 +93,6 @@ if [[ "$ERR" -eq 0 ]]; then
   echo "=== All checks passed. Safe to submit (submit_recon_loss_experiments.sh). ==="
   exit 0
 else
-  echo "=== Some checks failed — fix above, then re-run. See recon_loss/RUNAI_SYNC_PATHS.md ==="
+  echo "=== Some checks failed — fix above, then re-run. See recon_loss/HOW_TO_RUN.md ==="
   exit 1
 fi

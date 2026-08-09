@@ -112,9 +112,66 @@ When `model.recon_only=true`:
 
 ## Evaluation
 
+Current option — the `signal_reconstruction` eval in `code/eval/` (zero-fairseq,
+handles FE/projection/transformer pathways alike):
+```bash
+python -m eval.runner --evals signal_reconstruction --recon_fe_ckpt <ckpt.pt> ...
+```
+See `code/eval/EVAL_OVERVIEW.md` for the full invocation. The older, standalone
+`code/eval_fe_decoder.py` also still works if you need it specifically:
 ```bash
 python code/eval_fe_decoder.py \
   --checkpoint checkpoints/runai/recon_only_l1/ \
   --device cuda \
   --output_dir code/eval_results/fe_decoder_recon_only
 ```
+
+---
+
+## RunAI: working directory (don't run this from repo root)
+
+The trainer is `fairseq/fairseq_cli/hydra_train.py`, not `SpectralFM/fairseq_cli/...`.
+Always:
+```bash
+cd /storage/noy/SpectralFM/fairseq
+python fairseq_cli/hydra_train.py --config-dir examples/data2vec/config/...
+```
+Running from `/storage/noy/SpectralFM` (repo root) fails — Python looks for a
+non-existent `fairseq_cli/` next to it.
+
+## RunAI: syncing files to the PVC (epoch-cosine-similarity + recon_loss)
+
+If `model.epoch_cosim_enable=true` or you're running `spectralfm_recon_loss.yaml`
+fresh on a PVC that hasn't seen this code yet, these files must exist under
+`/storage/noy/SpectralFM/fairseq/` (same relative paths as local):
+
+- `examples/data2vec/models/data2vec_audio.py`
+- `examples/data2vec/cosim_epoch_utils.py`
+- `fairseq/tasks/audio_pretraining.py`
+- `examples/data2vec/config/audio/pretraining/recon_loss/spectralfm_recon_loss.yaml`
+- `data/nova_data/metadata/epoch_cosim/structured_similarity_single_channel_all.npy`
+- `fairseq_cli/train.py` (recommended — the training loop calls `task.end_epoch`)
+
+Copy with `kubectl cp <local path> <pod>:<pvc path> -n <namespace>` per file (or use
+`fairseq/copy_epoch_cosim_subset_to_shell.sh` for the `.npy`). **Preflight check**
+before submitting — run from `fairseq/` on the RunAI shell (or locally with
+`FAIRSEQ_ROOT=...`):
+```bash
+./check_runai_recon_epoch_cosim_ready.sh
+```
+Exit 0 = all checks passed; exit 1 = fix the listed items and rerun.
+
+## RunAI: pulling results back
+
+`artifacts/` at the repo root is gitignored — a landing spot for `kubectl cp` pulls
+(PNGs, logs) so they stay local without polluting git:
+```bash
+DST=/mnt5/noy/SpectralFM/artifacts/runai_pull/<run_name>
+kubectl cp "<ns>/<pod>:/storage/noy/SpectralFM/fairseq/outputs/recon_loss/<run>/hydra_train.log" "$DST/hydra_train.log"
+kubectl cp "<ns>/<pod>:/storage/noy/SpectralFM/fairseq/outputs/recon_loss/<run>/.hydra" "$DST/.hydra"
+```
+Don't pull the full `checkpoint_last.pt` (~1.5 GB) unless you actually need it.
+
+**Tracking experiments:** `submit_recon_loss_experiments.sh` lists all job names and
+overrides (source of truth — `git pull` on the PVC to update what operators run).
+WandB project `spectralfm_recon_loss`, run names `Exp1`–`Exp4`. `runai list jobs | grep sfm-recon` to see them on the cluster.

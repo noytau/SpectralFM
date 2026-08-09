@@ -1,12 +1,29 @@
 # Reconstruction 2-AE basemerge — status & how-to
 
-**Branch:** `recon/2ae-basemerge` (off `main`, **not** pushed)
-**Commit:** `fdfeea4` — "Add 2-AE reconstruction (head_fe + head_trans) and Hydra per-component LR"
+**Status: merged.** `recon/2ae-basemerge` (21 commits, final commit `a326a60`
+"TV-FE submit script: long run defaults...") was merged into `main` and
+`eval-methods` on 2026-08-09 — a clean fast-forward, no conflicts on this
+branch's own commits (some unrelated conflicts elsewhere were resolved as
+part of that merge; see `TASKS.md`). Everything below is live on `main` today,
+not a proposal.
 **Summary plot:** `code/eval_results/recon_components_overview.png`
 
 This doc captures everything done in the SpectralFM 2-AE basemerge work so you
 can pick it back up cold. Pair it with the plot above (Panels A–D + the 6 per-
 configuration strips).
+
+**Coverage correction (2026-08-09):** despite this doc's earlier working title
+("2-AE"/"3-AE" used loosely across `TASKS.md`), the native Hydra model
+(`fairseq/examples/data2vec/models/data2vec_audio.py`, as merged) currently
+implements **two** decoder heads — `fe_recon_decoder` and `trans_recon_decoder`
+(`lambda_recon_fe` / `lambda_recon_trans`). There is **no** `proj_recon_decoder`
+/ `lambda_recon_proj` in that file — verified directly against the merged
+source, not inferred. A third, **projection**-stage decoder does exist, but
+only in the separate standalone script (`code/train_reconstruction.py` /
+`code/recon_components.py` — `--init_head_proj_ckpt`, `--lambda_recon_proj`,
+etc.), and in the eval-side loader (`code/eval/checkpoint_loader.py`, which can
+load a `proj_mirror` head for the `signal_reconstruction` eval). See the
+coverage table in §1 below for exactly what supports what.
 
 ---
 
@@ -35,6 +52,19 @@ Hydra  (data2vec_audio + new YAML preset):
           + λ_recon_trans · recon_trans_loss                         (L2)
           + λ_recon_fe    · recon_fe_loss                            (L2)
 ```
+
+### Which of the 3 decoder stages (FE / projection / transformer) each implementation covers
+
+| | FE decoder | Projection decoder | Transformer decoder |
+|---|---|---|---|
+| Native Hydra (`data2vec_audio.py`, this doc) | ✅ `fe_recon_decoder` / `lambda_recon_fe` | ❌ not implemented | ✅ `trans_recon_decoder` / `lambda_recon_trans` |
+| Standalone script (`code/train_reconstruction.py`) | ✅ `--recon_path fe` | ✅ `--init_head_proj_ckpt` / `--lambda_recon_proj` | ✅ `--recon_path transformer` |
+| Eval loader (`code/eval/checkpoint_loader.py`) | ✅ `fe_mirror` | ✅ `proj_mirror` | ✅ `transformer_mirror` |
+
+The standalone script and the eval loader already track all 3 stages. Porting
+a `proj_recon_decoder` into the native Hydra model (mirroring how `fe`/`trans`
+are already wired, following the same `_maybe_apply_recon_components()` /
+composite-optimizer pattern) is open work, not yet done — see `TASKS.md`.
 
 Per-component LR is now real on both sides:
 
@@ -332,24 +362,24 @@ Legend: **T** trainable, **F** frozen. Init source after the slash.
 
 **Done**
 
-* Branch `recon/2ae-basemerge` created off `main`, all changes committed (`fdfeea4`).
+* Branch `recon/2ae-basemerge` merged into `main` and `eval-methods` (2026-08-09).
 * Argparse: 2-AE forward, weighted L2 loss, auto-zero rules, new WandB keys, per-component LR groups, audit, checkpoint bump.
 * Hydra: new config fields, lazy `recon_components` loader, param-group tagging, `MirrorReconDecoder`, `recon_decoder_type=mirror`, composite-optimizer YAML preset.
 * RunAI submitter for the argparse 2-AE grid.
 * Both smoke tests green.
 
-**Not done (deliberately, until you say go)**
+**Not done**
 
-* `git push` — branch is local only.
-* RunAI submission — `submit_signal_recon_2ae_runai.sh` is ready but not invoked.
-* Hydra preset has not been launched end-to-end on RunAI yet; the smoke test exercises `build_model` + `recon_only` forward but not a full `fairseq-hydra-train` loop with composite optimizer.
+* A native-Hydra `proj_recon_decoder` (see the coverage table in §1) — the standalone script and eval loader have it, the Hydra model doesn't yet.
+* RunAI submission — `submit_signal_recon_2ae_runai.sh` is ready but hasn't necessarily been run through the full T8–T13 sequence in `TASKS.md` yet; check there for current status.
+* Hydra preset had not been launched end-to-end on RunAI as of this doc's last content update; the smoke test exercises `build_model` + `recon_only` forward but not necessarily a full `fairseq-hydra-train` loop with composite optimizer. Verify current status in `TASKS.md` before assuming either way.
 * `head_fe` is currently a separate component in the argparse path; if you eventually want to fold the FE-only path's `decoder` under the same name for symmetry, that's a follow-up rename.
 
 ---
 
 ## 9.  Quick recovery checklist when you come back
 
-1. `git checkout recon/2ae-basemerge` and `git log --stat -1` — confirm you're on commit `fdfeea4`.
+1. This is merged — you're most likely already on `main` or `eval-methods`. `git log --oneline -- fairseq/examples/data2vec/models/data2vec_audio.py` to see the merge history if you need the original commit sequence.
 2. Open `code/eval_results/recon_components_overview.png` — Panels A–D + the 6 strips show the whole design at a glance.
 3. Skim §3.1 (argparse flags) and §4.1 (Hydra fields) — those are the API surface.
 4. If you want to run an experiment:

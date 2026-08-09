@@ -165,22 +165,22 @@
   <section>
     <h2>Where to go next</h2>
     <div class="cards">
-      <a class="card a" href="project-story.html">
+      <a class="card a" href="https://claude.ai/code/artifact/400bd97d-d028-4d94-804a-53945b8296a0">
         <span class="tag">non-technical</span>
         <h3>New to the project?</h3>
         <p>What SpectralFM is, why it exists, and the key finding shaping current work — no code required.</p>
       </a>
-      <a class="card b" href="../../CLAUDE.md">
+      <a class="card b" href="https://github.com/noytau/SpectralFM/blob/main/CLAUDE.md">
         <span class="tag">setup</span>
         <h3>Setting up to train?</h3>
         <p>Environment, manifest generation, and the exact launch command — <code>CLAUDE.md</code>'s Getting Started section.</p>
       </a>
-      <a class="card b" href="architecture.html">
+      <a class="card b" href="https://claude.ai/code/artifact/33733929-f867-4d0b-831e-b0584700cdbd">
         <span class="tag">technical</span>
         <h3>Want the architecture depth?</h3>
         <p>Model, loss, checkpoint formats, and what's actually configurable vs. swept so far.</p>
       </a>
-      <a class="card a" href="../../TASKS.md">
+      <a class="card a" href="https://github.com/noytau/SpectralFM/blob/main/TASKS.md">
         <span class="tag">experiments</span>
         <h3>Curious what's been tried?</h3>
         <p>The live experiment ledger — results, verdicts, and what's queued up next, in priority order.</p>
@@ -192,10 +192,10 @@
     <h2>Quick facts</h2>
     <div class="facts">
       <div class="fact"><div class="k">Model</div><div class="v"><code>data2vec-audio-base</code> backbone, custom 1D-CNN feature extractor</div></div>
-      <div class="fact"><div class="k">Data</div><div class="v">245-sample signals, 16&nbsp;kHz, NOVA radio observatory</div></div>
+      <div class="fact"><div class="k">Data</div><div class="v">245-sample signals, 16&nbsp;kHz, NOVA radio observatory — tracked as <code>.tsv</code> manifests under NFS <code>nova_data/&lt;subset&gt;/</code>, see <a href="https://github.com/noytau/SpectralFM/blob/main/CLAUDE.md#datasets">CLAUDE.md § Datasets</a></div></div>
       <div class="fact"><div class="k">Scale</div><div class="v">up to 9.1M signals in the largest training set</div></div>
       <div class="fact"><div class="k">Training</div><div class="v">RunAI GPU cluster, fairseq <code>hydra_train</code></div></div>
-      <div class="fact"><div class="k">Dev machine</div><div class="v"><code>ssh Geoffry</code> — see <code>CLAUDE.md</code> Server access</div></div>
+      <div class="fact"><div class="k">Dev machine</div><div class="v"><code>ssh Geoffry</code> — see <a href="https://github.com/noytau/SpectralFM/blob/main/CLAUDE.md#server-access">CLAUDE.md § Server access</a></div></div>
       <div class="fact"><div class="k">Repo</div><div class="v"><a href="https://github.com/noytau/SpectralFM">github.com/noytau/SpectralFM</a></div></div>
     </div>
   </section>
@@ -211,28 +211,32 @@
           <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/TASKS.md"><code>TASKS.md</code></a></td><td>Live experiment ledger — done, active, and queued work, in priority order.</td></tr>
 
           <tr class="group-row"><td colspan="2">Training</td></tr>
-          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/RUNAI_TRAINING_FOR_CLAUDE.md"><code>docs/RUNAI_TRAINING_FOR_CLAUDE.md</code></a></td><td>RunAI operational reference — PVC paths, checkpoint copy recipes, submit scripts.</td></tr>
-          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/AUTOENCODER_EXPERIMENTS.md"><code>docs/AUTOENCODER_EXPERIMENTS.md</code></a></td><td>Autoencoder/reconstruction experiment history and cross-dataset results.</td></tr>
-          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/docs/RECON_2AE_BASEMERGE.md"><code>code/docs/RECON_2AE_BASEMERGE.md</code></a></td><td>Design rationale for per-component init/freeze/composite-optimizer machinery.</td></tr>
-          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/CARRYOVER_signal_recon_may2026.md"><code>docs/CARRYOVER_signal_recon_may2026.md</code></a></td><td>Handoff notes for signal-reconstruction tooling across machines.</td></tr>
-          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md"><code>recon_loss/HOW_TO_RUN.md</code></a></td><td>Exact commands for the reconstruction-loss Hydra configs.</td></tr>
-          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md"><code>fe_vs_transformer_collapse/HOW_TO_RUN.md</code></a></td><td>Commands for the FE-vs-transformer embedding-collapse ablation.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md"><code>recon_loss/HOW_TO_RUN.md</code></a></td><td>Reconstruction-loss training — the single doc: Hydra commands, RunAI file sync, artifact pull.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/docs/RECON_2AE_BASEMERGE.md"><code>code/docs/RECON_2AE_BASEMERGE.md</code></a> / <a href="https://claude.ai/code/artifact/1030ff93-538f-46ea-be09-d2d346d6722d">HTML</a></td><td>Per-component init/freeze/composite-optimizer machinery — merged and current.</td></tr>
 
           <tr class="group-row"><td colspan="2">Evaluation</td></tr>
           <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/eval/EVAL_OVERVIEW.md"><code>code/eval/EVAL_OVERVIEW.md</code></a></td><td>The single eval doc — installation, running it, all 7 methods, checkpoint formats, examples.</td></tr>
 
-          <tr class="group-row"><td colspan="2">HTML docs (this directory)</td></tr>
-          <tr><td><a href="architecture.html">architecture.html</a></td><td>Mirrors <code>ARCHITECTURE.md</code>, styled for reading.</td></tr>
-          <tr><td><a href="project-story.html">project-story.html</a></td><td>Non-technical project overview.</td></tr>
-          <tr><td><a href="RECON_2AE_BASEMERGE.html">RECON_2AE_BASEMERGE.html</a></td><td>Mirrors <code>code/docs/RECON_2AE_BASEMERGE.md</code>.</td></tr>
-          <tr><td><a href="recon_loss_explained.html">recon_loss_explained.html</a></td><td>Background on the original data2vec reconstruction-loss design.</td></tr>
-          <tr><td><a href="transformer_signal_recon_training.html">transformer_signal_recon_training.html</a></td><td>Transformer-stage signal-reconstruction training walkthrough.</td></tr>
+          <tr class="group-row"><td colspan="2">HTML docs (this directory) — live pages</td></tr>
+          <tr><td><a href="https://claude.ai/code/artifact/33733929-f867-4d0b-831e-b0584700cdbd">architecture.html</a></td><td>Mirrors <code>ARCHITECTURE.md</code>, styled for reading.</td></tr>
+          <tr><td><a href="https://claude.ai/code/artifact/400bd97d-d028-4d94-804a-53945b8296a0">project-story.html</a></td><td>Non-technical project overview.</td></tr>
+          <tr><td><a href="https://claude.ai/code/artifact/1030ff93-538f-46ea-be09-d2d346d6722d">RECON_2AE_BASEMERGE.html</a></td><td>Mirrors <code>code/docs/RECON_2AE_BASEMERGE.md</code>.</td></tr>
+          <tr><td><a href="https://claude.ai/code/artifact/50206265-357d-403d-bfae-a538984245cc">recon_loss_explained.html</a></td><td>Background on the original data2vec reconstruction-loss design.</td></tr>
+          <tr><td><a href="https://claude.ai/code/artifact/c963a579-6b4c-4094-ae18-d469522c9654">transformer_signal_recon_training.html</a></td><td>Transformer-stage signal-reconstruction training walkthrough.</td></tr>
+
+          <tr class="group-row"><td colspan="2">Lower priority / historical — still correct, just less likely to be what you need today</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/AUTOENCODER_EXPERIMENTS.md"><code>docs/AUTOENCODER_EXPERIMENTS.md</code></a></td><td>Mostly superseded by <code>RECON_2AE_BASEMERGE.md</code>; kept for phase 1–3 sweep results.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md"><code>fe_vs_transformer_collapse/HOW_TO_RUN.md</code></a></td><td>A narrower, one-off embedding-collapse ablation.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/RUNAI_TRAINING_FOR_CLAUDE.md"><code>docs/RUNAI_TRAINING_FOR_CLAUDE.md</code></a></td><td>RunAI operational reference — less relevant since the server setup moved on from what this was written against.</td></tr>
         </tbody>
       </table>
     </div>
     <p style="margin-top: 0.8rem; font-size: 0.85rem; color: var(--ink-faint);">
       Everything under <code>fairseq/</code> outside <code>examples/data2vec/</code> is vendored
-      upstream fairseq documentation — not SpectralFM-specific, not listed here.
+      upstream fairseq documentation — not SpectralFM-specific, not listed here. Links to
+      <code>.html</code> pages above point at their published, live-rendered versions (a
+      relative link between files only works when they're all opened from the same folder on
+      disk — these need to work from anywhere, including this page on its own).
     </p>
   </section>
 

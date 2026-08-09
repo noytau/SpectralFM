@@ -254,10 +254,22 @@ td code { font-size: 0.8em; }
   Reconstruction 2-AE basemerge <span class="badge badge-new">how-to</span>
 </h1>
 <p style="color:var(--text-dim);font-size:0.9rem;">
-  Branch <code>recon/2ae-basemerge</code> · commit <code>fdfeea4</code> (+ doc commit <code>e75be59</code>)
+  Branch <code>recon/2ae-basemerge</code> (merged) · final commit <code>a326a60</code>
   · companion: <code>code/docs/RECON_2AE_BASEMERGE.md</code> · summary plot:
   <code>code/eval_results/recon_components_overview.png</code>
 </p>
+
+<div style="background:var(--bg-card);border:1px solid var(--border-bright);border-left:3px solid var(--green);border-radius:var(--radius-sm);padding:14px 18px;margin:16px 0;font-size:0.88rem;color:var(--text);">
+  <strong style="color:var(--green);">Update, 2026-08-09 — merged, with a coverage correction.</strong>
+  This branch is merged into <code>main</code> and <code>eval-methods</code>; everything
+  below is live, not a proposal. But: the native Hydra model (this doc's subject) only
+  implements <strong>two</strong> decoder heads — <code>fe_recon_decoder</code> and
+  <code>trans_recon_decoder</code>. There is no native <code>proj_recon_decoder</code> /
+  <code>lambda_recon_proj</code>, verified directly against the merged source. A
+  <strong>projection</strong>-stage decoder does exist, but only in the standalone
+  <code>code/train_reconstruction.py</code> script and the eval-side
+  <code>checkpoint_loader.py</code>. See §1's coverage table.
+</div>
 
 <!-- ════════════════════════════════════════════════ -->
 <h2 id="tldr">1.  TL;DR — what's new</h2>
@@ -282,6 +294,20 @@ total = λ_trans · recon_trans_loss + λ_fe · recon_fe_loss                   
 total = regression_loss                                                            <span class="comment"># always weight 1</span>
       + λ_recon_trans · recon_trans_loss                                           <span class="comment"># L2</span>
       + λ_recon_fe    · recon_fe_loss                                              <span class="comment"># L2</span></code></pre>
+
+<h4>Which of the 3 decoder stages (FE / projection / transformer) each implementation covers</h4>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th></th><th>FE decoder</th><th>Projection decoder</th><th>Transformer decoder</th></tr></thead>
+<tbody>
+<tr><td>Native Hydra (<code>data2vec_audio.py</code>, this doc)</td><td style="color:var(--green);">✓ <code>fe_recon_decoder</code></td><td style="color:var(--red);">✗ not implemented</td><td style="color:var(--green);">✓ <code>trans_recon_decoder</code></td></tr>
+<tr><td>Standalone script (<code>train_reconstruction.py</code>)</td><td style="color:var(--green);">✓ <code>--recon_path fe</code></td><td style="color:var(--green);">✓ <code>--lambda_recon_proj</code></td><td style="color:var(--green);">✓ <code>--recon_path transformer</code></td></tr>
+<tr><td>Eval loader (<code>checkpoint_loader.py</code>)</td><td style="color:var(--green);">✓ <code>fe_mirror</code></td><td style="color:var(--green);">✓ <code>proj_mirror</code></td><td style="color:var(--green);">✓ <code>transformer_mirror</code></td></tr>
+</tbody>
+</table>
+</div>
+<p style="color:var(--text-dim);font-size:0.87rem;">Porting a native <code>proj_recon_decoder</code> (mirroring how <code>fe</code>/<code>trans</code> are already wired) is open work — see <code>TASKS.md</code>.</p>
 
 <h4>Per-component LR (joint encoder + decoder share a group, per spec)</h4>
 
@@ -686,18 +712,18 @@ Override LRs per group via <code>optimizer.groups.transformer.lr=[3e-5]</code> e
 
 <h4>Done</h4>
 <ul>
-  <li>Branch <code>recon/2ae-basemerge</code> created off <code>main</code>, all changes committed (<code>fdfeea4</code>).</li>
+  <li>Branch <code>recon/2ae-basemerge</code> merged into <code>main</code> and <code>eval-methods</code> (2026-08-09).</li>
   <li><strong>Argparse:</strong> 2-AE forward, weighted L2 loss, auto-zero rules, new WandB keys, per-component LR groups, audit, checkpoint bump.</li>
   <li><strong>Hydra:</strong> new config fields, lazy <code>recon_components</code> loader, param-group tagging, <code>MirrorReconDecoder</code>, <code>recon_decoder_type=mirror</code>, composite-optimizer YAML preset.</li>
   <li>RunAI submitter for the argparse 2-AE grid.</li>
   <li>Both smoke tests green.</li>
 </ul>
 
-<h4>Not done <span class="dim">(deliberately, until you say go)</span></h4>
+<h4>Not done</h4>
 <ul>
-  <li><code>git push</code> — branch is local only.</li>
-  <li>RunAI submission — <code>submit_signal_recon_2ae_runai.sh</code> is ready but not invoked.</li>
-  <li>Hydra preset has not been launched end-to-end on RunAI yet; the smoke test exercises <code>build_model</code> + <code>recon_only</code> forward but not a full <code>fairseq-hydra-train</code> loop with composite optimizer.</li>
+  <li>A native-Hydra <code>proj_recon_decoder</code> (see the coverage table in §1) — the standalone script and eval loader have it, the Hydra model doesn't yet.</li>
+  <li>RunAI submission — <code>submit_signal_recon_2ae_runai.sh</code> is ready but may not have been run through the full T8–T13 sequence in <code>TASKS.md</code> yet; check there for current status.</li>
+  <li>Whether the Hydra preset has been launched end-to-end on RunAI as of today is not re-verified here; the smoke test exercised <code>build_model</code> + <code>recon_only</code> forward but not necessarily a full <code>fairseq-hydra-train</code> loop with composite optimizer. Check <code>TASKS.md</code> before assuming either way.</li>
   <li><code>head_fe</code> is currently a separate component in the argparse path; if you eventually want to fold the FE-only path's <code>decoder</code> under the same name for symmetry, that's a follow-up rename.</li>
 </ul>
 
@@ -705,7 +731,7 @@ Override LRs per group via <code>optimizer.groups.transformer.lr=[3e-5]</code> e
 <h2 id="recover">9.  Quick recovery checklist when you come back</h2>
 
 <ol>
-  <li><code>git checkout recon/2ae-basemerge</code> and <code>git log --stat -1</code> — confirm you're on commit <code>fdfeea4</code>.</li>
+  <li>This is merged — you're most likely already on <code>main</code> or <code>eval-methods</code>. <code>git log --oneline -- fairseq/examples/data2vec/models/data2vec_audio.py</code> to see the merge history if you need the original commit sequence.</li>
   <li>Open <code>code/eval_results/recon_components_overview.png</code> — Panels A–D + the 6 strips show the whole design at a glance.</li>
   <li>Skim <a href="#cli">§3.1 (argparse flags)</a> and <a href="#hydra-cfg">§4.1 (Hydra fields)</a> — those are the API surface.</li>
   <li>If you want to run an experiment:
@@ -718,10 +744,11 @@ Override LRs per group via <code>optimizer.groups.transformer.lr=[3e-5]</code> e
 </ol>
 
 <div class="footer">
-  Companion docs: <code>code/docs/RECON_2AE_BASEMERGE.md</code> ·
+  Companion docs: <a href="https://github.com/noytau/SpectralFM/blob/main/code/docs/RECON_2AE_BASEMERGE.md"><code>code/docs/RECON_2AE_BASEMERGE.md</code></a> ·
   <code>code/eval_results/recon_components_overview.png</code> ·
-  <code>docs/html/recon_loss_explained.html</code> (original data2vec recon background) ·
-  <code>code/eval/EVAL_OVERVIEW.md</code> (eval suite reference).
+  <a href="https://claude.ai/code/artifact/50206265-357d-403d-bfae-a538984245cc"><code>recon_loss_explained.html</code></a> (original data2vec recon background) ·
+  <a href="https://github.com/noytau/SpectralFM/blob/main/code/eval/EVAL_OVERVIEW.md"><code>code/eval/EVAL_OVERVIEW.md</code></a> (eval suite reference) ·
+  <a href="https://claude.ai/code/artifact/1c835a3f-43eb-4c94-96b6-b92e0d0ff68b">← back to doc hub</a>
 </div>
 
 </main>

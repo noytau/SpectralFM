@@ -33,17 +33,17 @@ thing, read `code/eval/EVAL_OVERVIEW.md` (eval) or `ARCHITECTURE.md`
 | [`TASKS.md`](TASKS.md) | The live experiment ledger — what's done, what's active, what's next, in priority order. |
 | [`docs/html/`](docs/html/) | Same content as above two, as standalone HTML pages — see [HTML docs](#html-docs) below. |
 | **Training** | |
-| [`docs/RUNAI_TRAINING_FOR_CLAUDE.md`](docs/RUNAI_TRAINING_FOR_CLAUDE.md) | RunAI operational reference: PVC paths, checkpoint copy recipes, submit-script inventory, `/storage`↔`/mnt5` behavior. |
-| [`docs/AUTOENCODER_EXPERIMENTS.md`](docs/AUTOENCODER_EXPERIMENTS.md) | Autoencoder/reconstruction experiment history, architecture detail, and cross-dataset results. |
-| [`code/docs/RECON_2AE_BASEMERGE.md`](code/docs/RECON_2AE_BASEMERGE.md) | Design rationale and API surface for the per-component init/freeze/composite-optimizer machinery (also see the HTML version). |
-| [`docs/CARRYOVER_signal_recon_may2026.md`](docs/CARRYOVER_signal_recon_may2026.md) | Handoff notes for the signal-reconstruction tooling — where checkpoints/logs live, how to resume on another machine. |
-| [`fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md) | Exact commands for the reconstruction-loss Hydra configs, local vs. RunAI. |
-| [`fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md) | Commands for the FE-vs-transformer embedding-collapse ablation. |
+| [`fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md) | Reconstruction-loss training — the single doc for it: Hydra commands, RunAI file sync, artifact pull, all in one place. |
+| [`code/docs/RECON_2AE_BASEMERGE.md`](code/docs/RECON_2AE_BASEMERGE.md) | Design rationale and API surface for the per-component init/freeze/composite-optimizer machinery — merged and current (also see the HTML version). |
 | **Evaluation** | |
 | [`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md) | **The single eval doc** — installation, running it, all 7 methods, checkpoint formats, examples. `code/eval/README.md` is a one-paragraph pointer to this file, kept only because GitHub renders it by default when browsing the folder. |
 | **Reference / provenance** | |
 | [`code/README.md`](code/README.md) | One-line project tagline (oldest doc in the repo). |
 | [`fairseq/examples/data2vec/README.md`](fairseq/examples/data2vec/README.md) | Upstream fairseq data2vec docs (not SpectralFM-specific — background reading on the base architecture). |
+| **Lower priority / historical** — still correct, just less likely to be what you need today | |
+| [`docs/AUTOENCODER_EXPERIMENTS.md`](docs/AUTOENCODER_EXPERIMENTS.md) | Autoencoder/reconstruction experiment history — mostly superseded by `RECON_2AE_BASEMERGE.md`; kept for the phase 1–3 sweep results and operational notes. |
+| [`fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md) | Commands for the FE-vs-transformer embedding-collapse ablation — a narrower, one-off experiment. |
+| [`docs/RUNAI_TRAINING_FOR_CLAUDE.md`](docs/RUNAI_TRAINING_FOR_CLAUDE.md) | RunAI operational reference (PVC paths, checkpoint copy recipes, submit-script inventory) — less relevant since the cluster/server setup moved on from what this was written against; check current server details in [Server access](#server-access) first. |
 
 Everything else under `fairseq/` outside `examples/data2vec/` is vendored
 upstream fairseq documentation (translation, speech-to-text, other model

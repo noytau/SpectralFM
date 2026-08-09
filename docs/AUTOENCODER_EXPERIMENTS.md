@@ -1,5 +1,13 @@
 # FE Autoencoder Experiments
 
+> **Historical.** Deprioritized in `CLAUDE.md`'s doc index — the 2-AE/3-AE work in
+> `code/docs/RECON_2AE_BASEMERGE.md` has since superseded most of this. Kept for the
+> phase 1–3 hyperparameter-sweep and cross-dataset results, and the operational notes
+> at the bottom (§9). One claim below (§7, "`lambda_recon_trans` still uses mean-pooled
+> transformer states") predates the 2-AE basemerge work and is no longer accurate — the
+> merged `data2vec_audio.py` now uses a sequence-based mirror decoder there, not mean
+> pooling; see `RECON_2AE_BASEMERGE.md` for the current design.
+
 Summary of the convolutional autoencoder experiments for evaluating and improving the Feature Extractor (FE) reconstruction capability.
 
 ---
@@ -208,4 +216,29 @@ The mean-pool bottleneck in `linear`/`mlp` decoders motivated the standalone aut
 
 ---
 
-*Last updated: 2026-05-11*
+## 10. Operational notes (salvaged from the retired carry-over doc)
+
+Launching the larger (100k-sample / 100k-step) standalone runs:
+
+```bash
+cd /mnt5/noy/SpectralFM
+export PYTHONPATH=code:fairseq:fairseq/examples
+# Detached tmux (survives SSH disconnect); 4 GPUs -> parallel, <4 -> sequential queue on GPU 0
+USE_TMUX=1 bash scripts/launch_recon_signal_4x100k.sh
+```
+
+Launches 4 runs (FE random-init / FE from `base_libri_official.pt` / transformer
+random-init / transformer from `base_libri_official.pt`), defaults
+`n_samples=steps=100000`, `lr=1e-4`, `warmup=10000` (cosine), `batch_size=512`,
+`grad_accum_steps=4`. W&B project: `spectralfm-runai-recon-signal-100k`. `tmux ls`
+shows sessions named `sfm_<UTC>_fe_rand` / `_fe_lib` / `_tr_rand` / `_tr_lib`.
+
+**Gotchas:**
+- Don't run two `train_reconstruction.py` processes against the same `--out_dir` —
+  duplicate-process collisions on the same output directory have been observed.
+- `base_libri_official.pt` is not a full structural match to SpectralFM's FE — only
+  shape-compatible tensors load from it; the rest of the FE stays at random init.
+
+---
+
+*Last updated: 2026-08-09*
