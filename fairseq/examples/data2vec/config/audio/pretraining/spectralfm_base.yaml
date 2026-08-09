@@ -60,6 +60,11 @@ lr_scheduler:
 
 model:
   _name: data2vec_audio
+  # 245-frame input -> 47 tokens (245->243->241->239->237->47). The wav2vec2
+  # default (~320x downsampling, tuned for 16kHz speech) collapses a 245-frame
+  # input to a degenerate ~0-length sequence -- must be set explicitly. Matches
+  # spectralfm_full_train.yaml and code/train_reconstruction.py's _FE_CONV_LAYERS.
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
   extractor_mode: layer_norm
   encoder_layerdrop: 0.05
   dropout_input: 0.0

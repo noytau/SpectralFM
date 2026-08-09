@@ -330,7 +330,272 @@ verified in the checkpoints. Verdicts:
   in-memory-loader normalize bug found+fixed (commit 47b18ec side).
   Future `--data_dir` runs must exclude valid-set files.
 
+### T7. Audit decoder-capacity confound in the 3AE depth comparison
+The 3AE setup shares one encoder trunk (FE → post_extract_proj → transformer,
+`build_data2vec_audio_backbone()`) and taps it at three depths via forward hooks
+on `backbone.layer_norm` / `backbone.post_extract_proj`, plus the backbone's own
+output — one `backbone(...)` call per step, `code/train_reconstruction.py:957-1010`.
+That single-encoder design is what makes "same weights, different depth"
+comparisons valid in the first place (T5's depth-inversion finding depends on it).
+But the three decoders reading those taps are *not* the same architecture:
+`head_fe` is a `MirrorDecoder` (conv-transpose mirroring the FE, input 47×512)
+while `head_proj`/`head_trans` are `TransformerMirrorDecoder` (a different
+architecture, input 47×768). A fe-vs-trans reconstruction gap could therefore
+reflect either (a) how much signal survives at that encoder depth, or (b) how
+expressive that decoder architecture happens to be — currently unmeasured.
+- Compare parameter counts / effective capacity of `MirrorDecoder` vs.
+  `TransformerMirrorDecoder` as actually instantiated in these runs.
+- Sanity check: on one existing checkpoint, swap `head_fe` for a
+  `TransformerMirrorDecoder` (or vice versa) and see whether the fe/proj/trans
+  MSE ordering from T5/T6 holds or flips. If it flips, part of the "depth" story
+  is decoder capacity, not backbone information content.
+- Acceptance: a short writeup stating whether the T5/T6 depth-ordering findings
+  are robust to decoder-architecture choice, or need a caveat attached.
+
+## Training pipeline — 3AE + d2v joint round (proposed)
+Six-step **strictly sequential** pipeline (Steps 0–5), visualized in the
+training-plan artifact (FE / Projection / Transformer / Decoders / Loss /
+Hyperparams grid + architecture diagram). Each step (other than the Step 1
+side-probe) freezes and builds on the *immediately preceding* step's
+checkpoint: **T8 → T9 (side probe, doesn't gate anything) and T8 → T10 → T11
+→ T12 → T13 (main chain, full joint runs last)**.
+
+**Correction (2026-08-09): most of this round needs far less new code than
+originally scoped.** `fairseq/examples/data2vec/models/data2vec_audio.py` on
+`recon/2ae-basemerge` (uncommitted on Geoffrey — `git status` shows it
+modified, latest commit `62d36d0 "Fix stagnant regression loss..."`) already
+has, natively, in one `forward()` call: the masked d2v loss
+(`result["losses"]["regression"]`); `fe_recon_decoder` / `trans_recon_decoder`
+gated by `lambda_recon_fe` / `lambda_recon_trans`; `train_only_fe` (default
+`True`, freezes everything but FE); and full per-component init/freeze
+(`init_fe_ckpt` / `init_proj_ckpt` / `init_transformer_ckpt`,
+`freeze_fe_v2` / `freeze_proj` / `freeze_transformer_v2`, via
+`_maybe_apply_recon_components()` + a shared `recon_components.py` module also
+used by `code/train_reconstruction.py`). There's even a working (uncommitted)
+hydra config, `fairseq/examples/data2vec/config/audio/pretraining/recon_loss/
+spectralfm_recon_loss_basemerge.yaml`, that already runs d2v + recon_fe +
+recon_trans jointly with per-component LR groups.
+
+**Correction 2 (2026-08-09): the projection decoder has already been ported
+into the native model too — confirmed by user, not by direct inspection.**
+`head_proj` (a `TransformerMirrorDecoder`) already exists and already works
+in Pipeline C (`code/train_reconstruction.py` + `code/recon_components.py`,
+exactly what T2 trained — the linear/mlp768/mlp2048 sweep, mlp2048 winning
+at 10k steps per T6). Per the user (2026-08-09): a `proj_recon_decoder` /
+`lambda_recon_proj` equivalent has now been merged into
+`data2vec_audio.py`'s native `mask=True` forward path too, alongside
+`fe_recon_decoder`/`trans_recon_decoder`, with a minor adjustment from the
+merge. **Note:** the Geoffrey checkout inspected for this doc
+(`/mnt5/noy/SpectralFM`, `recon/2ae-basemerge`, both worktrees) did not yet
+show `proj_recon_decoder`/`lambda_recon_proj` in
+`fairseq/examples/data2vec/models/data2vec_audio.py` as of this check — likely
+a sync/push gap, not a correctness question. T11 and T13 are downgraded from
+"new engineering" to **existing — verify**, matching T8/T10/T12. First step
+on either is confirming the merged code is present and correct on whichever
+checkout is actually used to launch, not building anything new.
+
+### T8. Step 0 — FE pretrain via d2v loss only, no decoder (config work, not new code — validate first)
+Train the FE end to end against the **d2v self-distillation loss only** — no
+decoder, no reconstruction loss. Projection and transformer participate in the
+forward pass (d2v's loss reads the transformer's top-k-layer output) but are
+**frozen** — only FE receives gradients.
+- FE: TRAIN, random init, 5-layer conv (245→47). Projection: FROZEN, init =
+  base_libri. Transformer: FROZEN, init = base_libri. No decoders built.
+- **Option:** train FE + projection together from random init (transformer
+  still frozen from base_libri), rather than freezing projection at
+  base_libri from the start — same d2v-only loss, no decoder either way, just
+  widens which components receive gradients in this step. `freeze_proj` is
+  already an independent switch (see `_maybe_apply_recon_components()`), so
+  this is a one-flag change, not new engineering.
+- Loss: d2v only.
+- Hyperparams: **needs reconsideration**, not carried over from the old
+  recon-only design. d2v self-distillation conventionally trains much longer
+  than a reconstruction pretrain — Pipeline B's own `spectralfm_base.yaml` runs
+  to `max_update: 400000`. Start with a short smoke run, then pick a real step
+  budget from that precedent. Data: `single_channel_one` (999k) or
+  `single_channel_all` (9.1M).
+- **Not new engineering** — `train_only_fe=True` is already the default,
+  `lambda_recon_fe`/`lambda_recon_trans` already default to 0.0. This is a
+  hydra launch config (base off `spectralfm_base.yaml` or the existing
+  `recon_loss/` config family), setting `init_proj_ckpt`/`init_transformer_ckpt`
+  = base_libri paths and leaving `init_fe_ckpt` unset.
+- **Real blocker: validate before relying on it.** This code path is
+  uncommitted and its last commit message ("Fix stagnant regression loss")
+  indicates recent, possibly unresolved debugging. First actual task: run a
+  short smoke test, confirm the d2v loss curve actually decreases (not
+  stagnant), then commit the model-file changes before building anything
+  else on top.
+- Acceptance: FE checkpoint trained via pure d2v (proj/transformer never
+  updated), d2v loss curve logged and confirmed healthy. Replaces
+  `apr28_fe_recon_best.pt` as the canonical FE init for every step below.
+- Context: `apr28_fe_recon_best.pt`'s own saved metadata reads
+  `n_samples=1000, steps=10000, lr=1e-4` — at the trainer's default effective
+  batch (512) that's ~5,000 passes over the *same* 1,000 wavs. A bad
+  foundation for the FE everything downstream inherits — the motivation for
+  moving off the old recon-only Step 0.
+
+### T9. Step 1 — Frozen-backbone baseline (3AE decoders only, side probe)
+Runs off T8 directly and doesn't feed into T10–T13 — a diagnostic, not a link
+in the main chain. Uses Pipeline C (`train_reconstruction.py`), not the model
+native path — unchanged, always-existing infra.
+- FE: FROZEN, init = T8 (now d2v-pretrained, not reconstruction-pretrained).
+  Projection: FROZEN, init = base_libri (linear; shape-compatible but
+  distribution-mismatched). Transformer: FROZEN, init = base_libri. Decoders:
+  all three TRAIN, random init. Loss: `recon_fe + recon_proj + recon_trans`,
+  λ=1.0 each, no d2v.
+- Hyperparams: 2,000–3,000 steps, lr 1e-4, data `single_channel_1k`.
+- Why: base_libri has no FE tensors that fit SpectralFM's conv stack — `FE
+  from base_libri` silently no-ops (shape mismatch, tensors dropped). Sourcing
+  FE from T8 instead makes this a meaningful control, and now also measures
+  how much signal survives in an FE trained with zero reconstruction
+  supervision.
+- Acceptance: completed checkpoint, clean control point for the main chain.
+
+### T10. Step 2 — FE fine-tune: attach decoder, add recon(fe) on top of d2v (config work — precedented by the existing basemerge yaml)
+First link in the main chain — continues T8's checkpoint, now attaching a
+decoder and reconstruction loss for the first time.
+- FE: TRAIN, init = T8, continuing training. Projection/transformer: FROZEN,
+  init = base_libri. Decoders: FE decoder TRAIN (random init, newly attached);
+  projection/transformer decoders not built (λ=0). Loss: d2v + λ_fe·recon_fe
+  [+ λ_tv·TV(recon_fe)].
+- Hyperparams: 5,000–10,000 steps, lr_fe 1e-5 (fine-tune LR — continuing a
+  pretrained checkpoint, not training from scratch), λ sweep {0.1, 1, 10}.
+- **Not new engineering** — same native model as T8, `lambda_recon_fe>0` is
+  literally what `spectralfm_recon_loss_basemerge.yaml` already exercises
+  (that config also unfreezes the transformer, which this step doesn't want —
+  set `freeze_transformer_v2: true` on top of it). No TV term exists natively
+  in the model yet (Pipeline C has it via `_tv_loss`) — port it over if wanted,
+  small addition.
+- Acceptance: sweep completed with logged d2v + recon_fe curves; compare
+  against T9's frozen-FE recon_fe number. Winning config's FE checkpoint is
+  what T11–T13 build on.
+
+### T11. Step 3 — Projection fine-tune + d2v, 3 capacities (existing — verify)
+- FE: FROZEN, init = **T10's winning checkpoint** (not T8 directly — the
+  chain carries forward the recon-refined FE). Projection: TRAIN, 3 variants —
+  linear / mlp768 / mlp2048, random init (T2 recipe). Transformer: FROZEN,
+  init = base_libri. Decoders: projection decoder TRAIN (random init, ×3); FE
+  decoder carried from T10 but frozen; transformer decoder not built (λ=0).
+  Loss: d2v + λ_proj·recon_proj.
+- Hyperparams: 10,000 steps, lr 1e-5 (fine-tune LR), warmup 500 — not the
+  original 2k steps: T6 found capacity ordering flips (mlp2048 only wins once
+  trained long enough). Since T6 already crowned mlp2048 the winner, consider
+  porting that config directly rather than re-sweeping all 3 capacities here.
+- **Open decision: does the projection decoder start fresh or load from T2/T6?**
+  Either train all 3 capacity variants from random init here (the current
+  spec), or initialize from T2's already-completed linear/mlp768/mlp2048
+  checkpoints (T6 already crowned mlp2048 the winner at 10k steps) and
+  fine-tune further under the new d2v-joint loss instead of starting over —
+  decide before launching.
+- **Not new engineering — per user (2026-08-09), the projection decoder has
+  already been merged into the native model, with a minor adjustment from
+  the merge.** Freeze granularity already exists (`freeze_proj=False` while
+  FE/transformer stay frozen via `freeze_fe_v2`/`freeze_transformer_v2`).
+  Before launching, verify:
+  - `proj_recon_decoder` (or equivalent) is instantiated in
+    `data2vec_audio.py` alongside `fe_recon_decoder`/`trans_recon_decoder`,
+    and a `lambda_recon_proj` config field gates it.
+  - It's wired into `forward()`'s masked (`mask=True`) path and contributes to
+    `result["losses"]` the same way `recon_fe`/`recon_trans` do.
+  - Per-component init/freeze exists for it in `_maybe_apply_recon_components()`
+    (an `init_proj_recon_decoder_ckpt` / `freeze_proj_recon_decoder` pair, or
+    whatever the merge named them) and it's tagged for the composite optimizer.
+  - Gradients actually reach it under `mask=True` — run (or extend)
+    `recon_components.audit_gradient_flow()`-style check, since that helper as
+    last inspected only tested `mask=False`.
+  - Confirm which checkout (Geoffrey vs. wherever the merge landed) has the
+    change — the `/mnt5/noy/SpectralFM` copy inspected 2026-08-09 didn't show
+    it yet.
+- Acceptance: verification above passes; all 3 capacity variants (or just
+  mlp2048) trained to completion with logged d2v + recon curves. Winning
+  variant is what T12–T13 build on.
+
+### T12. Step 4 — Transformer fine-tune + d2v (config work — confirm MLP-proj checkpoint loading first)
+- FE: FROZEN, init = **T10's checkpoint**. Projection: FROZEN, init =
+  **T11's winning variant**. Transformer: TRAIN, init = base_libri, trained on
+  NOVA data. Decoders: transformer decoder TRAIN (random init); FE/projection
+  decoders carried from T10/T11 but frozen. Loss: d2v + λ_trans·recon_trans.
+- Hyperparams: 10,000–20,000 steps (effectively continued SSL pretraining),
+  lr 1e-5 (fine-tune LR), warmup 500.
+- **Not new engineering for the loss/freeze mechanics** — `freeze_transformer_v2
+  =False` + `lambda_recon_trans>0` is native, same as T8/T10. One thing to
+  confirm first: if T11's winning projection is an MLP variant (mlp768/
+  mlp2048), check `recon_components.py`'s `load_post_extract_proj_from_ckpt`
+  actually round-trips an MLP shape via `init_proj_ckpt` — T2 solved this for
+  the eval-side loader; unclear whether Pipeline B's loader was updated to
+  match.
+- Why this one matters: most direct test of the T6 verdict — pair an
+  SSL-informative backbone with reconstruction. Compare directly against T5b.
+- Acceptance: completed checkpoint, compared against T5b.
+
+### T13. Step 5 — Full joint fine-tune (existing — verify, depends on T11)
+- FE: TRAIN, init = T10's winner. Projection: TRAIN, init = T11's winner.
+  Transformer: TRAIN, init = T12's checkpoint (or base_libri, if T12
+  underperforms T5b). Decoders: all three TRAIN, seeded from T10/T11/T12's
+  winning configs. Loss: d2v + λ_fe·recon_fe + λ_proj·recon_proj +
+  λ_trans·recon_trans [+ λ_tv·TV(recon_fe)].
+- Hyperparams: largest step budget of the round; lr 1e-5 (fine-tune LR); λs
+  carried over from T10–T12.
+- Mechanically native (`train_only_fe=False` or all three `freeze_*_v2=False`,
+  `lambda_recon_fe/trans>0` already exist, and per T11 `lambda_recon_proj`
+  should too now) — once T11's verification checklist passes, this step is
+  pure config, no new code.
+- Run only after T10, T11, T12 land in sequence — seed lambdas/inits from
+  whichever config wins at each link. Hardest run to attribute if metrics
+  move, since three components change at once.
+- Acceptance: completed checkpoint, full comparison eval against T9's
+  frozen-baseline probe and against T10–T12 individually.
+
 ### T3. Evaluate transformer without masking (eval experiment, no training)
 Find where masking is applied in the transformer forward path and run the evaluation with
 masking disabled entirely. Expectation: better results. Report masked vs. unmasked
 side by side; make the no-masking mode a proper CLI flag, not a code edit.
+
+---
+
+## Cleanup
+
+### C1. Remove the legacy HuggingFace training path
+`code/run_experiment.py`, `code/customize_model.py`, `code/args_parser.py`,
+`code/trainer.py`, `code/evaluate.py`, `code/testing.py`, `code/main.py` — an
+older HF-`transformers`-based training/eval chain that predates both the
+regular backbone-training path (`spectralfm_base.yaml` + `hydra_train`) and
+the autoencoder-training path (`code/train_reconstruction.py`), and isn't
+part of either. No `.sh`/`.yaml` in the repo launches any of these files.
+`code/compute_stats.py` is only imported by this chain — its plotting style
+was already ported into `code/eval/report.py` (see the comments there), so
+it has nothing left to lose functionally.
+
+**Caveat found while merging autoencoder training into this branch:**
+`code/model_loader.py` is part of this same import chain but is **not**
+dead — `code/evaluation_runner.py` and other `code/eval_*.py` scripts (the
+older, fairseq-dependent eval tooling that came in with the autoencoder
+merge) import it for checkpoint loading and the `/storage`↔`/mnt5` path
+remap. Do not remove `model_loader.py` as part of this cleanup; it would
+need its own decision once `evaluation_runner.py`'s fate relative to
+`code/eval/` is settled.
+
+Also unrelated to any training path and safe to remove regardless of the
+above: `code/wandb_logger.py` (an orphaned distilbert/Yelp-review tutorial
+script, not imported anywhere, not SpectralFM code).
+
+### C2. Remove redundant files from git
+Sweep the repo for cruft accumulated from iteration/experimentation and
+either delete or `.gitignore` it. Known candidates found this session:
+- `Dockerfile.bak`, `Dockerfile_old` (repo root, untracked) — stale copies
+  superseded by `Dockerfile`.
+- `code/nohup.out`, `code/files_to_copy.txt`, `code/.DS_Store`,
+  `.DS_Store` files generally — should be `.gitignore`d, not committed.
+- `code/eval_outputs/` (currently untracked, growing every eval run) —
+  decide whether run outputs belong in git at all, or should be
+  `.gitignore`d with only reports/summaries checked in deliberately.
+- Re-check whether the exploratory/one-off scripts that arrived via the
+  autoencoder-training merge (`debug_recon_encoding.py`,
+  `code/analyze_hydra_recon_checkpoint.py`, `code/plot_*.py` variants,
+  `code/test_sanity_fixed_mask.py`, etc. — see the provenance note in
+  `CLAUDE.md`'s Repo layout section) are still needed or were one-off
+  debugging aids.
+- Confirm no other now-dead config variants remain alongside
+  `spectralfm_base.yaml`/`spectralfm_full_train.yaml` (four were already
+  removed while merging autoencoder training into this branch, after
+  confirming zero references anywhere in the tree — same check applies here).

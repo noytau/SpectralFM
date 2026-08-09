@@ -12,6 +12,73 @@ Training runs on RunAI (GPU cluster). Data lives on shared NFS:
 - Geoffrey sees it as `/mnt5/noy/`
 - RunAI sees the same volume as `/storage/noy/`
 
+Two things get trained here, and they're separate code paths:
+1. **The backbone itself** — self-supervised data2vec pretraining on raw signals. This is "regular training." See [Getting started](#getting-started-new-teammate-setup) below.
+2. **Reconstruction decoders on top of a backbone** ("autoencoder" / "3AE" training) — teaches one or more decoder heads to rebuild the original 245-point signal from different depths of an already-trained (or randomly initialized) backbone. See [Autoencoder / reconstruction training](#autoencoder--reconstruction-training).
+
+---
+
+## Getting started (new teammate setup)
+
+Do this once, in order, on **Geoffrey** (`ssh Geoffry`, see [Server access](#server-access)):
+
+1. **Environment.** Training needs the `spectralfm` conda env (fairseq + its deps), defined in `spectralfm.yml` at the repo root (also what the RunAI training image bakes in — see `Dockerfile`). This is a **different env** from the one used for evaluation (`spectralfm_env`, see [Server access](#server-access)) — eval is deliberately fairseq-free, training is not.
+2. **Data.** Confirm the dataset subset you want to train on already has manifests under `/mnt5/noy/SpectralFM/fairseq/data/nova_data/<subset>/` (check for `train.tsv`/`valid.tsv`). If not, generate them first — see [Manifest generation](#manifest-generation) below. This is a one-time step per dataset subset, not part of every training run.
+3. **Launch a training run** — see the command in the next section.
+4. **Evaluate the result** once you have a checkpoint — see `code/eval/EVAL_OVERVIEW.md`.
+
+### Regular (backbone) training
+
+This is fairseq's native `data2vec_audio` self-supervised pretraining — the model config lives in `fairseq/examples/data2vec/config/audio/pretraining/spectralfm_base.yaml`, and it's launched with fairseq's own `hydra_train` entry point via `runai submit`. You do not write data paths or job config into the yaml — everything dataset/step/GPU-specific is passed as a hydra override at launch time.
+
+The easiest way to launch is `sweep_dataset.sh` at the repo root, which submits one RunAI job per dataset subset listed in its `SUBSETS=(...)` array:
+
+```bash
+bash sweep_dataset.sh
+```
+
+To launch a single custom run instead of the sweep, submit directly:
+
+```bash
+runai submit spectral-my-run \
+  --image noyhassid/spectralfm-lean:v6 \
+  --gpu 1 --project raja \
+  --existing-pvc claimname=storage,path=/storage \
+  --preemptible \
+  --command -- bash -c "cd /storage/noy/SpectralFM/fairseq && \
+    WANDB_NAME=my_run_name python -m fairseq_cli.hydra_train \
+    --config-dir examples/data2vec/config/audio/pretraining \
+    --config-name spectralfm_base \
+    task.data=/storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k \
+    common.user_dir=/storage/noy/SpectralFM/fairseq/examples/ \
+    optimization.lr=[0.0001] optimization.max_update=10000 optimization.max_epoch=0 \
+    lr_scheduler._name=cosine +lr_scheduler.warmup_updates=1000 \
+    +lr_scheduler.warmup_init_lr=0 +lr_scheduler.min_lr=0 +lr_scheduler.max_update=10000 \
+    common.log_interval=10"
+```
+
+Swap `task.data=` to point at any dataset subset with a manifest (see below). Checkpoints save every 5000 updates (keeping the last 3) into the job's RunAI output dir under `/storage`; `wandb_run_name` in the run log is what to search for in W&B.
+
+**One config gotcha that will silently break a run if missed:** `spectralfm_base.yaml` explicitly sets `model.train_only_fe: false`, because the field defaults to `true` (added by the autoencoder-training merge) and would otherwise freeze everything except the feature extractor. If you ever start a *new* config from scratch for full backbone training rather than copying `spectralfm_base.yaml`, set this explicitly.
+
+### Manifest generation
+
+A one-time step per dataset subset, independent of any specific training run — not something you redo before every launch.
+
+`.tsv` manifests (`train.tsv`/`valid.tsv`) point fairseq at a directory of `.wav` files. Generate them from a wav directory with:
+
+```bash
+python fairseq/create_manifests.py \
+  --wav_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/<subset>/wav \
+  --out_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/<subset> \
+  --runai_root /storage/noy/SpectralFM/fairseq/data/nova_data/<subset>/wav \
+  --max_train 10000 --valid_frac 0.05
+```
+
+`--runai_root` is what gets written as the manifest's root path (line 1 of the `.tsv`) — always the `/storage/...` RunAI path, even though you're generating the manifest from Geoffrey, since that's what RunAI jobs will actually read.
+
+To regenerate manifests for every existing subset at once: `bash fairseq/setup_data.sh` (run on Geoffrey). See the [Datasets](#datasets) section below for which subsets already have manifests and which are wired into `sweep_dataset.sh`'s default sweep.
+
 ---
 
 ## Repo layout
@@ -32,18 +99,23 @@ SpectralFM/
 │   │   ├── runner.py
 │   │   ├── report.py
 │   │   └── requirements_eval.txt
-│   ├── run_experiment.py      ← training entry point (requires fairseq)
-│   ├── evaluate.py            ← old eval (being replaced by code/eval/)
-│   ├── model_loader.py        ← model loading + training helpers
-│   ├── compute_stats.py       ← visualisation utilities
-│   └── data_parser.py         ← original data loader (pkl / csv)
-├── fairseq/                   ← forked fairseq with SpectralFM modifications
-│   ├── create_manifests.py    ← generate train.tsv / valid.tsv for any wav dir
-│   ├── setup_data.sh          ← one-shot: regenerate all nova_data manifests
+│   ├── train_reconstruction.py   ← standalone autoencoder/reconstruction trainer (requires fairseq)
+│   ├── recon_components.py       ← per-component checkpoint loaders used by both training paths
+│   ├── model_loader.py           ← checkpoint loading + /storage↔/mnt5 remap (used by evaluation_runner.py etc.)
+│   ├── evaluation_runner.py      ← older, fairseq-dependent multi-checkpoint eval workhorse (predates code/eval/)
+│   └── docs/                     ← deep-dive docs for specific pieces of code/ (RECON_2AE_BASEMERGE.md, EVALUATION_FLOW.md, ...)
+├── docs/                       ← project-level deep-dive docs (AUTOENCODER_EXPERIMENTS.md, RUNAI_TRAINING_FOR_CLAUDE.md, ...)
+├── fairseq/                    ← forked fairseq with SpectralFM modifications
+│   ├── create_manifests.py     ← generate train.tsv / valid.tsv for any wav dir
+│   ├── setup_data.sh           ← one-shot: regenerate all nova_data manifests
+│   ├── submit_signal_recon_*.sh, submit_recon_*.sh  ← RunAI launchers for autoencoder/reconstruction training rounds
 │   └── examples/data2vec/config/audio/pretraining/
-│       └── spectralfm_base.yaml  ← correct training config (min_sample_size: 1)
-└── sweep_dataset.sh           ← submit RunAI training jobs across dataset subsets
+│       ├── spectralfm_base.yaml     ← canonical backbone training config (min_sample_size: 1)
+│       └── recon_loss/              ← Hydra configs for reconstruction-loss training
+└── sweep_dataset.sh            ← submit RunAI backbone-training jobs across dataset subsets
 ```
+
+A note on provenance: `code/train_reconstruction.py`, `code/recon_components.py`, `code/evaluation_runner.py` and the `docs/` folder arrived via merging a previously-separate `recon/2ae-basemerge` branch (and other autoencoder-training work already on `main`) into this branch. There is a fair amount of exploratory/one-off tooling in `code/` from that work (analysis scripts, debug scripts, alternate eval entry points) that hasn't been triaged yet — see the `TASKS.md` cleanup item before assuming every `code/*.py` file is load-bearing.
 
 ---
 
@@ -65,6 +137,45 @@ python -m eval.runner \
   --evals checkpoint_comparison \
   --output_dir /mnt5/noy/code/eval_outputs/
 ```
+
+---
+
+## Autoencoder / reconstruction training
+
+Trains one or more decoder heads to reconstruct the original 245-point signal from a (frozen or trainable) backbone. Two independent entry points exist, at different levels of composability. Full write-up (design rationale, param-group tagging, the 6 experiment configurations tried so far): `code/docs/RECON_2AE_BASEMERGE.md`. Experiment history and results: `docs/AUTOENCODER_EXPERIMENTS.md`.
+
+### Standalone script — `code/train_reconstruction.py`
+
+Simpler, no Hydra. Two modes:
+```bash
+# FE-only: conv feature extractor + LayerNorm + a ConvTranspose1d mirror decoder
+python code/train_reconstruction.py --mode train --recon_path fe \
+  --lr 1e-4 --n_samples 1000 --steps 10000 --data_dir <wav_dir>
+
+# Transformer: full backbone (FE + transformer) + mirror decoder on the full sequence
+python code/train_reconstruction.py --mode train --recon_path transformer \
+  --ckpt none --n_samples 1000 --steps 2000 --data_dir <wav_dir>
+  # --ckpt none = random backbone; pass a fairseq .pt instead to warm-start it
+```
+`--init_*_ckpt` / `--freeze_*` / `--lr_*` flags (per-component: fe, ln, proj, transformer, and each decoder head) let you mix warm-started and frozen components — e.g. "reconstruction heads on top of a frozen, already-trained SSL backbone." `--lambda_recon_fe` / `--lambda_recon_trans` weight each head's loss; `--lambda_tv_fe` adds a total-variation smoothness penalty on the FE decoder's output.
+
+### Hydra path — same `data2vec_audio` model, launched like backbone training
+
+For sweeps that need RunAI's job queue and W&B integration the way regular backbone training does. Configs live under `fairseq/examples/data2vec/config/audio/pretraining/recon_loss/`; launch with the matching `fairseq/submit_signal_recon_*.sh` / `fairseq/submit_recon_*.sh` script, or directly:
+```bash
+cd fairseq
+PYTHONPATH=/mnt5/noy/SpectralFM/code fairseq-hydra-train \
+  --config-dir examples/data2vec/config/audio/pretraining/recon_loss \
+  --config-name spectralfm_recon_loss_basemerge
+```
+`PYTHONPATH` must include `code/` — the model lazy-imports `code/recon_components.py` for the per-component checkpoint loaders; without it, init/freeze/param-group-tagging fields silently become no-ops (a warning, not a crash — you'll get random init instead of the warm-start you asked for). Override per run, e.g. `model.lambda_recon_fe=0.5`, `optimizer.groups.transformer.lr=[3e-5]`.
+
+### Checkpoint loading
+
+Three different mechanisms, depending on what's loading what:
+- **Warm-starting a component during training** (`--init_fe_ckpt` / `model.init_fe_ckpt` etc.): `code/recon_components.py`'s loaders auto-detect which of several known checkpoint layouts a `.pt` file uses (plain fairseq audio checkpoint, `data2vec_multi`, or the older standalone `apr28_fe_recon`-style save) and remap keys accordingly — point at the file, you don't need to know its exact save format up front.
+- **Loading a full checkpoint for eval/inference** (`code/model_loader.py:load_fairseq_checkpoint`): uses fairseq's own `checkpoint_utils.load_model_ensemble_and_task`. Before loading, it inspects the checkpoint's embedded config for any `/storage/noy/...` path (e.g. a `model_path` pointing at the base checkpoint it was warm-started from) and remaps it to `/mnt5/noy/...` when that's where you're running, auto-setting `skip_pretrained_weights` if no local copy of that base checkpoint exists — so an eval run doesn't fail just because the original warm-start file isn't on your machine. It also backfills config keys missing from older checkpoints (`model_path`, `skip_pretrained_weights`, `train_only_fe`) so old and new checkpoints load the same way.
+- **The zero-fairseq eval package** (`code/eval/checkpoint_loader.py`): a separate, from-scratch loader — see `code/eval/EVAL_OVERVIEW.md`. It detects checkpoint format from its keys and rebuilds an equivalent HuggingFace model shell, entirely without a fairseq install.
 
 ---
 
@@ -149,9 +260,10 @@ This env has torch 2.8, transformers 4.57, torchaudio 2.8 — all eval deps sati
 ## Key constraints
 
 - `min_sample_size` in training config **must be 1** — SpectralFM wavs are 245 frames; the base librispeech config uses 32000 which silently drops everything.
+- `model.train_only_fe` on `data2vec_audio` **defaults to `true`** (freezes everything except the feature extractor). `spectralfm_base.yaml` overrides it to `false` for full backbone training — any new full-training config must do the same, or training will silently become FE-only.
 - `signal_completion` eval requires a `completion_head` on the model — it skips gracefully if not present.
-- The old `model_loader.py` imports `from fairseq import checkpoint_utils` — do not use it in the eval path.
-- All new eval code must remain importable without fairseq installed.
+- `code/model_loader.py` imports `from fairseq import checkpoint_utils`, so it needs fairseq installed — it's used by `code/evaluation_runner.py` and the autoencoder training scripts, not by the zero-fairseq `code/eval/` package. Don't import it from `code/eval/`.
+- All code under `code/eval/` must remain importable without fairseq installed.
 
 ---
 
