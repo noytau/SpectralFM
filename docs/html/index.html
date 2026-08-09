@@ -1,0 +1,246 @@
+<title>SpectralFM — Start Here</title>
+<meta name="description" content="Single entry point for the SpectralFM project: what it is, how to set up, and every doc and link you might need.">
+<style>
+  :root {
+    --bg: #0a0d12;
+    --bg-panel: #11151c;
+    --ink: #dfe4ec;
+    --ink-dim: #8791a3;
+    --ink-faint: #545e6e;
+    --line: #232a38;
+    --teal: #4fd1c5;
+    --amber: #e3a765;
+    --code-bg: #0d1117;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f7f9;
+    --bg-panel: #ffffff;
+    --ink: #1b212b;
+    --ink-dim: #5b6472;
+    --ink-faint: #909aab;
+    --line: #e2e6ec;
+    --teal: #0e8f86;
+    --amber: #b3742a;
+    --code-bg: #f1f3f6;
+    --shadow: 0 1px 3px rgba(20,25,35,0.08);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f7f9; --bg-panel: #ffffff; --ink: #1b212b; --ink-dim: #5b6472;
+      --ink-faint: #909aab; --line: #e2e6ec; --teal: #0e8f86; --amber: #b3742a;
+      --code-bg: #f1f3f6; --shadow: 0 1px 3px rgba(20,25,35,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark light; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; }
+  a { color: var(--teal); }
+  .wrap { max-width: 56rem; margin: 0 auto; padding: 3.5rem 1.5rem 6rem; }
+
+  .eyebrow {
+    font-family: ui-monospace, monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--teal);
+    margin: 0 0 0.9rem;
+  }
+  h1 {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+    font-weight: 600;
+    font-size: 2.05rem;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    margin: 0 0 1rem;
+    text-wrap: balance;
+  }
+  .lede { font-size: 1.05rem; color: var(--ink-dim); max-width: 44rem; margin: 0 0 3rem; text-wrap: pretty; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 3.2rem; }
+  h2 {
+    font-family: ui-monospace, monospace;
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 0 0 1.1rem;
+    color: var(--ink);
+  }
+  p { margin: 0 0 0.9rem; }
+  code {
+    font-family: ui-monospace, monospace;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.1em 0.38em;
+    font-size: 0.86em;
+    color: var(--teal);
+  }
+
+  /* ---------- next-step cards ---------- */
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.9rem; }
+  @media (max-width: 620px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    display: block;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.2rem 1.3rem;
+    text-decoration: none;
+    box-shadow: var(--shadow);
+  }
+  .card .tag {
+    font-family: ui-monospace, monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    display: inline-block;
+    margin-bottom: 0.6rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+  }
+  .card.a .tag { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .card.b .tag { color: var(--teal); background: color-mix(in srgb, var(--teal) 16%, transparent); }
+  .card h3 { margin: 0 0 0.4rem; font-size: 1rem; color: var(--ink); font-weight: 650; }
+  .card p { margin: 0; font-size: 0.87rem; color: var(--ink-dim); }
+
+  /* ---------- doc table ---------- */
+  .table-wrap { overflow-x: auto; margin: 0.6rem 0; border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+  th, td { text-align: left; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--bg-panel);
+  }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--bg-panel); }
+  .group-row td {
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--code-bg);
+    padding: 0.4rem 0.9rem;
+  }
+
+  /* ---------- quick facts ---------- */
+  .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  @media (max-width: 620px) { .facts { grid-template-columns: 1fr; } }
+  .fact { background: var(--bg-panel); padding: 1rem 1.1rem; }
+  .fact .k { font-family: ui-monospace, monospace; font-size: 0.68rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 0.3rem; }
+  .fact .v { font-size: 0.92rem; color: var(--ink); }
+  .fact .v code { font-size: 0.85em; }
+
+  footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--ink-faint); font-size: 0.85rem; }
+  footer a { color: var(--ink-dim); }
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">SpectralFM · documentation hub</p>
+  <h1>Start here</h1>
+  <p class="lede">
+    One page with everything you need to get oriented on SpectralFM — a
+    self-supervised data2vec-audio model trained on 1D radio spectra from the
+    NOVA observatory. Pick a next step below, or use the full documentation
+    map further down.
+  </p>
+
+  <section>
+    <h2>Where to go next</h2>
+    <div class="cards">
+      <a class="card a" href="project-story.html">
+        <span class="tag">non-technical</span>
+        <h3>New to the project?</h3>
+        <p>What SpectralFM is, why it exists, and the key finding shaping current work — no code required.</p>
+      </a>
+      <a class="card b" href="../../CLAUDE.md">
+        <span class="tag">setup</span>
+        <h3>Setting up to train?</h3>
+        <p>Environment, manifest generation, and the exact launch command — <code>CLAUDE.md</code>'s Getting Started section.</p>
+      </a>
+      <a class="card b" href="architecture.html">
+        <span class="tag">technical</span>
+        <h3>Want the architecture depth?</h3>
+        <p>Model, loss, checkpoint formats, and what's actually configurable vs. swept so far.</p>
+      </a>
+      <a class="card a" href="../../TASKS.md">
+        <span class="tag">experiments</span>
+        <h3>Curious what's been tried?</h3>
+        <p>The live experiment ledger — results, verdicts, and what's queued up next, in priority order.</p>
+      </a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Quick facts</h2>
+    <div class="facts">
+      <div class="fact"><div class="k">Model</div><div class="v"><code>data2vec-audio-base</code> backbone, custom 1D-CNN feature extractor</div></div>
+      <div class="fact"><div class="k">Data</div><div class="v">245-sample signals, 16&nbsp;kHz, NOVA radio observatory</div></div>
+      <div class="fact"><div class="k">Scale</div><div class="v">up to 9.1M signals in the largest training set</div></div>
+      <div class="fact"><div class="k">Training</div><div class="v">RunAI GPU cluster, fairseq <code>hydra_train</code></div></div>
+      <div class="fact"><div class="k">Dev machine</div><div class="v"><code>ssh Geoffry</code> — see <code>CLAUDE.md</code> Server access</div></div>
+      <div class="fact"><div class="k">Repo</div><div class="v"><a href="https://github.com/noytau/SpectralFM">github.com/noytau/SpectralFM</a></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Full documentation map</h2>
+    <div class="table-wrap">
+      <table>
+        <tbody>
+          <tr class="group-row"><td colspan="2">Start here</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/CLAUDE.md"><code>CLAUDE.md</code></a></td><td>Setup, training commands, project map. The doc index lives here too.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/ARCHITECTURE.md"><code>ARCHITECTURE.md</code></a></td><td>Model architecture, loss setup, checkpoint loading, axes of variation.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/TASKS.md"><code>TASKS.md</code></a></td><td>Live experiment ledger — done, active, and queued work, in priority order.</td></tr>
+
+          <tr class="group-row"><td colspan="2">Training</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/RUNAI_TRAINING_FOR_CLAUDE.md"><code>docs/RUNAI_TRAINING_FOR_CLAUDE.md</code></a></td><td>RunAI operational reference — PVC paths, checkpoint copy recipes, submit scripts.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/AUTOENCODER_EXPERIMENTS.md"><code>docs/AUTOENCODER_EXPERIMENTS.md</code></a></td><td>Autoencoder/reconstruction experiment history and cross-dataset results.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/docs/RECON_2AE_BASEMERGE.md"><code>code/docs/RECON_2AE_BASEMERGE.md</code></a></td><td>Design rationale for per-component init/freeze/composite-optimizer machinery.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/docs/CARRYOVER_signal_recon_may2026.md"><code>docs/CARRYOVER_signal_recon_may2026.md</code></a></td><td>Handoff notes for signal-reconstruction tooling across machines.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md"><code>recon_loss/HOW_TO_RUN.md</code></a></td><td>Exact commands for the reconstruction-loss Hydra configs.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md"><code>fe_vs_transformer_collapse/HOW_TO_RUN.md</code></a></td><td>Commands for the FE-vs-transformer embedding-collapse ablation.</td></tr>
+
+          <tr class="group-row"><td colspan="2">Evaluation</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/eval/EVAL_OVERVIEW.md"><code>code/eval/EVAL_OVERVIEW.md</code></a></td><td>The current eval package (zero-fairseq) — read this first for eval work.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/eval/README.md"><code>code/eval/README.md</code></a></td><td>Short intro / install notes for the eval package.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/HOW_TO_EVALUATE.md"><code>code/HOW_TO_EVALUATE.md</code></a></td><td>Manual for the older, fairseq-dependent <code>evaluation_runner.py</code>.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/docs/EVALUATION_FLOW.md"><code>code/docs/EVALUATION_FLOW.md</code></a></td><td>Complete reference for that older eval framework.</td></tr>
+          <tr><td><a href="https://github.com/noytau/SpectralFM/blob/main/code/eval_metrics_reference.md"><code>code/eval_metrics_reference.md</code></a></td><td>Catalog of representation-quality metrics, implemented and planned.</td></tr>
+
+          <tr class="group-row"><td colspan="2">HTML docs (this directory)</td></tr>
+          <tr><td><a href="architecture.html">architecture.html</a></td><td>Mirrors <code>ARCHITECTURE.md</code>, styled for reading.</td></tr>
+          <tr><td><a href="project-story.html">project-story.html</a></td><td>Non-technical project overview.</td></tr>
+          <tr><td><a href="RECON_2AE_BASEMERGE.html">RECON_2AE_BASEMERGE.html</a></td><td>Mirrors <code>code/docs/RECON_2AE_BASEMERGE.md</code>.</td></tr>
+          <tr><td><a href="recon_loss_explained.html">recon_loss_explained.html</a></td><td>Background on the original data2vec reconstruction-loss design.</td></tr>
+          <tr><td><a href="transformer_signal_recon_training.html">transformer_signal_recon_training.html</a></td><td>Transformer-stage signal-reconstruction training walkthrough.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top: 0.8rem; font-size: 0.85rem; color: var(--ink-faint);">
+      Everything under <code>fairseq/</code> outside <code>examples/data2vec/</code> is vendored
+      upstream fairseq documentation — not SpectralFM-specific, not listed here.
+    </p>
+  </section>
+
+  <footer>
+    Generated as part of the project's documentation pass. If a link above 404s, the repo has moved past what this page knows — check <code>CLAUDE.md</code>'s Documentation index for the current list.
+  </footer>
+</div>

@@ -1,0 +1,656 @@
+<title>SpectralFM — Training Architecture</title>
+<style>
+  :root {
+    --bg: #0a0d12;
+    --bg-panel: #11151c;
+    --bg-panel-raised: #161b24;
+    --ink: #dfe4ec;
+    --ink-dim: #8791a3;
+    --ink-faint: #545e6e;
+    --line: #232a38;
+    --accent: #4fd1c5;
+    --accent-ink: #06211f;
+    --accent-2: #f0a860;
+    --accent-2-ink: #2b1a05;
+    --pipe-a: #7c8699;
+    --pipe-b: #4fd1c5;
+    --pipe-c: #f0a860;
+    --code-bg: #0d1117;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f7f9;
+    --bg-panel: #ffffff;
+    --bg-panel-raised: #ffffff;
+    --ink: #1b212b;
+    --ink-dim: #5b6472;
+    --ink-faint: #909aab;
+    --line: #e2e6ec;
+    --accent: #0e8f86;
+    --accent-ink: #ffffff;
+    --accent-2: #b5691f;
+    --accent-2-ink: #ffffff;
+    --pipe-a: #8993a3;
+    --pipe-b: #0e8f86;
+    --pipe-c: #b5691f;
+    --code-bg: #f1f3f6;
+    --shadow: 0 1px 3px rgba(20,25,35,0.08);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f7f9;
+      --bg-panel: #ffffff;
+      --bg-panel-raised: #ffffff;
+      --ink: #1b212b;
+      --ink-dim: #5b6472;
+      --ink-faint: #909aab;
+      --line: #e2e6ec;
+      --accent: #0e8f86;
+      --accent-ink: #ffffff;
+      --accent-2: #b5691f;
+      --accent-2-ink: #ffffff;
+      --pipe-a: #8993a3;
+      --pipe-b: #0e8f86;
+      --pipe-c: #b5691f;
+      --code-bg: #f1f3f6;
+      --shadow: 0 1px 3px rgba(20,25,35,0.08);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { color-scheme: dark light; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+  a { color: var(--accent); }
+
+  /* ---------- shell layout ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: 15rem minmax(0, 52rem);
+    justify-content: center;
+    gap: 3.5rem;
+    max-width: 78rem;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 6rem;
+  }
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0,1fr); }
+    .nav { display: none; }
+  }
+
+  .nav {
+    position: sticky;
+    top: 3rem;
+    align-self: start;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    max-height: calc(100vh - 6rem);
+    overflow-y: auto;
+  }
+  .nav-label {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.6rem;
+  }
+  .nav a {
+    color: var(--ink-dim);
+    text-decoration: none;
+    font-size: 0.87rem;
+    padding: 0.32rem 0.6rem;
+    border-radius: 5px;
+    border-left: 2px solid transparent;
+  }
+  .nav a:hover { color: var(--ink); background: var(--bg-panel); }
+
+  main { min-width: 0; }
+
+  /* ---------- hero ---------- */
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.9rem;
+  }
+  h1 {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+    font-weight: 600;
+    font-size: 2.15rem;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    margin: 0 0 0.9rem;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+  .lede {
+    font-size: 1.06rem;
+    color: var(--ink-dim);
+    max-width: 42rem;
+    margin: 0 0 2.6rem;
+    text-wrap: pretty;
+  }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 3.4rem; scroll-margin-top: 2rem; }
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-bottom: 1.1rem;
+  }
+  .sec-num {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.85rem;
+    color: var(--ink-faint);
+  }
+  h2 {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 1.28rem;
+    font-weight: 600;
+    margin: 0;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+  h3 {
+    font-size: 1.02rem;
+    font-weight: 650;
+    margin: 1.6rem 0 0.6rem;
+    color: var(--ink);
+  }
+  p { margin: 0 0 0.9rem; }
+  .sub { color: var(--ink-dim); font-size: 0.95rem; }
+
+  code {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.1em 0.38em;
+    font-size: 0.86em;
+    color: var(--accent);
+  }
+
+  pre {
+    margin: 0.9rem 0;
+    padding: 1rem 1.1rem;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-size: 0.83rem;
+    line-height: 1.65;
+  }
+  pre code { background: none; border: none; padding: 0; color: var(--ink); }
+  .tok-key { color: var(--accent); }
+  .tok-com { color: var(--ink-faint); font-style: italic; }
+  .tok-str { color: var(--accent-2); }
+
+  /* ---------- pipeline cards ---------- */
+  .pipes {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.9rem;
+    margin: 1.4rem 0 0.4rem;
+  }
+  @media (max-width: 640px) { .pipes { grid-template-columns: 1fr; } }
+  .pipe-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.1rem 1.15rem 1.2rem;
+    box-shadow: var(--shadow);
+  }
+  .pipe-card .letter {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 5px;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    font-size: 0.85rem;
+    margin-bottom: 0.7rem;
+  }
+  .pipe-a .letter { background: color-mix(in srgb, var(--pipe-b) 20%, transparent); color: var(--pipe-b); }
+  .pipe-b .letter { background: color-mix(in srgb, var(--pipe-c) 18%, transparent); color: var(--pipe-c); }
+  .pipe-card h4 { margin: 0 0 0.35rem; font-size: 0.98rem; }
+  .pipe-card .status {
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-top: 0.8rem;
+    display: inline-block;
+    padding: 0.18rem 0.5rem;
+    border-radius: 4px;
+  }
+  .pipe-a .status { background: color-mix(in srgb, var(--pipe-b) 14%, transparent); color: var(--pipe-b); }
+  .pipe-b .status { background: color-mix(in srgb, var(--pipe-c) 14%, transparent); color: var(--pipe-c); }
+  .pipe-card .meta { font-size: 0.83rem; color: var(--ink-dim); margin: 0; }
+  .pipe-card .meta code { font-size: 0.78em; }
+
+  /* ---------- flow diagram ---------- */
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin: 1.1rem 0 0.3rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.82rem;
+  }
+  .flow .node {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 0.5rem 0.75rem;
+    color: var(--ink);
+  }
+  .flow .arrow { color: var(--ink-faint); }
+
+  /* ---------- panel / callout ---------- */
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.2rem 1.3rem;
+    margin: 1rem 0;
+    box-shadow: var(--shadow);
+  }
+  .panel-title {
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.7rem;
+  }
+
+  .callout {
+    border: 1px solid color-mix(in srgb, var(--accent-2) 45%, var(--line));
+    background: color-mix(in srgb, var(--accent-2) 8%, var(--bg-panel));
+    border-radius: 10px;
+    padding: 1.1rem 1.25rem;
+    margin: 1.2rem 0;
+  }
+  .callout .panel-title { color: var(--accent-2); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  .callout.fixed {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
+  }
+  .callout.fixed .panel-title { color: var(--accent); }
+
+  /* ---------- tables ---------- */
+  .table-wrap { overflow-x: auto; margin: 1rem 0; border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+  th, td { text-align: left; padding: 0.55rem 0.85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-family: ui-monospace, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--bg-panel);
+  }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: var(--bg-panel); }
+
+  /* ---------- checkpoint-loading steps ---------- */
+  .steps { display: flex; flex-direction: column; gap: 0.9rem; }
+  .step {
+    display: grid;
+    grid-template-columns: 1.9rem 1fr;
+    gap: 0.9rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1rem 1.15rem;
+    box-shadow: var(--shadow);
+  }
+  .step .n {
+    width: 1.9rem; height: 1.9rem;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    font-size: 0.85rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step h4 { margin: 0 0 0.35rem; font-size: 0.95rem; color: var(--ink); }
+  .step p { margin: 0; font-size: 0.89rem; color: var(--ink-dim); }
+  .step p:not(:last-child) { margin-bottom: 0.5rem; }
+
+  /* ---------- axes checklist ---------- */
+  .axes { display: flex; flex-direction: column; gap: 0.55rem; }
+  .axis {
+    display: grid;
+    grid-template-columns: 1.5rem 11rem 1fr;
+    gap: 0.9rem;
+    align-items: baseline;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.9rem;
+  }
+  .axis:last-child { border-bottom: none; }
+  @media (max-width: 640px) { .axis { grid-template-columns: 1.3rem 1fr; } .axis .desc { grid-column: 2; } }
+  .axis .dot {
+    width: 0.55rem; height: 0.55rem; border-radius: 50%;
+    background: var(--ink-faint);
+    margin-top: 0.45em;
+  }
+  .axis.swept .dot { background: var(--accent); }
+  .axis .name { font-weight: 600; color: var(--ink); }
+  .axis .desc { color: var(--ink-dim); }
+  .axis .tag {
+    font-family: ui-monospace, monospace;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-faint);
+  }
+  .axis.swept .tag { color: var(--accent); }
+
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
+    color: var(--ink-faint);
+    font-size: 0.85rem;
+  }
+  footer a { color: var(--ink-dim); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+</style>
+
+<div class="shell">
+  <nav class="nav">
+    <p class="nav-label">Contents</p>
+    <a href="#overview">Overview</a>
+    <a href="#model">Model architecture</a>
+    <a href="#loss">Loss setup</a>
+    <a href="#data">Data sources</a>
+    <a href="#checkpoints">Checkpoint loading</a>
+    <a href="#axes">What can be trained</a>
+    <a href="#bridge">Train → eval bridge</a>
+  </nav>
+
+  <main>
+    <p class="eyebrow">SpectralFM — internal reference</p>
+    <h1>Training architecture, plainly</h1>
+    <p class="lede">
+      SpectralFM trains a <strong>data2vec-audio</strong> backbone to represent
+      1D radio-telescope signals — 245-sample spectra treated as if they were
+      audio — self-supervised, with no labels. This page is a map of what
+      actually trains today: the model, the loss, the data, and how
+      checkpoints move between training and evaluation. For exact commands,
+      see <code>CLAUDE.md</code> in the repo.
+    </p>
+
+    <section id="overview">
+      <div class="sec-head"><span class="sec-num mono">00</span><h2>Two things get trained here</h2></div>
+      <p>
+        A convolutional front-end turns each 245-point signal into a short
+        sequence of feature vectors; a 12-layer transformer encodes them.
+        Two separate training processes build on that:
+      </p>
+      <div class="pipes">
+        <div class="pipe-card pipe-a">
+          <span class="letter">1</span>
+          <h4>Backbone (regular) training</h4>
+          <p class="meta">
+            <code>hydra_train</code> + <code>spectralfm_base.yaml</code>,
+            launched by <code>sweep_dataset.sh</code>
+          </p>
+          <p class="meta" style="margin-top:0.5rem;">
+            Self-supervised: the encoder learns to predict its own masked-out
+            regions, using a slowly-updated copy of itself (an EMA "teacher")
+            as the target — the data2vec recipe, applied to spectra instead
+            of waveforms.
+          </p>
+          <span class="status">no labels</span>
+        </div>
+        <div class="pipe-card pipe-b">
+          <span class="letter">2</span>
+          <h4>Autoencoder / reconstruction training</h4>
+          <p class="meta">
+            <code>code/train_reconstruction.py</code>, or the same
+            <code>hydra_train</code> entry point with <code>recon_loss/</code> configs
+          </p>
+          <p class="meta" style="margin-top:0.5rem;">
+            Bolts one or more decoder heads onto a backbone (frozen or
+            trainable) and teaches them to rebuild the original 245-point
+            signal, to test how much information survives at each depth.
+          </p>
+          <span class="status">on top of a backbone</span>
+        </div>
+      </div>
+      <p class="sub" style="margin-top:0.9rem;">
+        Both use the same underlying model class — fairseq's
+        <code>data2vec_audio</code> — just configured differently. An older,
+        HuggingFace-based training path predates both and is scheduled for
+        removal (see <code>TASKS.md</code>) — it isn't covered here.
+      </p>
+    </section>
+
+    <section id="model">
+      <div class="sec-head"><span class="sec-num mono">01</span><h2>Model architecture</h2></div>
+
+      <h3>Feature extractor</h3>
+      <p>
+        A 5-layer 1D conv stack, explicitly sized for 245-frame input
+        (245 → 243 → 241 → 239 → 237 → <strong>47</strong> tokens), 512
+        channels, <code>layer_norm</code> mode:
+      </p>
+      <pre><code>conv_feature_layers = [(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]</code></pre>
+      <p>
+        This has to be set explicitly everywhere the model is built — the
+        class default is the stock wav2vec2/speech stack (~320× downsampling),
+        which collapses a 245-frame input to a degenerate ~0-length sequence.
+      </p>
+
+      <div class="callout fixed">
+        <p class="panel-title">✓ fixed this session</p>
+        <p>
+          <code>spectralfm_base.yaml</code> — the config <code>sweep_dataset.sh</code>
+          launches by default — never set <code>conv_feature_layers</code>,
+          so it was silently falling back to that broken default. Added the
+          explicit 5-layer value, matching <code>spectralfm_full_train.yaml</code>
+          and <code>train_reconstruction.py</code>'s own conv-stack constant,
+          which both already had it right.
+        </p>
+      </div>
+
+      <h3>Backbone transformer</h3>
+      <p>
+        12-layer transformer encoder, 768-dim, EMA teacher for
+        self-distillation. <code>post_extract_proj</code> lifts the 512-d
+        conv output to 768-d — a bare linear layer by default, or a small
+        MLP when a config asks for it (<code>post_extract_proj_type: mlp_gelu</code>).
+      </p>
+
+      <div class="callout">
+        <p class="panel-title">⚠ read before writing a new config</p>
+        <p>
+          <code>train_only_fe</code> <strong>defaults to true</strong> —
+          it freezes every parameter except the feature extractor. This
+          supports FE-only reconstruction experiments, but it means any new
+          <em>full</em> training config must set
+          <code>model.train_only_fe: false</code> explicitly, or training
+          silently becomes FE-only. <code>spectralfm_base.yaml</code> was
+          missing this until this session too — also now fixed.
+        </p>
+      </div>
+
+      <h3>Reconstruction decoder heads <span class="sub">(autoencoder training only)</span></h3>
+      <p>
+        Up to three heads, each rebuilding the 245-point signal from a
+        different depth, all sharing the same 5-layer
+        <code>ConvTranspose1d</code> "mirror" architecture that reverses the
+        feature extractor (47 → 245):
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Head</th><th>Reads from</th><th>Wired up by</th></tr></thead>
+          <tbody>
+            <tr><td>FE decoder</td><td>conv FE output</td><td><code>--recon_path fe</code> or <code>lambda_recon_fe &gt; 0</code></td></tr>
+            <tr><td>Proj decoder</td><td>post-projection features</td><td><code>lambda_recon_proj &gt; 0</code> (Hydra only)</td></tr>
+            <tr><td>Transformer decoder</td><td>full transformer output</td><td><code>--recon_path transformer</code> or <code>lambda_recon_trans &gt; 0</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Per-component <strong>init</strong> and <strong>freeze</strong> flags
+        let any of FE / LayerNorm / proj / transformer / each decoder head be
+        independently warm-started from a different checkpoint and
+        independently frozen — this is how "reconstruction heads on top of a
+        frozen, already-trained SSL backbone" gets built.
+      </p>
+    </section>
+
+    <section id="loss">
+      <div class="sec-head"><span class="sec-num mono">02</span><h2>Loss setup</h2></div>
+
+      <div class="panel">
+        <p class="panel-title">Backbone — self-distillation (SSL)</p>
+        <p style="margin-bottom:0;">
+          Standard data2vec loss, computed inside the model itself. The
+          masked student's output is regressed against the EMA teacher's
+          average of its top 8 transformer layers (target-normalized). With
+          <code>loss_beta: 0</code> this reduces to plain MSE.
+        </p>
+      </div>
+
+      <div class="panel">
+        <p class="panel-title">Reconstruction — weighted MSE + total variation</p>
+        <p>
+          Each decoder head has its own independently-weighted MSE against
+          the original signal (any can be zeroed to disable that head's
+          loss without removing the head):
+        </p>
+        <pre><code>TV(x) = mean(|x[i+1] − x[i]|)
+loss  = λ_fe·(MSE(head_fe) + λ_tv_fe·TV(head_fe))
+      + λ_trans·MSE(head_trans) + λ_proj·MSE(head_proj)</code></pre>
+        <p style="margin-bottom:0;">
+          Best setting found so far: <code>λ_tv_fe = 0.1</code> — a mild
+          smoothness regularizer; higher values over-smooth the
+          reconstruction.
+        </p>
+      </div>
+
+      <div class="callout">
+        <p class="panel-title">finding, not yet reflected in defaults</p>
+        <p style="margin-bottom:0;">
+          Reconstruction quality and downstream representation quality are
+          <strong>decoupled</strong> — the original SSL-pretrained backbone
+          remains the only one that's label-informative (R²=0.44); every
+          reconstruction-trained variant tried so far scores ≈0. Prefer
+          decoders on top of a frozen SSL backbone over training through it,
+          until this changes.
+        </p>
+      </div>
+    </section>
+
+    <section id="data">
+      <div class="sec-head"><span class="sec-num mono">03</span><h2>Data sources</h2></div>
+      <p style="margin-bottom:0;">
+        <code>.tsv</code> manifests over <code>.wav</code> directories,
+        built by <code>fairseq/create_manifests.py</code>. Manifest
+        generation is a <strong>one-time, per-subset</strong> step — not
+        something you redo before every training run. See
+        <code>CLAUDE.md</code>'s Manifest generation and Datasets sections
+        for the exact command and which subsets exist.
+      </p>
+    </section>
+
+    <section id="checkpoints">
+      <div class="sec-head"><span class="sec-num mono">04</span><h2>Checkpoint loading</h2></div>
+      <p class="sub">
+        Three different mechanisms exist because they solve different
+        problems — using the wrong one is the most common way to get a
+        silently wrong, non-crashing result.
+      </p>
+      <div class="steps">
+        <div class="step">
+          <span class="n">1</span>
+          <div>
+            <h4>Warm-starting a component while building a new model</h4>
+            <p><code>code/recon_components.py</code>, used by both <code>train_reconstruction.py</code>'s <code>--init_*_ckpt</code> flags and Hydra's <code>model.init_*_ckpt</code> fields.</p>
+            <p>Each loader auto-detects which of several known checkpoint layouts the source <code>.pt</code> uses — plain fairseq audio, <code>data2vec_multi</code>, or the older standalone <code>apr28_fe_recon</code> save — and remaps keys accordingly. Lazy-imported from <code>build_model()</code>: if <code>code/</code> isn't on <code>PYTHONPATH</code> when launching via Hydra, these fields silently no-op with a warning — you get random init where you expected a warm-start.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="n">2</span>
+          <div>
+            <h4>Loading a full checkpoint for eval / inference</h4>
+            <p><code>code/model_loader.py:load_fairseq_checkpoint</code>, used by <code>code/evaluation_runner.py</code> and other <code>code/eval_*.py</code> scripts — the older, fairseq-dependent eval tooling.</p>
+            <p>Inspects the checkpoint's embedded config for any <code>/storage/noy/...</code> path and remaps it to <code>/mnt5/noy/...</code> when running on Geoffrey, auto-setting <code>skip_pretrained_weights</code> if no local copy of a referenced base checkpoint exists. Backfills config keys missing from older checkpoints, including <code>train_only_fe=False</code>, so old checkpoints evaluate as full models rather than silently as FE-only.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="n">3</span>
+          <div>
+            <h4>The zero-fairseq eval package</h4>
+            <p><code>code/eval/checkpoint_loader.py</code> — a separate, from-scratch loader, unrelated to the two above.</p>
+            <p>Detects checkpoint format purely from its state-dict keys and rebuilds an equivalent HuggingFace model shell with the matching feature extractor swapped in, entirely without a fairseq install. See <code>code/eval/EVAL_OVERVIEW.md</code>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="axes">
+      <div class="sec-head"><span class="sec-num mono">05</span><h2>What can be trained</h2></div>
+      <p class="sub">The dot marks axes that have actually been swept in a real run so far, not just config surface that exists.</p>
+      <div class="axes">
+        <div class="axis swept"><span class="dot"></span><span class="name">Dataset subset</span><span class="desc">Any subset with a manifest; new ones mintable via the manifest generator.</span></div>
+        <div class="axis"><span class="dot"></span><span class="name">Backbone capacity</span><span class="desc">Layers, embed dim, heads, EMA schedule — hydra-overridable, never varied so far.</span></div>
+        <div class="axis swept"><span class="dot"></span><span class="name">Which components train vs. freeze</span><span class="desc"><code>train_only_fe</code> backbone-wide, or per-component <code>freeze_*</code> flags for reconstruction training.</span></div>
+        <div class="axis swept"><span class="dot"></span><span class="name">Projection head</span><span class="desc">Swept: linear vs. MLP-768 vs. MLP-2048.</span></div>
+        <div class="axis swept"><span class="dot"></span><span class="name">Reconstruction loss weights</span><span class="desc">TV weight swept over 0 / 0.01 / 0.1 / 1.0; per-head recon weights independently zeroable.</span></div>
+        <div class="axis swept"><span class="dot"></span><span class="name">Per-component checkpoint init</span><span class="desc">Mix-and-match warm starts, e.g. SSL-pretrained transformer frozen + fresh decoder heads.</span></div>
+        <div class="axis"><span class="dot"></span><span class="name">Masking</span><span class="desc">mask_prob / length / selection — backbone training only; reconstruction training doesn't mask.</span></div>
+        <div class="axis swept"><span class="dot"></span><span class="name">LR schedule &amp; steps</span><span class="desc">tri_stage (yaml default) vs. cosine + warmup (actual launch override); per-component LR only for reconstruction training.</span></div>
+      </div>
+    </section>
+
+    <section id="bridge">
+      <div class="sec-head"><span class="sec-num mono">06</span><h2>Train → eval bridge</h2></div>
+      <p style="margin-bottom:0;">
+        Once you have a checkpoint from either training path, evaluate it
+        with <code>code/eval/runner.py</code> — see the quick-run command in
+        <code>CLAUDE.md</code>. It works from any of the checkpoint formats
+        above without needing to know which training path produced it.
+      </p>
+    </section>
+
+    <footer>
+      Full reference with file:line citations: <code>ARCHITECTURE.md</code> (repo root).
+      Setup and exact commands: <code>CLAUDE.md</code>.
+      Eval-side detail: <code>code/eval/EVAL_OVERVIEW.md</code>.
+    </footer>
+  </main>
+</div>

@@ -18,6 +18,57 @@ Two things get trained here, and they're separate code paths:
 
 ---
 
+## Documentation index
+
+**This file is the one place to start.** Everything below is every doc in the
+project, grouped by what you're trying to do. If you only read one other
+thing, read `code/eval/EVAL_OVERVIEW.md` (eval) or `ARCHITECTURE.md`
+(architecture) next, depending on which side you're touching.
+
+| Doc | What it's for |
+|---|---|
+| **Start here** | |
+| [`CLAUDE.md`](CLAUDE.md) | This file — setup, training commands, project map. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Technical reference: model architecture, loss setup, checkpoint loading, what's actually been swept. |
+| [`TASKS.md`](TASKS.md) | The live experiment ledger — what's done, what's active, what's next, in priority order. |
+| [`docs/html/`](docs/html/) | Same content as above two, as standalone HTML pages — see [HTML docs](#html-docs) below. |
+| **Training** | |
+| [`docs/RUNAI_TRAINING_FOR_CLAUDE.md`](docs/RUNAI_TRAINING_FOR_CLAUDE.md) | RunAI operational reference: PVC paths, checkpoint copy recipes, submit-script inventory, `/storage`↔`/mnt5` behavior. |
+| [`docs/AUTOENCODER_EXPERIMENTS.md`](docs/AUTOENCODER_EXPERIMENTS.md) | Autoencoder/reconstruction experiment history, architecture detail, and cross-dataset results. |
+| [`code/docs/RECON_2AE_BASEMERGE.md`](code/docs/RECON_2AE_BASEMERGE.md) | Design rationale and API surface for the per-component init/freeze/composite-optimizer machinery (also see the HTML version). |
+| [`docs/CARRYOVER_signal_recon_may2026.md`](docs/CARRYOVER_signal_recon_may2026.md) | Handoff notes for the signal-reconstruction tooling — where checkpoints/logs live, how to resume on another machine. |
+| [`fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md) | Exact commands for the reconstruction-loss Hydra configs, local vs. RunAI. |
+| [`fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md) | Commands for the FE-vs-transformer embedding-collapse ablation. |
+| **Evaluation** | |
+| [`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md) | The current eval package (zero-fairseq) — read this first for anything eval-related. |
+| [`code/eval/README.md`](code/eval/README.md) | Short intro/install notes for the eval package. |
+| [`code/HOW_TO_EVALUATE.md`](code/HOW_TO_EVALUATE.md) | Manual for the older, fairseq-dependent `evaluation_runner.py` workhorse. |
+| [`code/docs/EVALUATION_FLOW.md`](code/docs/EVALUATION_FLOW.md) | Complete reference for that older eval framework — scripts, checkpoint handling, output structure, past experiments. |
+| [`code/eval_metrics_reference.md`](code/eval_metrics_reference.md) | Catalog of representation-quality metrics, implemented and planned. |
+| **Reference / provenance** | |
+| [`code/README.md`](code/README.md) | One-line project tagline (oldest doc in the repo). |
+| [`fairseq/examples/data2vec/README.md`](fairseq/examples/data2vec/README.md) | Upstream fairseq data2vec docs (not SpectralFM-specific — background reading on the base architecture). |
+
+Everything else under `fairseq/` outside `examples/data2vec/` is vendored
+upstream fairseq documentation (translation, speech-to-text, other model
+families) — not part of SpectralFM, safe to ignore unless you're touching
+that specific fairseq subsystem.
+
+### HTML docs
+
+All standalone HTML documentation lives in one place: [`docs/html/`](docs/html/).
+
+| File | Mirrors |
+|---|---|
+| `docs/html/index.html` | **Start here** — hub page linking every doc and resource in the project. |
+| `docs/html/architecture.html` | `ARCHITECTURE.md`, styled for reading rather than editing. |
+| `docs/html/project-story.html` | A non-technical project overview — what SpectralFM is and why, for someone outside the immediate team. |
+| `docs/html/RECON_2AE_BASEMERGE.html` | `code/docs/RECON_2AE_BASEMERGE.md`. |
+| `docs/html/recon_loss_explained.html` | Background on the original data2vec reconstruction-loss design. |
+| `docs/html/transformer_signal_recon_training.html` | Transformer-stage signal-reconstruction training walkthrough. |
+
+---
+
 ## Getting started (new teammate setup)
 
 Do this once, in order, on **Geoffrey** (`ssh Geoffry`, see [Server access](#server-access)):
@@ -79,6 +130,15 @@ python fairseq/create_manifests.py \
 
 To regenerate manifests for every existing subset at once: `bash fairseq/setup_data.sh` (run on Geoffrey). See the [Datasets](#datasets) section below for which subsets already have manifests and which are wired into `sweep_dataset.sh`'s default sweep.
 
+**Example — a small smoke-test subset**, capped to 200 files so a launch finishes in minutes instead of hours:
+```bash
+python fairseq/create_manifests.py \
+  --wav_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_one/wav \
+  --out_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/smoke_200 \
+  --runai_root /storage/noy/SpectralFM/fairseq/data/nova_data/smoke_200/wav \
+  --max_train 200 --valid_frac 0.1
+```
+
 ---
 
 ## Repo layout
@@ -128,7 +188,7 @@ See **[`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md)** for full deta
 - **Four checkpoint modes:** `hf` (HuggingFace), `file`, `dir`, `multiple` (for comparison across training steps)
 - **Report:** markdown + PNG figures + CSV exports written to `output_dir/`
 
-Quick run:
+Quick run — compare every checkpoint in a training run's output dir:
 ```bash
 python -m eval.runner \
   --data_source /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k/wav \
@@ -136,6 +196,16 @@ python -m eval.runner \
   --checkpoint_path /mnt5/noy/fairseq/outputs/<date>/<time>/checkpoints/ \
   --evals checkpoint_comparison \
   --output_dir /mnt5/noy/code/eval_outputs/
+```
+
+Single checkpoint, all four evals, straight from a HuggingFace-format model:
+```bash
+python -m eval.runner \
+  --data_source /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k/wav \
+  --checkpoint_mode hf \
+  --checkpoint_path facebook/data2vec-audio-base \
+  --evals embedding_similarity signal_completion noise_robustness \
+  --output_dir /mnt5/noy/code/eval_outputs/baseline/
 ```
 
 ---
@@ -158,6 +228,21 @@ python code/train_reconstruction.py --mode train --recon_path transformer \
   # --ckpt none = random backbone; pass a fairseq .pt instead to warm-start it
 ```
 `--init_*_ckpt` / `--freeze_*` / `--lr_*` flags (per-component: fe, ln, proj, transformer, and each decoder head) let you mix warm-started and frozen components — e.g. "reconstruction heads on top of a frozen, already-trained SSL backbone." `--lambda_recon_fe` / `--lambda_recon_trans` weight each head's loss; `--lambda_tv_fe` adds a total-variation smoothness penalty on the FE decoder's output.
+
+**Worked example — freeze a pretrained backbone, train only the two decoder heads on top of it:**
+```bash
+python code/train_reconstruction.py --mode train --recon_path transformer \
+  --ckpt /mnt5/noy/SpectralFM/checkpoints/runai/my_ssl_backbone.pt \
+  --init_fe_ckpt /mnt5/noy/SpectralFM/checkpoints/runai/my_ssl_backbone.pt \
+  --init_transformer_ckpt /mnt5/noy/SpectralFM/checkpoints/runai/my_ssl_backbone.pt \
+  --freeze_fe_v2 --freeze_transformer \
+  --lambda_recon_fe 1.0 --lambda_recon_trans 1.0 --lambda_tv_fe 0.1 \
+  --lr_head_fe 1e-4 --lr_head_trans 1e-4 \
+  --data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_1k/wav \
+  --n_samples 950 --steps 10000 --batch_size 128 \
+  --wandb_project spectralfm-autoencoder --out_dir autoencoder_experiments/my_run
+```
+Only the FE decoder and transformer decoder receive gradients here (`--freeze_fe_v2 --freeze_transformer`); the backbone stays exactly as it was trained. This is the "T5-style" recipe from `TASKS.md` — reconstruction heads on top of a frozen, already-good SSL backbone, the direction the T6 finding (see [Loss setup](ARCHITECTURE.md#2-loss-setup)) points toward.
 
 ### Hydra path — same `data2vec_audio` model, launched like backbone training
 

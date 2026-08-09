@@ -181,6 +181,23 @@ wrong (not crashing) result:
    `Data2VecAudioModel` shell with the matching feature extractor swapped in,
    entirely without a fairseq install. See `code/eval/EVAL_OVERVIEW.md`.
 
+**Worked example of mechanism 2's path remap:** a checkpoint trained on
+RunAI has `cfg.model.model_path = "/storage/noy/SpectralFM/checkpoints/runai/base_libri_official.pt"`
+baked in (the base checkpoint it was warm-started from). Load that same
+checkpoint from Geoffrey with:
+```python
+from model_loader import load_fairseq_checkpoint
+model, cfg, info = load_fairseq_checkpoint(
+    "/mnt5/noy/SpectralFM/checkpoints/runai/my_run/checkpoint_best.pt"
+)
+```
+Internally this rewrites `model_path` to
+`/mnt5/noy/SpectralFM/checkpoints/runai/base_libri_official.pt` before
+loading. If that file happens not to exist locally, it instead sets
+`skip_pretrained_weights=True` and loads only the fine-tuned weights already
+inside `checkpoint_best.pt` — either way you get a working model without
+manually editing the checkpoint's embedded config.
+
 ---
 
 ## 5. What can be trained — axes of variation
@@ -198,7 +215,8 @@ wrong (not crashing) result:
    `lambda_tv_fe` — TV swept over {0, 0.01, 0.1, 1.0} in `TASKS.md` T4.
 6. **Per-component checkpoint init** — mix-and-match warm starts per
    component, e.g. "SSL-pretrained transformer, frozen; freshly-initialized
-   decoder heads."
+   decoder heads." Worked example (full command):
+   `CLAUDE.md`'s [Autoencoder / reconstruction training](CLAUDE.md#autoencoder--reconstruction-training) section.
 7. **Masking** — `mask_prob`/`mask_length`/`mask_selection` (backbone
    training only; reconstruction training doesn't mask).
 8. **LR schedule and steps** — `tri_stage` (yaml default) vs. `cosine` +

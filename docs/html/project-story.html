@@ -1,0 +1,437 @@
+<title>SpectralFM</title>
+<meta name="description" content="What SpectralFM is, why it exists, and what we've learned so far.">
+<style>
+  :root {
+    --bg: #0b0e16;
+    --bg-panel: #131826;
+    --ink: #eef1f6;
+    --ink-dim: #9aa3b7;
+    --ink-faint: #5b6378;
+    --line: #232a3d;
+    --accent: #e3a765;
+    --accent-ink: #241505;
+    --accent-2: #5fb8c9;
+    --shadow: 0 1px 2px rgba(0,0,0,0.5);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f4ef;
+    --bg-panel: #ffffff;
+    --ink: #1c1f2b;
+    --ink-dim: #5c6478;
+    --ink-faint: #96a0b5;
+    --line: #e4e0d5;
+    --accent: #b3742a;
+    --accent-ink: #ffffff;
+    --accent-2: #1f7d8c;
+    --shadow: 0 1px 3px rgba(30,25,10,0.08);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f4ef;
+      --bg-panel: #ffffff;
+      --ink: #1c1f2b;
+      --ink-dim: #5c6478;
+      --ink-faint: #96a0b5;
+      --line: #e4e0d5;
+      --accent: #b3742a;
+      --accent-ink: #ffffff;
+      --accent-2: #1f7d8c;
+      --shadow: 0 1px 3px rgba(30,25,10,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark light; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .serif { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; }
+
+  .wrap { max-width: 42rem; margin: 0 auto; padding: 0 1.5rem 6rem; }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 4.5rem 0 3rem; }
+  canvas#spectro {
+    width: 100%;
+    height: 148px;
+    display: block;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+  }
+  .hero-cap {
+    display: flex;
+    justify-content: space-between;
+    font-family: ui-monospace, monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    color: var(--ink-faint);
+    margin-top: 0.5rem;
+    text-transform: uppercase;
+  }
+  .kicker {
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-2);
+    margin: 2.4rem 0 1rem;
+  }
+  h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-weight: 400;
+    font-size: 3rem;
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    margin: 0 0 1.1rem;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+  .dek {
+    font-size: 1.2rem;
+    color: var(--ink-dim);
+    max-width: 34rem;
+    text-wrap: pretty;
+    margin: 0;
+  }
+
+  /* ---------- sections ---------- */
+  section { margin-top: 4rem; }
+  .eyebrow {
+    font-family: ui-monospace, monospace;
+    font-size: 0.74rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.7rem;
+  }
+  h2 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-weight: 400;
+    font-size: 1.9rem;
+    line-height: 1.2;
+    margin: 0 0 1.2rem;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+  p { margin: 0 0 1.05rem; max-width: 40rem; }
+  p:last-child { margin-bottom: 0; }
+  strong { color: var(--ink); font-weight: 600; }
+  .lead { font-size: 1.08rem; color: var(--ink); }
+
+  /* ---------- pull-figure / stat row ---------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  @media (max-width: 560px) { .stats { grid-template-columns: 1fr; } }
+  .stat {
+    background: var(--bg-panel);
+    padding: 1.1rem 1.2rem;
+  }
+  .stat .num {
+    font-family: ui-monospace, monospace;
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .lbl {
+    font-size: 0.82rem;
+    color: var(--ink-dim);
+    margin-top: 0.25rem;
+  }
+
+  /* ---------- finding card ---------- */
+  .finding {
+    border-left: 3px solid var(--accent-2);
+    background: var(--bg-panel);
+    border-radius: 0 10px 10px 0;
+    padding: 1.3rem 1.5rem;
+    margin: 1.6rem 0;
+    box-shadow: var(--shadow);
+  }
+  .finding .tag {
+    font-family: ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent-2);
+    margin-bottom: 0.5rem;
+    display: block;
+  }
+  .finding p:last-child { margin-bottom: 0; color: var(--ink-dim); }
+
+  /* ---------- pipeline mini-diagram ---------- */
+  .chain {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 1.5rem 0;
+    font-family: ui-monospace, monospace;
+    font-size: 0.82rem;
+  }
+  .chain .node {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 0.45rem 0.7rem;
+    color: var(--ink);
+  }
+  .chain .arrow { color: var(--ink-faint); }
+
+  footer {
+    margin-top: 5rem;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--line);
+    color: var(--ink-faint);
+    font-size: 0.86rem;
+  }
+  footer a { color: var(--ink-dim); }
+  footer p { max-width: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <div class="hero">
+    <canvas id="spectro" width="1200" height="296"></canvas>
+    <div class="hero-cap"><span>NOVA radio observatory · single-channel signal</span><span>245 samples</span></div>
+
+    <p class="kicker">SpectralFM</p>
+    <h1>Teaching a model to understand radio signals nobody has labeled</h1>
+    <p class="dek">
+      A self-supervised model that learns the structure of raw radio-telescope
+      spectra without being told what any of it means — because almost none
+      of it has been labeled, and manually labeling millions of signals
+      isn't an option.
+    </p>
+  </div>
+
+  <section>
+    <p class="eyebrow">The problem</p>
+    <h2>Millions of signals, almost no labels</h2>
+    <p class="lead">
+      The NOVA radio observatory produces an enormous volume of 1D spectral
+      data — each sample a 245-point signal, the electromagnetic fingerprint
+      of a brief moment of sky. Some of it has been labeled by hand for
+      specific studies. The overwhelming majority hasn't, and never will be —
+      there's simply too much of it.
+    </p>
+    <p>
+      That's a familiar problem in speech and language, where
+      self-supervised learning let models absorb structure from raw audio or
+      text long before anyone attached a label to it. SpectralFM is that
+      approach, aimed at radio spectra instead.
+    </p>
+  </section>
+
+  <section>
+    <p class="eyebrow">The approach</p>
+    <h2>Borrowing data2vec from speech, applied to spectra</h2>
+    <p class="lead">
+      The core model is <strong>data2vec-audio</strong>, an architecture
+      built for self-supervised speech representation learning. SpectralFM
+      repurposes it for signals that look nothing like speech: 245 samples
+      instead of seconds of 16kHz audio, no phonemes, no words — just raw
+      spectral shape.
+    </p>
+    <p>
+      Training has no labels in the loop at all. A small convolutional
+      front-end compresses each 245-point signal down to a short sequence of
+      feature vectors; a 12-layer transformer encodes them; and the model is
+      trained to predict its own masked-out regions, checked against a
+      slowly-updated copy of itself rather than any ground truth. If the
+      model can fill in what it can't see, it has learned something real
+      about the structure of the signal — this is the whole premise of
+      self-supervised learning, applied to a domain where hand-labeling was
+      never going to scale.
+    </p>
+    <div class="chain">
+      <span class="node">raw signal</span>
+      <span class="arrow">→</span>
+      <span class="node">conv feature extractor</span>
+      <span class="arrow">→</span>
+      <span class="node">transformer</span>
+      <span class="arrow">→</span>
+      <span class="node">predict what's masked</span>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">What's been built</p>
+    <h2>A backbone, an evaluation suite, and a second line of experiments</h2>
+    <p class="lead">
+      Beyond the core training pipeline, three things now exist:
+    </p>
+    <div class="stats">
+      <div class="stat"><div class="num">9.1M</div><div class="lbl">signals in the largest training set</div></div>
+      <div class="stat"><div class="num">7</div><div class="lbl">evaluation methods, from embedding similarity to label regression</div></div>
+      <div class="stat"><div class="num">3</div><div class="lbl">reconstruction decoder heads, testing what survives at each depth</div></div>
+    </div>
+    <p>
+      Since the backbone never sees a label during training, judging whether
+      it actually learned anything useful requires a dedicated evaluation
+      pipeline — measuring things like whether similar signals end up with
+      similar embeddings, whether the model is robust to noise, and whether
+      its representations are predictive of the handful of labels that do
+      exist. Alongside that, a second, newer line of work bolts
+      reconstruction decoders onto a trained backbone, testing how much of
+      the original signal survives at each stage of compression — the
+      autoencoder work.
+    </p>
+  </section>
+
+  <section>
+    <p class="eyebrow">What we've learned</p>
+    <h2>The clearest result so far is a negative one</h2>
+    <p class="lead">
+      The evaluation suite surfaced a finding that's now steering the next
+      round of work more than anything else:
+    </p>
+    <div class="finding">
+      <span class="tag">Reconstruction ≠ representation</span>
+      <p>
+        Backbones trained to <em>reconstruct</em> the original signal well
+        turn out to <strong>not</strong> be the ones whose embeddings are
+        useful downstream. The original self-supervised backbone — trained
+        purely to predict its own masked regions, never explicitly to
+        reconstruct anything — is the only one so far whose embeddings are
+        meaningfully predictive of real labels. Every reconstruction-trained
+        variant tested scores close to zero on that same measure, even
+        though it reconstructs the signal more faithfully.
+      </p>
+    </div>
+    <p>
+      In other words: a model that's good at rebuilding what it saw isn't
+      automatically a model that understood what it saw. That's an
+      unintuitive result worth taking seriously, and it's currently shaping
+      the plan — rather than training a backbone to reconstruct signals
+      directly, the more promising direction is adding reconstruction
+      decoders <em>on top of</em> a backbone that was already trained the
+      original, purely self-supervised way, and keeping that backbone
+      frozen.
+    </p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Where this goes next</p>
+    <h2>More systematic sweeps, not more raw scale</h2>
+    <p class="lead">
+      The largest training runs so far have already used most of the
+      available single-channel data. The open questions now are less about
+      scale and more about design: which parts of the model should be
+      frozen versus trained, how the reconstruction decoders should be
+      weighted against each other, and whether the same "reconstruction
+      isn't representation" pattern holds once decoders are layered onto a
+      frozen, already-good backbone instead of training through it.
+    </p>
+  </section>
+
+  <footer>
+    <p>Technical deep-dive (model architecture, training config, checkpoint formats): see the SpectralFM architecture reference.</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var canvas = document.getElementById('spectro');
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+
+  function isDark() {
+    var t = document.documentElement.getAttribute('data-theme');
+    if (t === 'dark') return true;
+    if (t === 'light') return false;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+
+  function draw() {
+    var dark = isDark();
+    var bg = dark ? '#0d1220' : '#efece3';
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    var cols = 245;
+    var colW = W / cols;
+    var rows = 64;
+    var rowH = H / rows;
+
+    // Deterministic-looking synthetic spectrogram: a few drifting bands + noise.
+    var seed = 1337;
+    function rnd() {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return (seed % 10000) / 10000;
+    }
+
+    var bands = [
+      { center: 0.30, width: 0.10, amp: 0.9, drift: 0.10 },
+      { center: 0.55, width: 0.06, amp: 0.7, drift: -0.06 },
+      { center: 0.75, width: 0.14, amp: 0.55, drift: 0.03 }
+    ];
+
+    var accentH = dark ? [227, 167, 101] : [179, 116, 42];   // amber
+    var accent2 = dark ? [95, 184, 201] : [31, 125, 140];    // cyan
+
+    for (var c = 0; c < cols; c++) {
+      var t = c / cols;
+      for (var r = 0; r < rows; r++) {
+        var y = r / rows;
+        var v = 0.03 + rnd() * 0.05; // base noise floor
+        for (var b = 0; b < bands.length; b++) {
+          var band = bands[b];
+          var center = band.center + Math.sin(t * 6.0 + b) * band.drift;
+          var d = Math.abs(y - center);
+          if (d < band.width) {
+            var falloff = 1.0 - (d / band.width);
+            v += band.amp * falloff * falloff * (0.7 + 0.3 * rnd());
+          }
+        }
+        v = Math.min(1, v);
+        if (v < 0.03) continue;
+        var mix = b_lerp(v);
+        ctx.fillStyle = 'rgba(' + mix.r + ',' + mix.g + ',' + mix.b + ',' + Math.min(1, v + 0.08) + ')';
+        ctx.fillRect(c * colW, H - (r + 1) * rowH, colW + 0.6, rowH + 0.6);
+      }
+    }
+
+    function b_lerp(v) {
+      // low intensity -> accent2 (cyan), high intensity -> accentH (amber)
+      var k = Math.min(1, v);
+      return {
+        r: Math.round(accent2[0] + (accentH[0] - accent2[0]) * k),
+        g: Math.round(accent2[1] + (accentH[1] - accent2[1]) * k),
+        b: Math.round(accent2[2] + (accentH[2] - accent2[2]) * k)
+      };
+    }
+  }
+
+  draw();
+
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', draw);
+  var mo = new MutationObserver(draw);
+  mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  window.addEventListener('resize', function () {
+    // canvas is drawn at fixed internal resolution, CSS scales it — no redraw needed on resize
+  });
+})();
+</script>
