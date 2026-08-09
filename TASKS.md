@@ -353,12 +353,10 @@ expressive that decoder architecture happens to be — currently unmeasured.
   are robust to decoder-architecture choice, or need a caveat attached.
 
 ## Training pipeline — 3AE + d2v joint round (proposed)
-Six-step **strictly sequential** pipeline (Steps 0–5), visualized in the
+Five-step **strictly sequential** pipeline (Steps 0–4), visualized in the
 training-plan artifact (FE / Projection / Transformer / Decoders / Loss /
-Hyperparams grid + architecture diagram). Each step (other than the Step 1
-side-probe) freezes and builds on the *immediately preceding* step's
-checkpoint: **T8 → T9 (side probe, doesn't gate anything) and T8 → T10 → T11
-→ T12 → T13 (main chain, full joint runs last)**.
+Hyperparams grid + architecture diagram). Fully linear, no side branch:
+**T8 → T9 → T10 → T11 → T12 (full joint runs last)**.
 
 **Correction (2026-08-09): most of this round needs far less new code than
 originally scoped.** `fairseq/examples/data2vec/models/data2vec_audio.py` on
@@ -389,10 +387,35 @@ merge. **Note:** the Geoffrey checkout inspected for this doc
 (`/mnt5/noy/SpectralFM`, `recon/2ae-basemerge`, both worktrees) did not yet
 show `proj_recon_decoder`/`lambda_recon_proj` in
 `fairseq/examples/data2vec/models/data2vec_audio.py` as of this check — likely
-a sync/push gap, not a correctness question. T11 and T13 are downgraded from
-"new engineering" to **existing — verify**, matching T8/T10/T12. First step
-on either is confirming the merged code is present and correct on whichever
-checkout is actually used to launch, not building anything new.
+a sync/push gap, not a correctness question. T11 and T13 (now T10 and T12,
+see Correction 3) are downgraded from "new engineering" to **existing —
+verify**, matching T8/T10/T12. First step on either is confirming the merged
+code is present and correct on whichever checkout is actually used to
+launch, not building anything new.
+
+**Correction 3 (2026-08-09): sequence simplified per user request — old
+Step 1 removed, old Step 2 restructured, and every step's loss now carries
+an explicit λ_d2v weight.**
+- **Removed:** the old Step 1 (frozen-backbone baseline / 3AE-decoders-only
+  side probe, formerly T9) — a diagnostic that never fed into the main chain,
+  judged unnecessary. Everything below is renumbered down by one: old
+  T10→T9, T11→T10, T12→T11, T13→T12; "Step N" labels shift the same way
+  (old Step 2→1, 3→2, 4→3, 5→4).
+- **Changed:** Step 1 (T9, formerly "FE fine-tune: attach decoder") no
+  longer continues T8's FE checkpoint — it now starts **both FE and
+  projection from random init together**, transformer still frozen from
+  base_libri. Only the FE decoder is attached (same as before); projection
+  is unfrozen but has no reconstruction term of its own here — it's shaped
+  purely by the d2v gradient, the same mechanism as T8's own optional
+  joint-training variant.
+- **New: `lambda_d2v`.** Every loss expression below now carries an explicit
+  weight on the d2v term, matching how `lambda_recon_fe/proj/trans` already
+  work — not an implicit weight of 1. This field doesn't exist yet: the
+  current `forward()` writes `result["losses"]["regression"] = loss.sum() *
+  scale` with no lambda multiplier. Add `lambda_d2v: float = field(default=
+  1.0, ...)` and multiply — small, same shape of change made three times
+  already for the recon terms. Needed before any step below can be launched
+  with a non-default λ_d2v.
 
 ### T8. Step 0 — FE pretrain via d2v loss only, no decoder (config work, not new code — validate first)
 Train the FE end to end against the **d2v self-distillation loss only** — no
@@ -407,18 +430,19 @@ forward pass (d2v's loss reads the transformer's top-k-layer output) but are
   widens which components receive gradients in this step. `freeze_proj` is
   already an independent switch (see `_maybe_apply_recon_components()`), so
   this is a one-flag change, not new engineering.
-- Loss: d2v only.
+- Loss: λ_d2v·d2v (`lambda_d2v` is new — see Correction 3 above).
 - Hyperparams: **needs reconsideration**, not carried over from the old
   recon-only design. d2v self-distillation conventionally trains much longer
   than a reconstruction pretrain — Pipeline B's own `spectralfm_base.yaml` runs
   to `max_update: 400000`. Start with a short smoke run, then pick a real step
   budget from that precedent. Data: `single_channel_one` (999k) or
   `single_channel_all` (9.1M).
-- **Not new engineering** — `train_only_fe=True` is already the default,
-  `lambda_recon_fe`/`lambda_recon_trans` already default to 0.0. This is a
-  hydra launch config (base off `spectralfm_base.yaml` or the existing
-  `recon_loss/` config family), setting `init_proj_ckpt`/`init_transformer_ckpt`
-  = base_libri paths and leaving `init_fe_ckpt` unset.
+- **Not new engineering (aside from `lambda_d2v`)** — `train_only_fe=True` is
+  already the default, `lambda_recon_fe`/`lambda_recon_trans` already default
+  to 0.0. This is a hydra launch config (base off `spectralfm_base.yaml` or
+  the existing `recon_loss/` config family), setting
+  `init_proj_ckpt`/`init_transformer_ckpt` = base_libri paths and leaving
+  `init_fe_ckpt` unset.
 - **Real blocker: validate before relying on it.** This code path is
   uncommitted and its last commit message ("Fix stagnant regression loss")
   indicates recent, possibly unresolved debugging. First actual task: run a
@@ -434,49 +458,34 @@ forward pass (d2v's loss reads the transformer's top-k-layer output) but are
   foundation for the FE everything downstream inherits — the motivation for
   moving off the old recon-only Step 0.
 
-### T9. Step 1 — Frozen-backbone baseline (3AE decoders only, side probe)
-Runs off T8 directly and doesn't feed into T10–T13 — a diagnostic, not a link
-in the main chain. Uses Pipeline C (`train_reconstruction.py`), not the model
-native path — unchanged, always-existing infra.
-- FE: FROZEN, init = T8 (now d2v-pretrained, not reconstruction-pretrained).
-  Projection: FROZEN, init = base_libri (linear; shape-compatible but
-  distribution-mismatched). Transformer: FROZEN, init = base_libri. Decoders:
-  all three TRAIN, random init. Loss: `recon_fe + recon_proj + recon_trans`,
-  λ=1.0 each, no d2v.
-- Hyperparams: 2,000–3,000 steps, lr 1e-4, data `single_channel_1k`.
-- Why: base_libri has no FE tensors that fit SpectralFM's conv stack — `FE
-  from base_libri` silently no-ops (shape mismatch, tensors dropped). Sourcing
-  FE from T8 instead makes this a meaningful control, and now also measures
-  how much signal survives in an FE trained with zero reconstruction
-  supervision.
-- Acceptance: completed checkpoint, clean control point for the main chain.
-
-### T10. Step 2 — FE fine-tune: attach decoder, add recon(fe) on top of d2v (config work — precedented by the existing basemerge yaml)
-First link in the main chain — continues T8's checkpoint, now attaching a
-decoder and reconstruction loss for the first time.
-- FE: TRAIN, init = T8, continuing training. Projection/transformer: FROZEN,
-  init = base_libri. Decoders: FE decoder TRAIN (random init, newly attached);
-  projection/transformer decoders not built (λ=0). Loss: d2v + λ_fe·recon_fe
+### T9. Step 1 — FE + projection jointly from random init: attach FE decoder, add recon(fe) on top of d2v (config work — precedented by the existing basemerge yaml)
+First link in the (now fully linear) chain — starts fresh rather than
+continuing T8, training FE and projection together and attaching the FE
+decoder for the first time.
+- FE: TRAIN, random init, 5-layer conv (245→47). Projection: TRAIN, random
+  init. Transformer: FROZEN, init = base_libri. Decoders: FE decoder TRAIN
+  (random init, newly attached); projection/transformer decoders not built
+  (λ=0) — projection is unfrozen but only shaped by the d2v gradient here, no
+  `recon_proj` term yet (that's T10's job). Loss: λ_d2v·d2v + λ_fe·recon_fe
   [+ λ_tv·TV(recon_fe)].
-- Hyperparams: 5,000–10,000 steps, lr_fe 1e-5 (fine-tune LR — continuing a
-  pretrained checkpoint, not training from scratch), λ sweep {0.1, 1, 10}.
-- **Not new engineering** — same native model as T8, `lambda_recon_fe>0` is
-  literally what `spectralfm_recon_loss_basemerge.yaml` already exercises
-  (that config also unfreezes the transformer, which this step doesn't want —
-  set `freeze_transformer_v2: true` on top of it). No TV term exists natively
-  in the model yet (Pipeline C has it via `_tv_loss`) — port it over if wanted,
+- Hyperparams: 5,000–10,000 steps, lr_fe 1e-5, lr_proj 1e-5, λ sweep
+  {0.1, 1, 10} for λ_fe.
+- **Not new engineering (aside from `lambda_d2v`)** — same native model as
+  T8, `lambda_recon_fe>0` is literally what
+  `spectralfm_recon_loss_basemerge.yaml` already exercises. Set
+  `freeze_fe_v2: false`, `freeze_proj: false`, `freeze_transformer_v2: true`
+  — all existing independent switches. No TV term exists natively in the
+  model yet (Pipeline C has it via `_tv_loss`) — port it over if wanted,
   small addition.
-- Acceptance: sweep completed with logged d2v + recon_fe curves; compare
-  against T9's frozen-FE recon_fe number. Winning config's FE checkpoint is
-  what T11–T13 build on.
+- Acceptance: sweep completed with logged d2v + recon_fe curves. Winning
+  config's FE+projection checkpoint is what T10–T12 build on.
 
-### T11. Step 3 — Projection fine-tune + d2v, 3 capacities (existing — verify)
-- FE: FROZEN, init = **T10's winning checkpoint** (not T8 directly — the
-  chain carries forward the recon-refined FE). Projection: TRAIN, 3 variants —
-  linear / mlp768 / mlp2048, random init (T2 recipe). Transformer: FROZEN,
-  init = base_libri. Decoders: projection decoder TRAIN (random init, ×3); FE
-  decoder carried from T10 but frozen; transformer decoder not built (λ=0).
-  Loss: d2v + λ_proj·recon_proj.
+### T10. Step 2 — Projection fine-tune + d2v, 3 capacities (existing — verify)
+- FE: FROZEN, init = **T9's winning checkpoint**. Projection: TRAIN, 3
+  variants — linear / mlp768 / mlp2048, random init (T2 recipe). Transformer:
+  FROZEN, init = base_libri. Decoders: projection decoder TRAIN (random init,
+  ×3); FE decoder carried from T9 but frozen; transformer decoder not built
+  (λ=0). Loss: λ_d2v·d2v + λ_proj·recon_proj.
 - Hyperparams: 10,000 steps, lr 1e-5 (fine-tune LR), warmup 500 — not the
   original 2k steps: T6 found capacity ordering flips (mlp2048 only wins once
   trained long enough). Since T6 already crowned mlp2048 the winner, consider
@@ -487,11 +496,11 @@ decoder and reconstruction loss for the first time.
   checkpoints (T6 already crowned mlp2048 the winner at 10k steps) and
   fine-tune further under the new d2v-joint loss instead of starting over —
   decide before launching.
-- **Not new engineering — per user (2026-08-09), the projection decoder has
-  already been merged into the native model, with a minor adjustment from
-  the merge.** Freeze granularity already exists (`freeze_proj=False` while
-  FE/transformer stay frozen via `freeze_fe_v2`/`freeze_transformer_v2`).
-  Before launching, verify:
+- **Not new engineering (aside from `lambda_d2v`) — per user (2026-08-09),
+  the projection decoder has already been merged into the native model, with
+  a minor adjustment from the merge.** Freeze granularity already exists
+  (`freeze_proj=False` while FE/transformer stay frozen via
+  `freeze_fe_v2`/`freeze_transformer_v2`). Before launching, verify:
   - `proj_recon_decoder` (or equivalent) is instantiated in
     `data2vec_audio.py` alongside `fe_recon_decoder`/`trans_recon_decoder`,
     and a `lambda_recon_proj` config field gates it.
@@ -508,43 +517,43 @@ decoder and reconstruction loss for the first time.
     it yet.
 - Acceptance: verification above passes; all 3 capacity variants (or just
   mlp2048) trained to completion with logged d2v + recon curves. Winning
-  variant is what T12–T13 build on.
+  variant is what T11–T12 build on.
 
-### T12. Step 4 — Transformer fine-tune + d2v (config work — confirm MLP-proj checkpoint loading first)
-- FE: FROZEN, init = **T10's checkpoint**. Projection: FROZEN, init =
-  **T11's winning variant**. Transformer: TRAIN, init = base_libri, trained on
+### T11. Step 3 — Transformer fine-tune + d2v (config work — confirm MLP-proj checkpoint loading first)
+- FE: FROZEN, init = **T9's checkpoint**. Projection: FROZEN, init =
+  **T10's winning variant**. Transformer: TRAIN, init = base_libri, trained on
   NOVA data. Decoders: transformer decoder TRAIN (random init); FE/projection
-  decoders carried from T10/T11 but frozen. Loss: d2v + λ_trans·recon_trans.
+  decoders carried from T9/T10 but frozen. Loss: λ_d2v·d2v + λ_trans·recon_trans.
 - Hyperparams: 10,000–20,000 steps (effectively continued SSL pretraining),
   lr 1e-5 (fine-tune LR), warmup 500.
-- **Not new engineering for the loss/freeze mechanics** — `freeze_transformer_v2
-  =False` + `lambda_recon_trans>0` is native, same as T8/T10. One thing to
-  confirm first: if T11's winning projection is an MLP variant (mlp768/
-  mlp2048), check `recon_components.py`'s `load_post_extract_proj_from_ckpt`
-  actually round-trips an MLP shape via `init_proj_ckpt` — T2 solved this for
-  the eval-side loader; unclear whether Pipeline B's loader was updated to
-  match.
+- **Not new engineering for the loss/freeze mechanics (aside from
+  `lambda_d2v`)** — `freeze_transformer_v2=False` + `lambda_recon_trans>0` is
+  native, same as T8/T9. One thing to confirm first: if T10's winning
+  projection is an MLP variant (mlp768/mlp2048), check
+  `recon_components.py`'s `load_post_extract_proj_from_ckpt` actually
+  round-trips an MLP shape via `init_proj_ckpt` — T2 solved this for the
+  eval-side loader; unclear whether Pipeline B's loader was updated to match.
 - Why this one matters: most direct test of the T6 verdict — pair an
   SSL-informative backbone with reconstruction. Compare directly against T5b.
 - Acceptance: completed checkpoint, compared against T5b.
 
-### T13. Step 5 — Full joint fine-tune (existing — verify, depends on T11)
-- FE: TRAIN, init = T10's winner. Projection: TRAIN, init = T11's winner.
-  Transformer: TRAIN, init = T12's checkpoint (or base_libri, if T12
-  underperforms T5b). Decoders: all three TRAIN, seeded from T10/T11/T12's
-  winning configs. Loss: d2v + λ_fe·recon_fe + λ_proj·recon_proj +
+### T12. Step 4 — Full joint fine-tune (existing — verify, depends on T10)
+- FE: TRAIN, init = T9's winner. Projection: TRAIN, init = T10's winner.
+  Transformer: TRAIN, init = T11's checkpoint (or base_libri, if T11
+  underperforms T5b). Decoders: all three TRAIN, seeded from T9/T10/T11's
+  winning configs. Loss: λ_d2v·d2v + λ_fe·recon_fe + λ_proj·recon_proj +
   λ_trans·recon_trans [+ λ_tv·TV(recon_fe)].
 - Hyperparams: largest step budget of the round; lr 1e-5 (fine-tune LR); λs
-  carried over from T10–T12.
-- Mechanically native (`train_only_fe=False` or all three `freeze_*_v2=False`,
-  `lambda_recon_fe/trans>0` already exist, and per T11 `lambda_recon_proj`
-  should too now) — once T11's verification checklist passes, this step is
-  pure config, no new code.
-- Run only after T10, T11, T12 land in sequence — seed lambdas/inits from
+  carried over from T9–T11.
+- Mechanically native aside from `lambda_d2v` (`train_only_fe=False` or all
+  three `freeze_*_v2=False`, `lambda_recon_fe/trans>0` already exist, and per
+  T10 `lambda_recon_proj` should too now) — once T10's verification checklist
+  passes, this step is pure config, no new code.
+- Run only after T9, T10, T11 land in sequence — seed lambdas/inits from
   whichever config wins at each link. Hardest run to attribute if metrics
   move, since three components change at once.
-- Acceptance: completed checkpoint, full comparison eval against T9's
-  frozen-baseline probe and against T10–T12 individually.
+- Acceptance: completed checkpoint, full comparison eval against T9–T11
+  individually.
 
 ### T3. Evaluate transformer without masking (eval experiment, no training)
 Find where masking is applied in the transformer forward path and run the evaluation with
