@@ -1,8 +1,12 @@
 # SpectralFM Eval Package — Overview
 
-Lightweight evaluation package under `code/eval/`. **No fairseq required.**
-See `README.md` for installation and the Geoffrey run guide; this file documents
-the architecture and every evaluation in code-level detail.
+The current, actively-maintained evaluation package for SpectralFM models, under `code/eval/`.
+**No fairseq required.** This is the single doc for evaluation — installation, how to run it,
+every method in detail, checkpoint formats, and output structure.
+
+(There's an older, fairseq-dependent eval system — `code/evaluation_runner.py` and friends —
+that predates this package. It's not documented here; see `TASKS.md`'s cleanup task for its
+status. Everything below is about `code/eval/` only.)
 
 ---
 
@@ -24,9 +28,27 @@ code/eval/
 │   └── checkpoint_comparison.py  # Eval 7: run Evals 1,3,4,5,6 across multiple checkpoints
 ├── runner.py                     # EvalRunner + EvalConfig + CLI entry point
 ├── report.py                     # HTML + markdown + PNG + CSV report generator
-├── requirements.txt              # minimal install (see table below)
-└── README.md                     # installation + how to run on Geoffrey
+├── requirements.txt               # minimal install (see table below)
+└── README.md                     # short pointer to this file
 ```
+
+---
+
+## Installation
+
+Requires Python ≥ 3.10. No fairseq, no conda dependency — a plain venv works:
+
+```bash
+git clone https://github.com/noytau/SpectralFM.git && cd SpectralFM
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r code/eval/requirements.txt
+```
+
+First run downloads `facebook/data2vec-audio-base` (~360 MB) from HuggingFace;
+set `HF_HOME` if you need a custom cache location.
+
+On **Geoffrey**, the `spectralfm_env` conda environment already has everything installed
+(torch 2.8, transformers 4.57) — no separate install needed there.
 
 ---
 
@@ -72,18 +94,59 @@ results = runner.run()
 runner.report(results)
 ```
 
+### Running on Geoffrey — a real worked example
+
+```bash
+ssh Geoffry
+
+# Pick a free GPU first (GPU 3 is dead — currently use 4):
+nvidia-smi
+
+cd /mnt5/noy/SpectralFM/code
+CUDA_VISIBLE_DEVICES=4 /mnt5/noy/miniconda3/envs/spectralfm_env/bin/python3 -u -m eval.runner \
+  --data_source /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k/wav \
+  --checkpoint_mode multiple \
+  --checkpoint_paths \
+    /mnt5/noy/SpectralFM/checkpoints/recon_runs_copied/tv_fe_short_3.pt \
+    /mnt5/noy/SpectralFM/checkpoints/recon_runs_copied/3ae_norm_exp2_long.pt \
+  --evals checkpoint_comparison signal_reconstruction \
+  --recon_ckpt /mnt5/noy/SpectralFM/checkpoints/recon_runs_copied/tv_fe_short_3.pt \
+  --n_holdout_stacks 20 --k 5 --batch_size 64 \
+  --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data \
+  --labeled_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \
+  --output_dir /mnt5/noy/SpectralFM/code/eval_outputs
+```
+
+Outputs land in `/mnt5/noy/SpectralFM/code/eval_outputs/<YYYY-MM-DD_HH-MM-SS>/`.
+Open `eval_report.html` in a browser — it is fully self-contained (figures base64-embedded).
+For long runs, wrap with `nohup ... > /tmp/eval_run.log 2>&1 &` and `tail -f` the log.
+
+**Runtime:** ~10 min per checkpoint on one RTX 2080 Ti (label regression on 2,000 samples
+is the slowest stage) + ~1 min for reconstruction.
+
+### Data paths on the cluster
+
+The NFS volume is mounted at `/mnt5/noy/` on Geoffrey and `/storage/noy/` on RunAI (same
+data) — eval code remaps `/storage/` → `/mnt5/` automatically.
+
+| Purpose | Path |
+|---|---|
+| Eval data (`--data_source`) | `/mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_10k/wav` |
+| Canonical panel root (`--nova_data_dir`) | `/mnt5/noy/SpectralFM/fairseq/data/nova_data` |
+| Labeled data (`--labeled_data_dir`) | `/mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data` |
+
 ---
 
 ## Block 1 — Checkpoint Loader (`checkpoint_loader.py`)
 
 Four loading modes, all using raw `torch.load` or HuggingFace — zero fairseq dependency.
 
-| Mode | When to use |
-|------|-------------|
-| `hf` | Pull `facebook/data2vec-audio-base` from HuggingFace (no local file) |
-| `file` | Single `.pt` file — format auto-detected by key inspection (below) |
-| `dir` | Directory scan: prefers `checkpoint_best.pt` → `checkpoint_last.pt` → highest numbered |
-| `multiple` | Directory glob or explicit list → `[(label, model, path), ...]` for comparison eval |
+| Mode | `--checkpoint_path` | When to use |
+|------|---|-------------|
+| `hf` | — | Pull `facebook/data2vec-audio-base` from HuggingFace (no local file) |
+| `file` | `.pt` file | Single checkpoint — format auto-detected by key inspection (below) |
+| `dir` | directory | Picks `checkpoint_best.pt` → `checkpoint_last.pt` → highest numbered |
+| `multiple` | directory (or `--checkpoint_paths f1.pt f2.pt ...`) | All checkpoints for `checkpoint_comparison` |
 
 Format auto-detection (`_detect_checkpoint_type`):
 
@@ -140,38 +203,45 @@ build_dataloader(df, mask_ratio, masking_type, batch_size)
 
 ## Block 4 — Metrics (`metrics.py`)
 
-Pure functions (numpy/scipy/sklearn), ported from the legacy `eval_metrics.py`:
-`knn_retrieval`, `compute_component_clustering_metrics` (ARI/NMI/V-measure/silhouette/
-KNN-precision/mAP/variance-ratio), `compute_linear_probing_metrics` (RidgeCV probe),
-`compute_extended_signal_completion`.
+Pure functions (numpy/scipy/sklearn): `knn_retrieval`, `compute_component_clustering_metrics`
+(ARI/NMI/V-measure/silhouette/KNN-precision/mAP/variance-ratio), `compute_linear_probing_metrics`
+(RidgeCV probe), `compute_extended_signal_completion`.
 
 ---
 
-## Eval 1 — Embedding Similarity / same-stack query (`evaluations/embedding_similarity.py`)
+## The 7 evaluation methods
+
+Every method runs **standalone** (`--evals <name>`) and (except `signal_reconstruction`)
+**per-checkpoint inside `checkpoint_comparison`** — identical figures and CSVs either way.
+
+### 1. `embedding_similarity` — same-stack query (k-NN retrieval)
 
 **Question:** Does the embedding space group same-stack samples better than raw input space?
 
-For each sample: find top-k cosine neighbors in input space and embedding space; count
-same-stack neighbors. Match score > 50 means the model beats the raw-input baseline.
+For each held-out sample: find its top-k nearest neighbors by cosine similarity in (a) raw
+input space and (b) embedding space (mean-pooled `last_hidden_state`), and count how many
+neighbors come from the same stack (observation).
 
 ```python
 match_score = ((len(emb_matches) - len(inp_matches) + k) / (2 * k)) * 100  # 0–100
 ```
 
-Returns: `embedding_stack_match_rate`, `input_stack_match_rate`, `match_score_avg`,
-`results_df` (per-query neighbors + similarities → `match_df*.csv`), `embeddings`,
-`inputs`, `similarity_distributions` (intra/inter-stack, full sim matrices).
-Figures: cosine maps, distribution histograms, best/worst query neighbor grids.
+- **Metrics:** `embedding_stack_match_rate`, `input_stack_match_rate`, `match_score_avg`
+  (0–100; >50 ⇒ embeddings preserve stack structure better than raw signals).
+- **Figures:** cosine similarity maps (raw + softmax, input & embedding space), intra/inter-stack
+  similarity distributions, match-count histograms, `similarity_comparison_{best,worst}_query*.png`
+  — 3×(k+1) grids: query signal, its embedding-space neighbors, its input-space neighbors with
+  similarity values.
+- **CSV:** `match_df[_<ckpt>].csv` — per-query neighbors, similarities, stack matches,
+  `match_diff`, `match_score`.
 
----
-
-## Eval 2 — Signal Reconstruction (`evaluations/signal_reconstruction.py`)
+### 2. `signal_reconstruction` — true reconstruction through the pipeline
 
 **Question:** Can each pipeline stage be decoded back into the original signal?
 
-True reconstruction through the full pipeline — three pathways, each with its own
-trained decoder. Ported from the `reconstruction-loss-experiments` branch
-(`train_reconstruction.py` / `compare_fe_vs_trans_recon.py`).
+Reconstructs the raw signal from three pipeline stages and scores per-sample MSE against the
+(optionally layer-normed) input. Takes its **own checkpoint args**, independent of
+`--checkpoint_mode`, because the decoders are trained separately from the eval backbone:
 
 | Pathway | Tap point (training hook) | Decoder | Ckpt key |
 |---------|---------------------------|---------|----------|
@@ -179,8 +249,7 @@ trained decoder. Ported from the `reconstruction-loss-experiments` branch
 | **Projection** | `post_extract_proj` output `[B,47,768]` | `TransformerMirrorDecoder` | `proj_mirror` |
 | **Transformer** | encoder output `[B,47,768]` | `TransformerMirrorDecoder` | `transformer_mirror` |
 
-Checkpoint options (independent of `--checkpoint_mode` — reconstruction decoders are
-trained and saved separately from the eval backbone):
+Checkpoint options:
 
 ```bash
 --recon_ckpt    3ae.pt       # single 3AE file: embedded backbone + all heads → ALL pathways
@@ -189,16 +258,16 @@ trained and saved separately from the eval backbone):
 --recon_normalize true|false # override the ckpt's recorded per-sample layer_norm flag
 ```
 
-The 3AE path runs one backbone forward per batch with hooks at the three tap points —
-exactly mirroring training. Score: per-sample `MSE(recon, target)` where target is the
-(optionally normalized) input.
+The 3AE path runs one backbone forward per batch with hooks at the three tap points — exactly
+mirroring training. Score: per-sample `MSE(recon, target)` where target is the (optionally
+normalized) input.
 
-Returns: `recon_{fe,proj,tr}_mse_mean/median`, `results_df` (→ `recon_df.csv`),
-example `panel`. Figures: `recon_overlay.png` (target vs each pathway), `recon_mse_bars.png`.
+- **Metrics:** `recon_{fe,proj,tr}_mse_mean` / `_median`.
+- **Figures:** `recon_overlay.png` (target vs each pathway, per-row y-limits), `recon_mse_bars.png`
+  (per-sample, log scale).
+- **CSV:** `recon_df.csv` — per-sample `fe_mse` / `proj_mse` / `tr_mse`.
 
----
-
-## Eval 3 — Noise Robustness (`evaluations/noise_robustness.py`)
+### 3. `noise_robustness` — embedding stability under input noise
 
 **Question:** How stable are embeddings when noise is added to the input?
 
@@ -213,36 +282,31 @@ Score = cosine similarity between clean and noisy embeddings. Higher = more robu
 | `gain_low` | `x * N(1, 0.05)` |
 | `gain_high` | `x * N(1, 0.1)` |
 
-Returns: `summary = {noise_type: mean_cos_sim}`, `results_df` (→ `noise_df*.csv`),
-`clean_data`, `noisy_data`. Figures: **Noise Example Grid** (2×3 over all types,
-clean vs noisy + emb sim per cell), best/worst clean-vs-noisy overlays, summary bars.
+- **Metrics:** mean cosine similarity per noise type.
+- **Figures:** `noise_example_grid[_<ckpt>].png` — 2×3 grid over all noise types, clean vs noisy
+  signal + embedding similarity per cell; `noisy_vs_clean_<type>*.png` — best/worst 3 samples per
+  noise type; summary bar chart per noise type (across checkpoints in comparison mode).
+- **CSV:** `noise_df[_<ckpt>].csv` — per-sample per-noise-type similarity.
 
----
-
-## Eval 4 — Clustering (`evaluations/clustering.py`)
+### 4. `clustering` — stack recovery with KMeans
 
 **Question:** Does KMeans on embeddings recover the stack structure?
 
-KMeans with k = n_stacks, scored against true `stack_idx` via
-`metrics.compute_component_clustering_metrics`.
+KMeans with k = n_stacks, scored against true `stack_idx` via `metrics.compute_component_clustering_metrics`.
 
-Returns: `comp_cluster_ari`, `comp_cluster_nmi`, `comp_cluster_vmeasure`,
-`comp_cluster_silhouette`, `comp_cluster_knn_precision`, `comp_cluster_retrieval_map`,
-`comp_cluster_variance_ratio`, `comp_cluster_emb_input_align`, plus `pred_labels`.
-Figures: PCA(50) → t-SNE and UMAP scatters colored by KMeans cluster.
+- **Metrics:** ARI, NMI, V-measure, silhouette, same-stack KNN precision, retrieval mAP,
+  inter/intra variance ratio, embedding–input distance alignment.
+- **Figures:** `kmeans_clustered_then_tsne[_<ckpt>].png` and `..._umap...png` — PCA(50) →
+  t-SNE/UMAP scatter colored by KMeans cluster.
 
----
-
-## Eval 5 — Label Regression (`evaluations/label_regression.py`)
+### 5. `label_regression` — parameter_0 linear probe (multi-channel)
 
 **Question:** Do embeddings encode `parameter_0` better than the raw signal?
 
-RidgeCV (5-fold cross-val) probe on inputs vs embeddings, using
-`--labeled_data_dir` (`labels.tsv` + wavs, default 2,000 spectra).
-
-**Multi-channel:** wavs follow `dataset<D>_comp<C>_spec_<S>.wav`; components of the
-same spectrum share one label. The eval runs three configurations on the SAME spectra
-(only those having all 3 components), matching `label_reg_evaluation.py`:
+RidgeCV (5-fold cross-val) probe on inputs vs embeddings, using `--labeled_data_dir`
+(`labels.tsv` + wavs, default 2,000 spectra). Wavs follow `dataset<D>_comp<C>_spec_<S>.wav`;
+components of the same spectrum share one label. The eval runs three configurations on the
+SAME spectra (only those having all 3 components):
 
 | Config | Raw input | Embedding |
 |--------|-----------|-----------|
@@ -252,36 +316,46 @@ same spectrum share one label. The eval runs three configurations on the SAME sp
 
 Raw channels are concatenated; embeddings are extracted per component then concatenated.
 
-Returns: `label_reg_input_*` / `label_reg_emb_*` (r2/mse/rmse/mae/pearson/spearman)
-per config (suffix `''` / `_2c` / `_3c`), `label_reg_improvement_r2*` = emb R² − input R²,
-cross-val predictions (1-comp).
-Figures: true-vs-predicted scatter per probe; R² + ΔR² bars across checkpoints.
+- **Metrics:** `label_reg_input_*` / `label_reg_emb_*` (r2/mse/rmse/mae/pearson/spearman) per
+  config (suffix `''` / `_2c` / `_3c`), `label_reg_improvement_r2*` = emb R² − input R² (positive
+  ⇒ embeddings add label-relevant information).
+- **Figures:** `label_reg_true_vs_pred[_<ckpt>].png` — true-vs-predicted scatter per probe;
+  `label_regression_comparison.png` — R² + ΔR² bars across checkpoints.
 
----
-
-## Eval 6 — Structured Similarity (`evaluations/structured_similarity.py`)
+### 6. `structured_similarity` — canonical 100-sample panel
 
 **Question:** How does similarity structure evolve through the pipeline stages?
 
-Deterministic 100-sample panel (seed=42): 0–29 `single_channel_all` (3 stacks×10),
-30–59 `multi_channel` (3 comps×10), 60–79 `sampled_data` (2×10), 80–99 `labeled_data`
-(2×10). One forward pass extracts 4 representations: input (245) → FE output (512) →
-projection (768) → embedding (768).
+Deterministic 100-sample panel (seed=42): 0–29 `single_channel_all` (3 stacks×10), 30–59
+`multi_channel` (3 comps×10), 60–79 `sampled_data` (2×10), 80–99 `labeled_data` (2×10). One
+forward pass extracts 4 representations: input (245) → FE output (512) → projection (768) →
+embedding (768).
 
-Returns: the 4 representations + 4 cosine similarity matrices + group labels.
-Figure: 2×2 heatmap panel with white block boundaries and dataset tick labels.
-Requires `--nova_data_dir`.
+- **Figures:** `struct_sim[_<ckpt>].png` — 2×2 cosine-similarity heatmap panel: Input / FE
+  output / Projection / Embedding, with white block boundaries and dataset tick labels.
+- Requires `--nova_data_dir`.
+
+### 7. `checkpoint_comparison` — everything across multiple checkpoints
+
+Wraps Evals 1, 3, 4, 5, 6 and runs them for every checkpoint from `CheckpointLoader.load_multiple()`
+(directory glob or `--checkpoint_paths` list). Produces `comparison_df` — one row per checkpoint
+with all scalar metrics — plus a per-checkpoint report section containing every figure. Sub-evals
+toggle via `EvalConfig.run_{noise,clustering,label_regression}_in_comparison`.
+`signal_reconstruction` runs alongside (once per run), not per-checkpoint. Combine both in one
+command for the complete suite.
 
 ---
 
-## Eval 7 — Checkpoint Comparison (`evaluations/checkpoint_comparison.py`)
+## Checkpoint formats and modes — quick reference
 
-Wraps Evals 1, 3, 4, 5, 6 and runs them for every checkpoint from
-`CheckpointLoader.load_multiple()` (directory glob or `--checkpoint_paths` list).
-Produces `comparison_df` — one row per checkpoint with all scalar metrics — plus a
-per-checkpoint report section containing every figure. Sub-evals toggle via
-`EvalConfig.run_{noise,clustering,label_regression}_in_comparison`.
-`signal_reconstruction` runs alongside (once per run), not per-checkpoint.
+| Format | Detection keys | Loaded as |
+|---|---|---|
+| `hf` | — (`--checkpoint_mode hf`) | HF pretrained `facebook/data2vec-audio-base` |
+| `fairseq` | `cfg` + `model` | keys remapped into the HF model |
+| `3ae` | `data2vec_audio` | embedded fine-tuned backbone (+ mirror heads for reconstruction) |
+| `fe_recon` | `encoder`+`layer_norm`+`decoder` | FE + LN into the HF model (recon: + MirrorDecoder) |
+| `tr_recon` | `transformer_mirror`+`backbone_ckpt` | backbone from recorded path (recon: + mirror head) |
+| `state_dict` | anything else | direct `load_state_dict` |
 
 ---
 
@@ -311,28 +385,26 @@ class EvalConfig:
     output_dir:         str   = "eval_outputs"
 ```
 
-Every method runs both standalone and inside `checkpoint_comparison` — same figures
-and CSVs. `python -m eval.runner --help` shows all args + usage-mode examples.
+Every method runs both standalone and inside `checkpoint_comparison` — same figures and CSVs.
+`python -m eval.runner --help` shows all args + usage-mode examples.
 
 ---
 
-## Block 6 — Report Generator (`report.py`)
+## Block 6 — Report Generator (`report.py`) / output directory contents
 
 Each run writes a timestamped directory `output_dir/<YYYY-MM-DD_HH-MM-SS>/`:
 
-```
-eval_report.html                     ← self-contained (all figures base64-embedded)
-eval_report.md / run_info.md         ← markdown report / what was analyzed
-checkpoint_comparison.png            ← scalar metric grid across checkpoints
-recon_overlay.png / recon_mse_bars.png / recon_df.csv          ← Eval 2
-noise_example_grid*.png / noisy_vs_clean_*.png / noise_df*.csv ← Eval 3
-kmeans_clustered_then_{tsne,umap}*.png                         ← Eval 4
-label_reg_true_vs_pred*.png / label_regression_comparison.png  ← Eval 5
-struct_sim*.png                                                ← Eval 6
-similarity_comparison_{best,worst}_query*.png / match_df*.csv  ← Eval 1
-cosine_map_*.png / cosine_sim_*.png / emb_*.png                ← Eval 1
-*_comparison_df.csv                                            ← Eval 7
-```
+| File | Content |
+|---|---|
+| `eval_report.html` / `eval_report.md` | self-contained report (figures base64-embedded) / markdown version |
+| `run_info.md` | what was analyzed — data, checkpoints, evals, device |
+| `checkpoint_comparison.png` + `*_comparison_df.csv` | scalar metric grid + table (Eval 7) |
+| `recon_overlay.png`, `recon_mse_bars.png`, `recon_df.csv` | signal reconstruction (Eval 2) |
+| `noise_example_grid*.png`, `noisy_vs_clean_*.png`, `noise_df*.csv` | noise robustness (Eval 3) |
+| `kmeans_clustered_then_{tsne,umap}*.png` | clustering scatters (Eval 4) |
+| `label_reg_true_vs_pred*.png`, `label_regression_comparison.png` | label regression (Eval 5) |
+| `struct_sim*.png` | structured similarity panels (Eval 6) |
+| `similarity_comparison_{best,worst}_query*.png`, `match_df*.csv`, `cosine_map_*.png`, `cosine_sim_*.png`, `emb_*.png` | same-stack query (Eval 1) |
 
 ---
 
@@ -360,15 +432,13 @@ umap-learn>=0.5.0   # optional — UMAP scatter (falls back to t-SNE)
 
 **Not needed:** `fairseq`, `hydra-core`, `apex`, `submitit`.
 
-On Geoffrey the `spectralfm_env` conda environment already has all of these.
-
 ---
 
 ## Data Setup
 
 Manifests live at `/mnt5/noy/SpectralFM/fairseq/data/nova_data/<subset>/` (Geoffrey path).
-TSV roots use `/storage/noy/...` — the same NFS as RunAI mounts; eval code remaps
-`/storage/` → `/mnt5/` automatically.
+TSV roots use `/storage/noy/...` — the same NFS as RunAI mounts; eval code remaps `/storage/`
+→ `/mnt5/` automatically.
 
 | Subset | Train | Valid | Wav files |
 |--------|-------|-------|-----------|
@@ -382,6 +452,17 @@ TSV roots use `/storage/noy/...` — the same NFS as RunAI mounts; eval code rem
 To regenerate manifests: `python fairseq/create_manifests.py --help`
 To submit RunAI sweep: `bash sweep_dataset.sh`
 
-Training config: `fairseq/examples/data2vec/config/audio/pretraining/spectralfm_base.yaml`
+Training config: `fairseq/examples/data2vec/config/audio/pretraining/spectralfm_base.yaml`.
 Key fix vs base librispeech config: `min_sample_size: 1` (base uses 32000, which silently
 drops all 245-frame SpectralFM wavs).
+
+---
+
+## Key constraints
+
+- All eval code must stay importable **without fairseq**.
+- SpectralFM wavs are 245 frames; embedding evals layer-norm inputs to match data2vec
+  training, but reconstruction receives **raw** signals (normalization applied only if the
+  recon checkpoint was trained with it).
+- The eval `data_loader` assigns `stack_idx = file_index // 10` (files sorted by name) —
+  stacks are consecutive groups of 10.

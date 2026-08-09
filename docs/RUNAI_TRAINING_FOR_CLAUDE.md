@@ -97,9 +97,9 @@ This keeps datasets and configs consistent when moving checkpoints between clust
 
 ## 8. Evaluation and tooling after RunAI training
 
-- **Checkpoint roots on disk:** `/mnt5/noy/SpectralFM/checkpoints/runai/` — flat date folders, per-run names, grouped dirs like `2026-03-10-compare-single-to-multi/`, `recon_loss_experiment_*`, etc. (`datasets-and-checkpoints.mdc`, `code/docs/EVALUATION_FLOW.md`).
+- **Checkpoint roots on disk:** `/mnt5/noy/SpectralFM/checkpoints/runai/` — flat date folders, per-run names, grouped dirs like `2026-03-10-compare-single-to-multi/`, `recon_loss_experiment_*`, etc. (`datasets-and-checkpoints.mdc`).
 - **`code/model_loader.py`** — when loading fairseq checkpoints locally, remaps model paths that start with `/storage/noy` to `/mnt5/noy` if the local file exists; can set `skip_pretrained_weights` if base weights are absent locally but finetuned weights are inside the checkpoint.
-- **Eval docs** with RunAI examples: `code/HOW_TO_EVALUATE.md`, `code/docs/EVALUATION_FLOW.md` (path remapping, `eval_fe_decoder.py` / `evaluation_runner.py` `--checkpoint_dir` patterns).
+- **Eval docs** with RunAI examples: `code/eval/EVAL_OVERVIEW.md` (path remapping, worked Geoffrey run examples). The older `evaluation_runner.py`/`eval_fe_decoder.py` `--checkpoint_dir` workflow's docs were retired as part of consolidating to one eval doc — that code may still exist but is undocumented; prefer `code/eval/`.
 
 ---
 
@@ -130,7 +130,7 @@ This keeps datasets and configs consistent when moving checkpoints between clust
 | Checkpoint copy recipe | `.cursor/rules/copy-runai-checkpoints.mdc` |
 | Dataset sizes and `--eval_data_dir` | `.cursor/rules/datasets-and-checkpoints.mdc` |
 | Recon Run / sync / artifacts | `fairseq/examples/data2vec/config/audio/pretraining/recon_loss/RUNAI_SYNC_PATHS.md`, `RUNAI_ARTIFACTS.md`, `HOW_TO_RUN.md` |
-| Eval flow and RunAI checkpoint layouts | `code/docs/EVALUATION_FLOW.md` |
+| Eval flow and RunAI checkpoint layouts | `code/eval/EVAL_OVERVIEW.md` |
 
 ---
 

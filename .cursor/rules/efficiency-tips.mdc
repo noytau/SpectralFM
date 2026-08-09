@@ -21,7 +21,7 @@ alwaysApply: true
 - **Plans directory (authoritative):** `/home/noy/.cursor/plans/` — SpectralFM Cursor plans live here (not under the repo’s `.cursor/plans/`).
 - **Evaluation metrics / runner work:** `/home/noy/.cursor/plans/spectralfm_evaluation_suite_10f99c29.plan.md` — completed phases are marked `✅` (skip those sections).
 - **Reconstruction-loss training + epoch cosine (data2vec_audio, Hydra recon_loss, RunAI submit, `.npy` subset):** `/home/noy/.cursor/plans/reconstruction_loss_experiments_1ec3ff93.plan.md` — use this plan when implementing or debugging recon experiments (not the evaluation suite plan).
-- When only metric definitions are needed, read `code/eval_metrics_reference.md` instead of the full evaluation plan
+- When only metric definitions are needed, read the Block 4 / Metrics section of `code/eval/EVAL_OVERVIEW.md` instead of the full evaluation plan (`code/eval_metrics_reference.md` was retired — consolidated into that file)
 
 ## Evaluation Workflow
 - Always follow [evaluation-workflow.mdc](mdc:.cursor/rules/evaluation-workflow.mdc) when implementing new `_eval_*` methods

@@ -40,11 +40,7 @@ thing, read `code/eval/EVAL_OVERVIEW.md` (eval) or `ARCHITECTURE.md`
 | [`fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/recon_loss/HOW_TO_RUN.md) | Exact commands for the reconstruction-loss Hydra configs, local vs. RunAI. |
 | [`fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md`](fairseq/examples/data2vec/config/audio/pretraining/fe_vs_transformer_collapse/HOW_TO_RUN.md) | Commands for the FE-vs-transformer embedding-collapse ablation. |
 | **Evaluation** | |
-| [`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md) | The current eval package (zero-fairseq) — read this first for anything eval-related. |
-| [`code/eval/README.md`](code/eval/README.md) | Short intro/install notes for the eval package. |
-| [`code/HOW_TO_EVALUATE.md`](code/HOW_TO_EVALUATE.md) | Manual for the older, fairseq-dependent `evaluation_runner.py` workhorse. |
-| [`code/docs/EVALUATION_FLOW.md`](code/docs/EVALUATION_FLOW.md) | Complete reference for that older eval framework — scripts, checkpoint handling, output structure, past experiments. |
-| [`code/eval_metrics_reference.md`](code/eval_metrics_reference.md) | Catalog of representation-quality metrics, implemented and planned. |
+| [`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md) | **The single eval doc** — installation, running it, all 7 methods, checkpoint formats, examples. `code/eval/README.md` is a one-paragraph pointer to this file, kept only because GitHub renders it by default when browsing the folder. |
 | **Reference / provenance** | |
 | [`code/README.md`](code/README.md) | One-line project tagline (oldest doc in the repo). |
 | [`fairseq/examples/data2vec/README.md`](fairseq/examples/data2vec/README.md) | Upstream fairseq data2vec docs (not SpectralFM-specific — background reading on the base architecture). |
@@ -163,7 +159,7 @@ SpectralFM/
 │   ├── recon_components.py       ← per-component checkpoint loaders used by both training paths
 │   ├── model_loader.py           ← checkpoint loading + /storage↔/mnt5 remap (used by evaluation_runner.py etc.)
 │   ├── evaluation_runner.py      ← older, fairseq-dependent multi-checkpoint eval workhorse (predates code/eval/)
-│   └── docs/                     ← deep-dive docs for specific pieces of code/ (RECON_2AE_BASEMERGE.md, EVALUATION_FLOW.md, ...)
+│   └── docs/                     ← deep-dive docs for specific pieces of code/ (RECON_2AE_BASEMERGE.md, ...)
 ├── docs/                       ← project-level deep-dive docs (AUTOENCODER_EXPERIMENTS.md, RUNAI_TRAINING_FOR_CLAUDE.md, ...)
 ├── fairseq/                    ← forked fairseq with SpectralFM modifications
 │   ├── create_manifests.py     ← generate train.tsv / valid.tsv for any wav dir
