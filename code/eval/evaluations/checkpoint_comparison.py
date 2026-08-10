@@ -26,6 +26,7 @@ from . import noise_robustness as noise_eval
 from . import structured_similarity as struct_eval
 from . import clustering as clust_eval
 from . import label_regression as labelreg_eval
+from . import label_regression_sweeps as labelreg_sweeps
 
 
 def run(
@@ -40,6 +41,11 @@ def run(
     nova_data_dir: Optional[str] = None,
     labeled_data_dir: Optional[str] = None,
     label_reg_max_samples: int = 1000,
+    run_label_reg_sweeps: bool = True,
+    label_reg_train_sizes: Optional[list] = None,
+    label_reg_sweep_comps: tuple = (0, 1),
+    label_reg_sweep_train_size: int = 1000,
+    label_reg_component_configs: Optional[list] = None,
 ) -> dict:
     """
     For each checkpoint, run each eval on its matrix datasets.
@@ -112,7 +118,18 @@ def run(
                 except Exception as e:
                     print(f"[CheckpointComparison] Clustering ({alias}) skipped: {e}")
 
+        # ── Structured similarity (run-level canonical panel) ─────────────────
+        if nova_data_dir and os.path.isdir(nova_data_dir):
+            try:
+                print(f"[CheckpointComparison] Structured similarity: {label}")
+                ss_results = struct_eval.run(model, nova_data_dir, device=device)
+                checkpoint_results["structured_similarity"] = ss_results
+            except Exception as e:
+                print(f"[CheckpointComparison] Structured similarity skipped: {e}")
+
         # ── Label regression (labeled set only — unsuffixed keys) ─────────────
+        # Runs last: by far the slowest stage (many bootstrapped ridge fits),
+        # so faster evals surface their results first.
         if run_label_regression and labeled_data_dir and os.path.isdir(labeled_data_dir):
             try:
                 lr_results = labelreg_eval.run(
@@ -128,15 +145,6 @@ def run(
             except Exception as e:
                 print(f"[CheckpointComparison] Label regression skipped: {e}")
 
-        # ── Structured similarity (run-level canonical panel) ─────────────────
-        if nova_data_dir and os.path.isdir(nova_data_dir):
-            try:
-                print(f"[CheckpointComparison] Structured similarity: {label}")
-                ss_results = struct_eval.run(model, nova_data_dir, device=device)
-                checkpoint_results["structured_similarity"] = ss_results
-            except Exception as e:
-                print(f"[CheckpointComparison] Structured similarity skipped: {e}")
-
         rows.append(row)
         checkpoint_results["_date"] = ckpt_date
         per_checkpoint[label] = checkpoint_results
@@ -145,7 +153,34 @@ def run(
     print("\n[CheckpointComparison] Summary:")
     print(comparison_df.to_string(index=False))
 
-    return {
+    result = {
         "comparison_df": comparison_df,
         "per_checkpoint": per_checkpoint,
     }
+
+    # ── Label regression side-by-side sweeps (all checkpoints in one grid) ────
+    # Separate from the per-checkpoint RidgeCV probe above: a single LBFGS linear
+    # probe at fixed train/eval sizes, laid out as [config] x [Raw input + one
+    # column per checkpoint] — matches the legacy label_reg_evaluation.py plots.
+    if run_label_reg_sweeps and labeled_data_dir and os.path.isdir(labeled_data_dir) and checkpoints:
+        try:
+            print("\n[CheckpointComparison] Label regression: train-size sweep "
+                  f"(comps={label_reg_sweep_comps})")
+            result["label_reg_train_size_sweep"] = labelreg_sweeps.run_train_size_sweep(
+                checkpoints, labeled_data_dir, device=device,
+                train_sizes=label_reg_train_sizes, comps=label_reg_sweep_comps,
+            )
+        except Exception as e:
+            print(f"[CheckpointComparison] train-size sweep skipped: {e}")
+        try:
+            print("\n[CheckpointComparison] Label regression: n-components sweep "
+                  f"(train_size={label_reg_sweep_train_size})")
+            result["label_reg_component_sweep"] = labelreg_sweeps.run_component_sweep(
+                checkpoints, labeled_data_dir, device=device,
+                comp_configs=label_reg_component_configs,
+                train_size=label_reg_sweep_train_size,
+            )
+        except Exception as e:
+            print(f"[CheckpointComparison] n-components sweep skipped: {e}")
+
+    return result
