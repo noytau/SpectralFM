@@ -75,7 +75,10 @@ def load_data(source: str, sample_rate: int = 16000, stack_size: int = 10) -> pd
     raise FileNotFoundError(f"Source not found: {source}")
 
 
-_MANIFEST_REMAPS = [("/storage/noy/", "/mnt5/noy/"), ("/storage/", "/mnt5/")]
+_MANIFEST_REMAPS = [
+    ("/storage/noy/", "/mnt5/noy/"), ("/storage/", "/mnt5/"),
+    ("/mnt5/noy/", "/storage/noy/"), ("/mnt5/", "/storage/"),
+]
 
 
 def load_manifest_subset(
@@ -91,11 +94,14 @@ def load_manifest_subset(
     Samples WHOLE stacks (contiguous blocks of `stack_size` manifest rows) so the
     stack structure needed by the stack-query/clustering evals survives the draw:
     n // stack_size blocks are chosen with a seeded RNG, each contributing its
-    `stack_size` consecutive rows. TSV roots written for RunAI (/storage/...) are
-    remapped to the Geoffrey mount (/mnt5/...) ONLY if /storage/... doesn't
-    actually resolve locally - on hosts that mount /storage directly (RunAI
-    itself, or any standalone server using the same /storage/noy/... layout,
-    e.g. gpu55), the root is used as-is.
+    `stack_size` consecutive rows. TSV roots are remapped between the RunAI/
+    standalone-server convention (/storage/noy/...) and the Geoffrey mount
+    (/mnt5/noy/...) in whichever direction is needed — tried ONLY when the
+    root as recorded doesn't resolve locally, and only kept if the remapped
+    path actually does (e.g. a manifest generated on Geoffrey, like some of
+    the special reference datasets under nova_data/, still carries a
+    /mnt5/... root even after its wav files are copied to a /storage/...
+    -native host such as gpu55/gpu56).
 
     Returns a DataFrame with 'data', 'stack_idx', 'filename' columns.
     """
@@ -108,8 +114,10 @@ def load_manifest_subset(
     if not os.path.isdir(root):
         for src, dst in _MANIFEST_REMAPS:
             if root.startswith(src):
-                root = dst + root[len(src):]
-                break
+                candidate = dst + root[len(src):]
+                if os.path.isdir(candidate):
+                    root = candidate
+                    break
 
     n_blocks_total = len(rows) // stack_size
     n_blocks = max(1, min(n // stack_size, n_blocks_total))
