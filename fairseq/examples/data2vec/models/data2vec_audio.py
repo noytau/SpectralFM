@@ -1502,9 +1502,13 @@ class Data2VecAudioModel(BaseFairseqModel):
             else:
                 pred_fe = self.fe_recon_decoder(self._mean_pool(fe_seq, padding_mask))
             loss_fn = F.mse_loss if getattr(self.cfg, "recon_loss_type", "l1") == "l2" else F.l1_loss
+            # Same sum-over-dims / sum-over-batch / 1-over-sqrt(dim) convention as
+            # `regression` below, so the two losses are on comparable raw scales —
+            # see the note at the main recon_fe/recon_trans computation.
+            recon_scale = 1 / math.sqrt(recon_target.size(-1))
+            fe_loss = loss_fn(pred_fe, recon_target, reduction="none").sum(dim=-1)
             result["losses"]["recon_fe"] = (
-                loss_fn(pred_fe, recon_target, reduction="mean")
-                * self.cfg.lambda_recon_fe
+                fe_loss.sum() * recon_scale * self.cfg.lambda_recon_fe
             )
             return result
 
@@ -1710,13 +1714,29 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         recon_target = self._recon_target(source)
         recon_loss_fn = F.mse_loss if getattr(self.cfg, "recon_loss_type", "l1") == "l2" else F.l1_loss
+        # `regression` above is `F.mse_loss(..., reduction="none").sum(dim=-1)` then
+        # `.sum()` over every masked position in the batch, times `1/sqrt(dim)` — a
+        # raw magnitude in the thousands (grows with batch size and mask count). A
+        # plain `reduction="mean"` recon loss is a single averaged scalar, four to
+        # five orders of magnitude smaller — lambda_recon_fe/trans would need to be
+        # in the hundreds-to-thousands to have ANY visible effect on gradients, and
+        # the wandb-logged per-step value (also divided by sample_size for display,
+        # same as regression) would round to 0 regardless of what's actually
+        # happening. Fixed by using the same sum-over-dims / sum-over-batch /
+        # 1-over-sqrt(dim) convention as regression, so raw magnitudes are
+        # comparable and lambda_recon_* is a meaningful relative weight at the
+        # values TASKS.md's sweep actually uses (0.1 / 1 / 10). Confirmed
+        # empirically 2026-08-16 — recon_fe logged as flat 0 before this fix, at
+        # lambda_recon_fe=0.1, despite the decoder receiving nonzero gradient.
+        recon_scale = 1 / math.sqrt(recon_target.size(-1))
         if getattr(self.cfg, "lambda_recon_fe", 0.0) > 0:
             if getattr(self.fe_recon_decoder, "needs_full_sequence", False):
                 pred_fe = self.fe_recon_decoder(fe_seq)
             else:
                 pred_fe = self.fe_recon_decoder(self._mean_pool(fe_seq, padding_mask))
+            fe_loss = recon_loss_fn(pred_fe, recon_target, reduction="none").sum(dim=-1)
             result["losses"]["recon_fe"] = (
-                recon_loss_fn(pred_fe, recon_target, reduction="mean") * self.cfg.lambda_recon_fe
+                fe_loss.sum() * recon_scale * self.cfg.lambda_recon_fe
             )
         if getattr(self.cfg, "lambda_recon_trans", 0.0) > 0:
             if getattr(self.trans_recon_decoder, "needs_full_sequence", False):
@@ -1724,8 +1744,9 @@ class Data2VecAudioModel(BaseFairseqModel):
             else:
                 tp = self._mean_pool(x, padding_mask)
                 pred_t = self.trans_recon_decoder(tp)
+            trans_loss = recon_loss_fn(pred_t, recon_target, reduction="none").sum(dim=-1)
             result["losses"]["recon_trans"] = (
-                recon_loss_fn(pred_t, recon_target, reduction="mean") * self.cfg.lambda_recon_trans
+                trans_loss.sum() * recon_scale * self.cfg.lambda_recon_trans
             )
 
         x = x[mask_indices]
