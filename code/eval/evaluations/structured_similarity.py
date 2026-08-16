@@ -24,6 +24,12 @@ import torch
 _PATH_REMAPS = [("/storage/noy/", "/mnt5/noy/"), ("/storage/", "/mnt5/")]
 
 def _remap_root(root: str) -> str:
+    # Only remap /storage/... -> /mnt5/... when /storage doesn't actually
+    # resolve locally (i.e. we're on Geoffrey). Hosts that mount /storage
+    # directly (RunAI, or a standalone server using the same layout, e.g.
+    # gpu55) use the root as-is.
+    if os.path.isdir(root):
+        return root
     for src, dst in _PATH_REMAPS:
         if root.startswith(src):
             return dst + root[len(src):]

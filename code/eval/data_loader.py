@@ -92,7 +92,10 @@ def load_manifest_subset(
     stack structure needed by the stack-query/clustering evals survives the draw:
     n // stack_size blocks are chosen with a seeded RNG, each contributing its
     `stack_size` consecutive rows. TSV roots written for RunAI (/storage/...) are
-    remapped to the Geoffrey mount (/mnt5/...).
+    remapped to the Geoffrey mount (/mnt5/...) ONLY if /storage/... doesn't
+    actually resolve locally - on hosts that mount /storage directly (RunAI
+    itself, or any standalone server using the same /storage/noy/... layout,
+    e.g. gpu55), the root is used as-is.
 
     Returns a DataFrame with 'data', 'stack_idx', 'filename' columns.
     """
@@ -102,10 +105,11 @@ def load_manifest_subset(
     with open(tsv) as f:
         root = f.readline().strip()
         rows = [ln.strip().split("\t")[0] for ln in f if ln.strip()]
-    for src, dst in _MANIFEST_REMAPS:
-        if root.startswith(src):
-            root = dst + root[len(src):]
-            break
+    if not os.path.isdir(root):
+        for src, dst in _MANIFEST_REMAPS:
+            if root.startswith(src):
+                root = dst + root[len(src):]
+                break
 
     n_blocks_total = len(rows) // stack_size
     n_blocks = max(1, min(n // stack_size, n_blocks_total))

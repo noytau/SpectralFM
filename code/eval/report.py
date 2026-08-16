@@ -874,6 +874,65 @@ def _plot_struct_sim_all_models(per_cp: dict, output_dir: str, centered: bool = 
     return [(f"Structured similarity — all models ({tag})", path, "")]
 
 
+_SWEEP_COLORS = ["dimgray", "steelblue", "darkorange", "mediumseagreen", "purple", "crimson"]
+
+
+def _label_reg_sweep_cell(ax, cell: dict, color: str, is_best: bool, show_col_title: bool) -> None:
+    """One true-vs-predicted scatter panel for a label-regression sweep grid.
+    Matches legacy label_reg_evaluation.py::_scatter_panel styling exactly."""
+    y_true, y_pred, y_train = cell["y_true"], cell["y_pred"], cell["y_train"]
+    ax.scatter(y_true, y_pred, s=3, alpha=0.2, color=color, rasterized=True)
+    lo = min(y_true.min(), y_pred.min()) - 0.05
+    hi = max(y_true.max(), y_pred.max()) + 0.05
+    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.2)
+    best_tag = "★ BEST  " if is_best else ""
+    title = f"{cell['col_label']}\n{cell['row_label']}" if show_col_title else cell["row_label"]
+    ax.set_title(
+        f"{best_tag}{title}\n"
+        f"R²={cell['r2']:.3f}  r={cell['pearson_r']:.3f}  MAE={cell['mae']:.3f}\n"
+        f"train μ={y_train.mean():.2f} σ={y_train.std():.2f}\n"
+        f"pred  μ={y_pred.mean():.2f} σ={y_pred.std():.2f}",
+        fontsize=7.5, fontweight="bold" if is_best else "normal",
+        color="darkgreen" if is_best else "black",
+    )
+    if is_best:
+        for spine in ax.spines.values():
+            spine.set_edgecolor("gold")
+            spine.set_linewidth(3)
+        ax.patch.set_facecolor("#fffff0")
+    ax.set_xlabel("True", fontsize=7)
+    ax.set_ylabel("Pred", fontsize=7)
+    ax.grid(True, alpha=0.2)
+    ax.tick_params(labelsize=6)
+
+
+def _plot_label_reg_sweep(sweep: dict, output_dir: str, suptitle: str, fname: str) -> list:
+    """
+    Side-by-side checkpoint comparison grid for a label_regression_sweeps result
+    (run_train_size_sweep or run_component_sweep): rows = sweep['row_values'],
+    cols = sweep['columns'] (Raw input + one per checkpoint), one scatter panel
+    per (row, col) cell, global-best cell highlighted in gold.
+    """
+    row_values = sweep["row_values"]
+    columns = sweep["columns"]
+    cells = sweep["cells"]
+    if not cells:
+        return []
+    n_rows, n_cols = len(row_values), len(columns)
+
+    best = max(cells, key=lambda k: cells[k]["r2"])
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
+    fig.suptitle(suptitle, fontsize=12, fontweight="bold")
+    for (row, col), cell in cells.items():
+        _label_reg_sweep_cell(
+            axes[row][col], cell, _SWEEP_COLORS[col % len(_SWEEP_COLORS)],
+            is_best=(row, col) == best, show_col_title=(row == 0),
+        )
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    path = _save_fig(fig, os.path.join(output_dir, fname))
+    return [(suptitle, path, "")]
+
+
 # Eval name → output subdirectory name (E3 restructure)
 _METHOD_DIRS = {
     "embedding_similarity":  "similarity",
@@ -975,6 +1034,21 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
             figures += _relocate(figs, os.path.join(output_dir, "comparison", alias))
         lr_figs = _plot_label_regression_comparison(cdf, output_dir)
         figures += _relocate(lr_figs, os.path.join(output_dir, "comparison", "labeled"))
+
+        if results.get("label_reg_train_size_sweep"):
+            figs = _plot_label_reg_sweep(
+                results["label_reg_train_size_sweep"], output_dir,
+                "Label Regression — Training Size Sweep (linear probe)",
+                "label_reg_train_size_sweep.png",
+            )
+            figures += _relocate(figs, os.path.join(output_dir, "comparison", "labeled"))
+        if results.get("label_reg_component_sweep"):
+            figs = _plot_label_reg_sweep(
+                results["label_reg_component_sweep"], output_dir,
+                "Label Regression — 1 vs 2 vs 3 Components (linear probe)",
+                "label_reg_component_sweep.png",
+            )
+            figures += _relocate(figs, os.path.join(output_dir, "comparison", "labeled"))
 
     # ── Summary: all-models structured similarity (raw + centered) ───────────
     if per_cp:
