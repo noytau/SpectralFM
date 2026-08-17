@@ -72,6 +72,75 @@ def load_fe_recon(ckpt_path: str, device: str = "cpu"):
     return fe, ln, decoder, meta
 
 
+def is_native_fe_recon_ckpt(ckpt_path: str) -> bool:
+    """
+    True if ckpt_path is a plain fairseq hydra_train checkpoint (keys: cfg/model,
+    the format every step0/step1-style training run actually produces) with an
+    fe_recon_decoder attached — as opposed to load_fe_recon's standalone-save
+    format (top-level encoder/layer_norm/decoder keys) or load_3ae_recon's
+    combined format (data2vec_audio/fe_mirror keys).
+    """
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    return (
+        "cfg" in sd and "model" in sd
+        and any(k.startswith("fe_recon_decoder.") for k in sd["model"])
+    )
+
+
+def load_native_fe_recon(ckpt_path: str, device: str = "cpu"):
+    """
+    Load FE + fe_recon_decoder straight out of a native fairseq hydra_train
+    checkpoint (e.g. a Step 1-style joint FE+decoder run) — the decoder lives
+    inline as a submodule of the full model (`fe_recon_decoder.*` keys)
+    instead of a separate standalone save. FairseqConvFeatureExtractor's keys
+    already match the raw checkpoint 1:1 (see model.py), and the native
+    MirrorReconDecoder (data2vec_audio.py) and this package's MirrorDecoder
+    are architecturally identical layer-for-layer, so no remapping is needed
+    beyond stripping the `fe_recon_decoder.` prefix.
+
+    Returns (fe, ln, decoder, meta) — same shape as load_fe_recon, so it
+    drops into run()'s existing downstream code unchanged.
+    """
+    import torch.nn as nn
+
+    raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if not ("cfg" in raw and "model" in raw):
+        raise ValueError(f"Not a native fairseq checkpoint: {ckpt_path}")
+    sd = raw["model"]
+    if not any(k.startswith("fe_recon_decoder.") for k in sd):
+        raise ValueError(f"No fe_recon_decoder found in checkpoint: {ckpt_path}")
+
+    fe = FairseqConvFeatureExtractor(_FE_LAYERS)
+    ln = nn.LayerNorm(512)
+    decoder = MirrorDecoder()
+
+    fe_state = {k[len("feature_extractor."):]: v for k, v in sd.items()
+                if k.startswith("feature_extractor.")}
+    ln_state = {k[len("layer_norm."):]: v for k, v in sd.items()
+                if k in ("layer_norm.weight", "layer_norm.bias")}
+    dec_state = {k[len("fe_recon_decoder."):]: v for k, v in sd.items()
+                 if k.startswith("fe_recon_decoder.")}
+
+    for name, mod, state in (("FE", fe, fe_state), ("LN", ln, ln_state), ("Decoder", decoder, dec_state)):
+        r = mod.load_state_dict(state, strict=False)
+        if r.missing_keys or r.unexpected_keys:
+            raise RuntimeError(
+                f"native FE-recon load error: {name} missing={r.missing_keys} unexpected={r.unexpected_keys}"
+            )
+        mod.eval().to(device)
+
+    cfg = raw.get("cfg", {})
+    model_cfg = cfg.get("model", cfg) if isinstance(cfg, dict) else getattr(cfg, "model", cfg)
+    lambda_recon_fe = (model_cfg.get("lambda_recon_fe") if isinstance(model_cfg, dict)
+                        else getattr(model_cfg, "lambda_recon_fe", None))
+    task_cfg = cfg.get("task", cfg) if isinstance(cfg, dict) else getattr(cfg, "task", cfg)
+    normalize = (task_cfg.get("normalize") if isinstance(task_cfg, dict)
+                 else getattr(task_cfg, "normalize", True))
+    meta = {"lambda_recon_fe": lambda_recon_fe, "normalize": bool(normalize)}
+    print(f"[SignalRecon] native FE-recon loaded: {os.path.basename(ckpt_path)}  meta={meta}")
+    return fe, ln, decoder, meta
+
+
 def load_tr_recon(ckpt_path: str, device: str = "cpu", arch: str = "conv1d",
                   backbone_ckpt: Optional[str] = None):
     """
@@ -248,7 +317,10 @@ def run(
     if recon_ckpt:
         backbone_3ae, heads_3ae, meta_3ae = load_3ae_recon(recon_ckpt, device=device)
     else:
-        fe_parts = load_fe_recon(fe_ckpt, device=device) if fe_ckpt else None
+        if fe_ckpt and is_native_fe_recon_ckpt(fe_ckpt):
+            fe_parts = load_native_fe_recon(fe_ckpt, device=device)
+        elif fe_ckpt:
+            fe_parts = load_fe_recon(fe_ckpt, device=device)
         tr_parts = load_tr_recon(tr_ckpt, device=device, arch=arch) if tr_ckpt else None
 
     if normalize is None:
