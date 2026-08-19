@@ -4,11 +4,17 @@ Signal Reconstruction Evaluation (true reconstruction through the full pipeline)
 Ports the reconstruction flow from compare_fe_vs_trans_recon.py / train_reconstruction.py
 (branch: reconstruction-loss-experiments) into the fairseq-free eval package.
 
-Two reconstruction pathways, each loaded from its OWN checkpoint:
+Three reconstruction pathways, each loaded from its OWN checkpoint:
 
   FE recon         : input → FE → LayerNorm → MirrorDecoder → signal
-                     checkpoint keys: encoder / layer_norm / decoder
+                     checkpoint keys: encoder / layer_norm / decoder, OR a native
+                     fairseq checkpoint carrying an fe_recon_decoder (e.g. Step 1)
                      (e.g. autoencoder_experiments/fe_signal_recon_*/ckpt_*.pt)
+
+  Projection recon : input → FE → LN → proj → TransformerMirrorDecoder → signal
+                     (stops before the transformer encoder)
+                     checkpoint: native fairseq checkpoint carrying a
+                     proj_recon_decoder (e.g. a Step 2-style run)
 
   Transformer recon: input → FE → LN → proj → Transformer → TransformerMirrorDecoder → signal
                      checkpoint keys: transformer_mirror / backbone_ckpt
@@ -17,7 +23,7 @@ Two reconstruction pathways, each loaded from its OWN checkpoint:
                      Data2VecAudioModel — no fairseq import needed).
                      (e.g. autoencoder_experiments/transformer_recon_*/ckpt_tr_*.pt)
 
-Either or both pathways can run — pass fe_ckpt and/or tr_ckpt.
+Any combination can run — pass fe_ckpt / proj_ckpt / tr_ckpt independently.
 
 Normalization: if `normalize` was recorded in the checkpoint (newer training runs,
 --normalize flag), the same per-sample F.layer_norm (zero-mean unit-std) is applied
@@ -139,6 +145,73 @@ def load_native_fe_recon(ckpt_path: str, device: str = "cpu"):
     meta = {"lambda_recon_fe": lambda_recon_fe, "normalize": bool(normalize)}
     print(f"[SignalRecon] native FE-recon loaded: {os.path.basename(ckpt_path)}  meta={meta}")
     return fe, ln, decoder, meta
+
+
+def is_native_proj_recon_ckpt(ckpt_path: str) -> bool:
+    """
+    True if ckpt_path is a plain fairseq hydra_train checkpoint (keys: cfg/model)
+    with a proj_recon_decoder attached (a Step 2-style projection-reconstruction
+    run) — the decoder lives inline as `proj_recon_decoder.*` keys alongside the
+    full backbone, as opposed to load_tr_recon's separate transformer_mirror
+    standalone-save format.
+    """
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    return (
+        "cfg" in sd and "model" in sd
+        and any(k.startswith("proj_recon_decoder.") for k in sd["model"])
+    )
+
+
+def load_native_proj_recon(ckpt_path: str, device: str = "cpu", arch: str = "conv1d"):
+    """
+    Load the backbone + proj_recon_decoder straight out of a native fairseq
+    hydra_train checkpoint (a Step 2-style run). The backbone (including
+    whatever post_extract_proj shape the checkpoint actually used — linear or
+    mlp_gelu — is auto-detected by CheckpointLoader's own key inspection, so
+    this reuses it unchanged rather than re-deriving the projection shape here.
+    The decoder itself is architecturally identical to trans_recon_decoder's
+    TransformerMirrorDecoder (post_extract_proj output is [B, T, 768], same
+    shape as the transformer's own output — see data2vec_audio.py), just
+    fed from a different point in the forward pass (pre-transformer).
+
+    Returns (backbone, head, meta) — same shape as load_tr_recon.
+    """
+    from ..checkpoint_loader import CheckpointLoader
+
+    raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if not ("cfg" in raw and "model" in raw):
+        raise ValueError(f"Not a native fairseq checkpoint: {ckpt_path}")
+    sd = raw["model"]
+    if not any(k.startswith("proj_recon_decoder.") for k in sd):
+        raise ValueError(f"No proj_recon_decoder found in checkpoint: {ckpt_path}")
+
+    print(f"[SignalRecon] native proj-recon backbone: {ckpt_path}")
+    backbone = CheckpointLoader.from_file(ckpt_path, arch=arch)
+    backbone.eval().to(device)
+
+    dec_state = {k[len("proj_recon_decoder."):]: v for k, v in sd.items()
+                 if k.startswith("proj_recon_decoder.")}
+    embed_dim = backbone.config.hidden_size if hasattr(backbone, "config") else 768
+    use_ln = any(k.startswith("pre_decoder_ln.") for k in dec_state)
+    head = TransformerMirrorDecoder(encoder_embed_dim=embed_dim, use_pre_decoder_ln=use_ln)
+    r = head.load_state_dict(dec_state, strict=False)
+    if r.missing_keys or r.unexpected_keys:
+        raise RuntimeError(
+            f"native proj-recon load error: missing={r.missing_keys} unexpected={r.unexpected_keys}"
+        )
+    head.eval().to(device)
+
+    cfg = raw.get("cfg", {})
+    model_cfg = cfg.get("model", cfg) if isinstance(cfg, dict) else getattr(cfg, "model", cfg)
+    lambda_recon_proj = (model_cfg.get("lambda_recon_proj") if isinstance(model_cfg, dict)
+                          else getattr(model_cfg, "lambda_recon_proj", None))
+    task_cfg = cfg.get("task", cfg) if isinstance(cfg, dict) else getattr(cfg, "task", cfg)
+    normalize = (task_cfg.get("normalize") if isinstance(task_cfg, dict)
+                 else getattr(task_cfg, "normalize", True))
+    meta = {"lambda_recon_proj": lambda_recon_proj, "normalize": bool(normalize),
+            "pre_decoder_ln": use_ln}
+    print(f"[SignalRecon] native proj-recon head loaded: {os.path.basename(ckpt_path)}  meta={meta}")
+    return backbone, head, meta
 
 
 def load_tr_recon(ckpt_path: str, device: str = "cpu", arch: str = "conv1d",
@@ -278,10 +351,29 @@ def _tr_reconstruct(backbone, head, source: torch.Tensor) -> torch.Tensor:
     return head(enc)                                          # [B, 245]
 
 
+@torch.no_grad()
+def _proj_reconstruct(backbone, head, source: torch.Tensor) -> torch.Tensor:
+    """
+    input [B, 245] → FE → LN → proj → TransformerMirrorDecoder → [B, 245].
+    Captures post_extract_proj's output via a forward hook on a full backbone
+    pass (same pattern as _3ae_reconstruct_all's 'proj' pathway) rather than
+    re-implementing the FE→LN→proj stack by hand.
+    """
+    captured = {}
+    h = backbone.feature_projection.projection.register_forward_hook(
+        lambda _m, _i, out: captured.__setitem__("proj_seq", out))
+    try:
+        backbone(input_values=source)
+    finally:
+        h.remove()
+    return head(captured["proj_seq"])   # [B, 245]
+
+
 def run(
     df: pd.DataFrame,
     fe_ckpt: Optional[str] = None,
     tr_ckpt: Optional[str] = None,
+    proj_ckpt: Optional[str] = None,
     recon_ckpt: Optional[str] = None,
     device: str = "cpu",
     arch: str = "conv1d",
@@ -298,8 +390,11 @@ def run(
       recon_ckpt  single 3AE checkpoint (data2vec_audio + fe_mirror/proj_mirror/
                   transformer_mirror) — runs ALL pathways it contains: FE, projection,
                   transformer.
-      fe_ckpt     standalone FE autoencoder ckpt (encoder/layer_norm/decoder keys)
+      fe_ckpt     standalone FE autoencoder ckpt (encoder/layer_norm/decoder keys),
+                  or a native fairseq checkpoint carrying an fe_recon_decoder.
       tr_ckpt     transformer-recon ckpt (transformer_mirror/backbone_ckpt keys)
+      proj_ckpt   native fairseq checkpoint carrying a proj_recon_decoder (e.g. a
+                  Step 2-style projection-reconstruction run)
 
     normalize: None → use the flag recorded in the checkpoint(s); True/False overrides.
 
@@ -307,13 +402,13 @@ def run(
     (recon_fe_mse_mean / recon_proj_mse_mean / recon_tr_mse_mean), and an example
     panel (targets + reconstructions) for the overlay plot.
     """
-    if not fe_ckpt and not tr_ckpt and not recon_ckpt:
+    if not fe_ckpt and not tr_ckpt and not proj_ckpt and not recon_ckpt:
         return {"skipped": True,
-                "error": "signal_reconstruction needs recon_ckpt (3AE) or fe_ckpt/tr_ckpt"}
+                "error": "signal_reconstruction needs recon_ckpt (3AE) or fe_ckpt/tr_ckpt/proj_ckpt"}
 
     # ── Load models ───────────────────────────────────────────────────────────
     backbone_3ae = heads_3ae = meta_3ae = None
-    fe_parts = tr_parts = None
+    fe_parts = tr_parts = proj_parts = None
     if recon_ckpt:
         backbone_3ae, heads_3ae, meta_3ae = load_3ae_recon(recon_ckpt, device=device)
     else:
@@ -322,6 +417,7 @@ def run(
         elif fe_ckpt:
             fe_parts = load_fe_recon(fe_ckpt, device=device)
         tr_parts = load_tr_recon(tr_ckpt, device=device, arch=arch) if tr_ckpt else None
+        proj_parts = load_native_proj_recon(proj_ckpt, device=device, arch=arch) if proj_ckpt else None
 
     if normalize is None:
         flags = []
@@ -331,6 +427,8 @@ def run(
             flags.append(bool(fe_parts[3].get("normalize") or False))
         if tr_parts:
             flags.append(bool(tr_parts[2].get("normalize") or False))
+        if proj_parts:
+            flags.append(bool(proj_parts[2].get("normalize") or False))
         normalize = any(flags)
     print(f"[SignalRecon] normalize={normalize} (per-sample F.layer_norm)")
 
@@ -351,7 +449,7 @@ def run(
 
     # ── Reconstruct: preds keyed by pathway ('fe' / 'proj' / 'tr') ────────────
     pathway_names = (sorted(heads_3ae) if heads_3ae is not None
-                     else [n for n, p in (("fe", fe_parts), ("tr", tr_parts)) if p])
+                     else [n for n, p in (("fe", fe_parts), ("tr", tr_parts), ("proj", proj_parts)) if p])
     preds = {k: torch.zeros_like(target) for k in pathway_names}
     for i in range(0, len(target), batch_size):
         batch = target[i : i + batch_size].to(device)
@@ -366,6 +464,9 @@ def run(
             if tr_parts:
                 backbone, head, _ = tr_parts
                 preds["tr"][i : i + batch_size] = _tr_reconstruct(backbone, head, batch)[..., :L].cpu()
+            if proj_parts:
+                backbone, head, _ = proj_parts
+                preds["proj"][i : i + batch_size] = _proj_reconstruct(backbone, head, batch)[..., :L].cpu()
 
     # ── Metrics + results ─────────────────────────────────────────────────────
     rows = {"index": np.arange(len(target)), "filename": fnames}
@@ -375,6 +476,7 @@ def run(
         "recon_ckpt": recon_ckpt,
         "fe_ckpt": fe_ckpt,
         "tr_ckpt": tr_ckpt,
+        "proj_ckpt": proj_ckpt,
         "n_samples": len(target),
         "pathways": pathway_names,
     }
@@ -384,6 +486,8 @@ def run(
         out["fe_meta"] = fe_parts[3]
     if tr_parts:
         out["tr_meta"] = tr_parts[2]
+    if proj_parts:
+        out["proj_meta"] = proj_parts[2]
 
     for k in pathway_names:
         mse = F.mse_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
