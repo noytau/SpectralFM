@@ -162,6 +162,34 @@ def is_native_proj_recon_ckpt(ckpt_path: str) -> bool:
     )
 
 
+class _ProjMirrorHead(torch.nn.Module):
+    """
+    Reimplements data2vec_audio.py's `_TransMirrorWrap` (the class actually
+    instantiated for proj_recon_decoder when recon_decoder_type='mirror'):
+    a 1x1 conv stem (embed_dim→mid_dim) + LayerNorm(mid_dim) + a
+    MirrorReconDecoder body — NOT the eval package's own TransformerMirrorDecoder
+    (different key names: stem/pre_ln/body.layers vs proj/pre_decoder_ln/decoder.layers).
+    `body` reuses this package's MirrorDecoder since MirrorReconDecoder's `layers.*`
+    keys already match it 1:1 (same as load_native_fe_recon's fe_recon_decoder case);
+    only the surrounding forward-pass shape convention (channels-last in, matching
+    the native class's own transpose calls) differs and is reproduced here.
+    """
+
+    def __init__(self, in_dim: int = 768, mid_dim: int = 512, out_dim: int = 245):
+        super().__init__()
+        import torch.nn as nn
+        self.stem = nn.Conv1d(in_dim, mid_dim, kernel_size=1)
+        self.pre_ln = nn.LayerNorm(mid_dim)
+        self.body = MirrorDecoder()
+
+    def forward(self, x_btc: torch.Tensor) -> torch.Tensor:
+        x = x_btc.transpose(1, 2).contiguous()      # [B, in_dim, T]
+        x = self.stem(x)                            # [B, mid_dim, T]
+        x = self.pre_ln(x.transpose(1, 2))           # [B, T, mid_dim]
+        x = x.transpose(1, 2).contiguous()           # [B, mid_dim, T] -- MirrorDecoder wants channels-first
+        return self.body(x).squeeze(1)               # [B, out_dim]
+
+
 def load_native_proj_recon(ckpt_path: str, device: str = "cpu", arch: str = "conv1d"):
     """
     Load the backbone + proj_recon_decoder straight out of a native fairseq
@@ -169,10 +197,8 @@ def load_native_proj_recon(ckpt_path: str, device: str = "cpu", arch: str = "con
     whatever post_extract_proj shape the checkpoint actually used — linear or
     mlp_gelu — is auto-detected by CheckpointLoader's own key inspection, so
     this reuses it unchanged rather than re-deriving the projection shape here.
-    The decoder itself is architecturally identical to trans_recon_decoder's
-    TransformerMirrorDecoder (post_extract_proj output is [B, T, 768], same
-    shape as the transformer's own output — see data2vec_audio.py), just
-    fed from a different point in the forward pass (pre-transformer).
+    The decoder head is a _ProjMirrorHead (see above) fed from post_extract_proj's
+    output — [B, T, 768], same shape as the transformer's own output.
 
     Returns (backbone, head, meta) — same shape as load_tr_recon.
     """
@@ -192,8 +218,7 @@ def load_native_proj_recon(ckpt_path: str, device: str = "cpu", arch: str = "con
     dec_state = {k[len("proj_recon_decoder."):]: v for k, v in sd.items()
                  if k.startswith("proj_recon_decoder.")}
     embed_dim = backbone.config.hidden_size if hasattr(backbone, "config") else 768
-    use_ln = any(k.startswith("pre_decoder_ln.") for k in dec_state)
-    head = TransformerMirrorDecoder(encoder_embed_dim=embed_dim, use_pre_decoder_ln=use_ln)
+    head = _ProjMirrorHead(in_dim=embed_dim, mid_dim=512, out_dim=245)
     r = head.load_state_dict(dec_state, strict=False)
     if r.missing_keys or r.unexpected_keys:
         raise RuntimeError(
