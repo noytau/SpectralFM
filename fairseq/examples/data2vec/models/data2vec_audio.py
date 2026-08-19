@@ -55,6 +55,7 @@ _PARAM_GROUP_MAP: Dict[str, str] = {
     "fe_recon_decoder":     "fe",
     "layer_norm":           "ln",
     "post_extract_proj":    "proj",
+    "proj_recon_decoder":   "proj",
     "encoder":              "transformer",
     "trans_recon_decoder":  "transformer",
 }
@@ -82,12 +83,12 @@ def _maybe_apply_recon_components(model, cfg) -> None:
         bool(getattr(cfg, k, None))
         for k in ("init_fe_ckpt", "init_ln_ckpt", "init_proj_ckpt",
                   "init_transformer_ckpt", "init_fe_recon_decoder_ckpt",
-                  "init_trans_recon_decoder_ckpt")
+                  "init_trans_recon_decoder_ckpt", "init_proj_recon_decoder_ckpt")
     )
     _FREEZE_KEYS = ("freeze_fe_v2", "freeze_ln", "freeze_proj",
                     "freeze_transformer_v2", "freeze_fe_recon_decoder",
-                    "freeze_trans_recon_decoder", "freeze_mask_emb",
-                    "freeze_final_proj")
+                    "freeze_trans_recon_decoder", "freeze_proj_recon_decoder",
+                    "freeze_mask_emb", "freeze_final_proj")
     any_freeze = any(getattr(cfg, k, None) is not None for k in _FREEZE_KEYS)
     tag = bool(getattr(cfg, "tag_param_groups", False))
     if not (any_init or any_freeze or tag):
@@ -104,6 +105,7 @@ def _maybe_apply_recon_components(model, cfg) -> None:
             ("transformer",         "init_transformer_ckpt",         "load_transformer_from_ckpt",        model),
             ("fe_recon_decoder",    "init_fe_recon_decoder_ckpt",    "load_head_from_ckpt",               model.fe_recon_decoder),
             ("trans_recon_decoder", "init_trans_recon_decoder_ckpt", "load_head_from_ckpt",               model.trans_recon_decoder),
+            ("proj_recon_decoder",  "init_proj_recon_decoder_ckpt",  "load_head_from_ckpt",               model.proj_recon_decoder),
         ):
             p = (getattr(cfg, attr, None) or "").strip()
             if not p or p.lower() == "none":
@@ -126,6 +128,7 @@ def _maybe_apply_recon_components(model, cfg) -> None:
             "encoder":              getattr(cfg, "freeze_transformer_v2", None),
             "fe_recon_decoder":     getattr(cfg, "freeze_fe_recon_decoder", None),
             "trans_recon_decoder":  getattr(cfg, "freeze_trans_recon_decoder", None),
+            "proj_recon_decoder":   getattr(cfg, "freeze_proj_recon_decoder", None),
         }
         # FE needs special handling because freezing only the params isn't enough;
         # SpectralFM also scales FE grads via `feature_grad_mult` upstream of the FE.
@@ -578,6 +581,10 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         default=0.0,
         metadata={"help": "Weight for L1 recon from pooled transformer output to input spectrogram"},
     )
+    lambda_recon_proj: float = field(
+        default=0.0,
+        metadata={"help": "Weight for recon from post_extract_proj output to input spectrogram"},
+    )
     recon_output_dim: int = field(
         default=245,
         metadata={"help": "Target spectrogram dimension for reconstruction heads"},
@@ -630,6 +637,10 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         metadata={"help": "Per-component override: trans_recon_decoder source ckpt path "
                           "(train_reconstruction.py transformer_mirror.decoder.*)."},
     )
+    init_proj_recon_decoder_ckpt: Optional[str] = field(
+        default=None,
+        metadata={"help": "Per-component override: proj_recon_decoder source ckpt path."},
+    )
 
     # --- Per-component freezing (this PR) ---
     freeze_fe_v2: bool = field(
@@ -651,6 +662,9 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     freeze_trans_recon_decoder: bool = field(
         default=False, metadata={"help": "Freeze trans_recon_decoder head."},
     )
+    freeze_proj_recon_decoder: bool = field(
+        default=False, metadata={"help": "Freeze proj_recon_decoder head."},
+    )
     freeze_mask_emb: bool = field(
         default=False, metadata={"help": "Freeze mask embedding parameter (mask_emb)."},
     )
@@ -664,7 +678,8 @@ class Data2VecAudioConfig(Wav2Vec2Config):
         metadata={
             "help": "If True, set ``p.param_group`` on every parameter to its natural component name "
                     "({fe, ln, proj, transformer, other}; fe_recon_decoder joins 'fe', "
-                    "trans_recon_decoder joins 'transformer'). Required for ``optimizer._name: composite`` "
+                    "trans_recon_decoder joins 'transformer', proj_recon_decoder joins 'proj'). "
+                    "Required for ``optimizer._name: composite`` "
                     "with per-group LR; fully no-op when using a single Adam optimizer."
         },
     )
@@ -1053,8 +1068,12 @@ class Data2VecAudioModel(BaseFairseqModel):
                     x = self.pre_ln(x.transpose(1, 2))
                     return self.body(x)
             self.trans_recon_decoder = _TransMirrorWrap(self.embed, 512, out_d)
+            # post_extract_proj output is [B, T, encoder_embed_dim] -- same shape as the
+            # transformer's own output, so it reuses the identical wrap/decoder class.
+            self.proj_recon_decoder = _TransMirrorWrap(self.embed, 512, out_d)
         else:
             self.trans_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
+            self.proj_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
 
         self.num_updates = 0
         
@@ -1096,6 +1115,9 @@ class Data2VecAudioModel(BaseFairseqModel):
             if getattr(cfg, "lambda_recon_trans", 0.0) > 0:
                 for p in self.trans_recon_decoder.parameters():
                     p.requires_grad = True
+            if getattr(cfg, "lambda_recon_proj", 0.0) > 0:
+                for p in self.proj_recon_decoder.parameters():
+                    p.requires_grad = True
         elif not cfg.train_only_fe:
             print("[+] Training the entire model (not only Feature-Extractor)")
             logger.info("[+] Training the entire model (not only Feature-Extractor)")
@@ -1104,6 +1126,9 @@ class Data2VecAudioModel(BaseFairseqModel):
                     p.requires_grad = True
             if getattr(cfg, "lambda_recon_trans", 0.0) > 0:
                 for p in self.trans_recon_decoder.parameters():
+                    p.requires_grad = True
+            if getattr(cfg, "lambda_recon_proj", 0.0) > 0:
+                for p in self.proj_recon_decoder.parameters():
                     p.requires_grad = True
 
     def freeze_all_except_feature_extractor(self):
@@ -1545,6 +1570,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         if self.post_extract_proj is not None:
             pe_in = features.detach().float()
             features = self.post_extract_proj(features)
+            proj_seq = features  # pre-mask projection output, for recon_proj
             pe_out = features.detach().float()
             post_extract_stats = {
                 "post_extract_in_mean": pe_in.mean(),
@@ -1747,6 +1773,15 @@ class Data2VecAudioModel(BaseFairseqModel):
             trans_loss = recon_loss_fn(pred_t, recon_target, reduction="none").sum(dim=-1)
             result["losses"]["recon_trans"] = (
                 trans_loss.sum() * recon_scale * self.cfg.lambda_recon_trans
+            )
+        if getattr(self.cfg, "lambda_recon_proj", 0.0) > 0:
+            if getattr(self.proj_recon_decoder, "needs_full_sequence", False):
+                pred_proj = self.proj_recon_decoder(proj_seq)
+            else:
+                pred_proj = self.proj_recon_decoder(self._mean_pool(proj_seq, padding_mask))
+            proj_loss = recon_loss_fn(pred_proj, recon_target, reduction="none").sum(dim=-1)
+            result["losses"]["recon_proj"] = (
+                proj_loss.sum() * recon_scale * self.cfg.lambda_recon_proj
             )
 
         x = x[mask_indices]
