@@ -1,0 +1,150 @@
+# @package _group_
+#
+# Step 2: Projection fine-tune + d2v, mlp2048 capacity (T6's already-established
+# winner -- see TASKS.md T10, porting directly rather than re-sweeping
+# linear/mlp768/mlp2048). Based on spectralfm_step1_fe_proj_pretrain.yaml with:
+#
+#   • FE:          FROZEN, init = Step 1 winner (step1_feProjJoint_lambdaFe0.5.pt)
+#   • Projection:  TRAIN, random init, mlp_gelu capacity, hidden=2048
+#   • Transformer: FROZEN, init = base_libri
+#   • FE decoder:  FROZEN, carried from Step 1 (not in the loss -- lambda_recon_fe=0)
+#   • Projection decoder: TRAIN, random init, newly attached (proj_recon_decoder)
+#
+# Per-experiment overrides (set at launch, not hardcoded here):
+#   dataset.batch_size, optimization.max_update, common.wandb_run_name
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 100
+  tensorboard_logdir: tb
+  user_dir: /storage/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm-t10-step2"
+  wandb_run_name: "experiment2_projMlp2048_lambdaProj${model.lambda_recon_proj}_${now:%Y%m%d_%H%M}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 2000
+  keep_interval_updates: 5
+  no_epoch_checkpoints: true
+
+task:
+  _name: audio_pretraining
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_all
+  max_sample_size: 500
+  min_sample_size: 1
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 768
+  train_subset: train
+  valid_subset: valid
+  disable_validation: true
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  required_batch_size_multiple: 1
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - recon_proj
+    - regression
+    - ema_decay
+    - target_var
+    - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
+
+optimization:
+  max_update: 10000
+  max_epoch: 0
+  lr: [1.0e-5]
+  update_freq: [1]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 500
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.05
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  # mlp2048 capacity -- T6's established winner (linear/mlp768 not re-swept here).
+  post_extract_proj_type: mlp_gelu
+  post_extract_proj_mlp_hidden: 2048
+
+  # Projection decoder — attached, trainable, random init.
+  lambda_recon_proj: 0.5
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+  recon_decoder_type: mirror
+
+  # FE decoder carried from Step 1 but frozen and not in the loss this step
+  # (lambda_recon_fe defaults to 0.0, omitted).
+
+  # Per-component init/freeze — replaces the legacy full-checkpoint load.
+  model_path: null
+  skip_pretrained_weights: true
+
+  init_fe_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
+  init_ln_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
+  init_fe_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
+  init_transformer_ckpt: /storage/noy/SpectralFM/fairseq/base_libri_official.pt
+  # Projection and proj_recon_decoder both stay random (no init_proj_ckpt /
+  # init_proj_recon_decoder_ckpt set) -- freshly initialized this step.
+
+  freeze_fe_v2: true
+  freeze_ln: true
+  freeze_proj: false
+  freeze_transformer_v2: true
+  freeze_fe_recon_decoder: true
+  freeze_proj_recon_decoder: false
+  freeze_mask_emb: true
+  freeze_final_proj: true
+
+  tag_param_groups: false
+
+hydra:
+  run:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_t10_step2
+  sweep:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss
