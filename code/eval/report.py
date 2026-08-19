@@ -229,6 +229,8 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
 
     mean_bits = [
         f"{label} mean MSE = {results[f'recon_{key}_mse_mean']:.3e}"
+        + (f" (MAE = {results[f'recon_{key}_mae_mean']:.3e})"
+           if f"recon_{key}_mae_mean" in results else "")
         for key, label, _ in _PATHWAY_STYLE
         if f"recon_{key}_mse_mean" in results
     ]
@@ -1227,6 +1229,8 @@ def _html_section_signal_reconstruction(results: dict, figures: list) -> str:
         for key, label in (("fe", "FE"), ("proj", "Projection"), ("tr", "Transformer")):
             if f"recon_{key}_mse_mean" in r:
                 cards[f"{label} recon mean MSE"] = f"{r[f'recon_{key}_mse_mean']:.3e}"
+            if f"recon_{key}_mae_mean" in r:
+                cards[f"{label} recon mean MAE"] = f"{r[f'recon_{key}_mae_mean']:.3e}"
         cards["normalize"] = str(r.get("normalize"))
         body = _html_metric_cards(cards)
         body += "\n" + "\n".join(_html_figure(cap, path) for cap, path in figures)
@@ -1502,6 +1506,8 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             for key, label in (("fe", "FE"), ("proj", "Projection"), ("tr", "Transformer")):
                 if f"recon_{key}_mse_mean" in r:
                     out.append(f"| {label} recon mean MSE | {r[f'recon_{key}_mse_mean']:.6e} |")
+                if f"recon_{key}_mae_mean" in r:
+                    out.append(f"| {label} recon mean MAE | {r[f'recon_{key}_mae_mean']:.6e} |")
             out.append(f"| normalize | {r.get('normalize')} |")
         elif base == "noise_robustness":
             for k, v in (r.get("summary") or {}).items():

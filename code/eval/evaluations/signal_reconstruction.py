@@ -515,9 +515,18 @@ def run(
 
     for k in pathway_names:
         mse = F.mse_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
+        mae = F.l1_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
         rows[f"{k}_mse"] = mse
+        rows[f"{k}_mae"] = mae
         out[f"recon_{k}_mse_mean"] = float(mse.mean())
         out[f"recon_{k}_mse_median"] = float(np.median(mse))
+        # MAE alongside MSE: `data2vec_audio.py`'s recon_loss_type defaults to L1, not
+        # L2/MSE, so a pathway trained under that default can show a large MSE (driven
+        # by a few outlier errors L1 doesn't penalize as harshly) while still being a
+        # genuinely improving, well-behaved fit by the metric it was actually trained
+        # on. Report both rather than letting MSE alone look falsely catastrophic.
+        out[f"recon_{k}_mae_mean"] = float(mae.mean())
+        out[f"recon_{k}_mae_median"] = float(np.median(mae))
 
     out["results_df"] = pd.DataFrame(rows)
 
@@ -532,6 +541,7 @@ def run(
 
     msg = [f"[SignalRecon] n={len(target)}"]
     for k in pathway_names:
-        msg.append(f"{k.upper()} MSE mean={out[f'recon_{k}_mse_mean']:.4e}")
+        msg.append(f"{k.upper()} MSE mean={out[f'recon_{k}_mse_mean']:.4e} "
+                   f"MAE mean={out[f'recon_{k}_mae_mean']:.4e}")
     print("  ".join(msg))
     return out
