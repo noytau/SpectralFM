@@ -110,7 +110,18 @@ def _maybe_apply_recon_components(model, cfg) -> None:
             p = (getattr(cfg, attr, None) or "").strip()
             if not p or p.lower() == "none":
                 continue
-            getattr(rc, loader_name)(target, p)
+            if loader_name == "load_head_from_ckpt":
+                # `name` (e.g. "fe_recon_decoder") doubles as the exact state-dict
+                # prefix a native fairseq checkpoint saves this head under, so pass
+                # it as preferred_key -- without it, load_head_from_ckpt only
+                # recognizes train_reconstruction.py's separate save-format prefixes
+                # (fe_mirror./transformer_mirror./decoder.) and silently reports
+                # "no head keys found" for a perfectly valid native checkpoint that
+                # simply uses different key names. Confirmed empirically 2026-08-19
+                # loading step1's fe_recon_decoder into a Step 2 config.
+                rc.load_head_from_ckpt(target, p, preferred_key=name)
+            else:
+                getattr(rc, loader_name)(target, p)
 
     if any_freeze:
         # Semantics (since the "explicit-unfreeze" patch):
