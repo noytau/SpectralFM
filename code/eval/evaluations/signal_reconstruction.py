@@ -233,8 +233,7 @@ def load_native_proj_recon(ckpt_path: str, device: str = "cpu", arch: str = "con
     task_cfg = cfg.get("task", cfg) if isinstance(cfg, dict) else getattr(cfg, "task", cfg)
     normalize = (task_cfg.get("normalize") if isinstance(task_cfg, dict)
                  else getattr(task_cfg, "normalize", True))
-    meta = {"lambda_recon_proj": lambda_recon_proj, "normalize": bool(normalize),
-            "pre_decoder_ln": use_ln}
+    meta = {"lambda_recon_proj": lambda_recon_proj, "normalize": bool(normalize)}
     print(f"[SignalRecon] native proj-recon head loaded: {os.path.basename(ckpt_path)}  meta={meta}")
     return backbone, head, meta
 
