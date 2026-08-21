@@ -66,7 +66,14 @@ criterion:
 optimization:
   max_update: 10000
   max_epoch: 0
-  lr: [1.0e-5]
+  # lr=1e-4, not the 1e-5 "fine-tune" rate used elsewhere in this chain: the
+  # projection + proj_recon_decoder train from complete random init here (same
+  # status as step0/step1's FE+projection, which correctly used 1e-4), not a
+  # fine-tune of an already-good component. The original 1e-5 run showed a
+  # textbook under-convergence signature -- gnorm decaying to ~2-3 alongside
+  # recon_proj still measurably falling at the final step, i.e. the cosine
+  # schedule reached ~0 before training converged, not because it had.
+  lr: [1.0e-4]
   update_freq: [1]
   clip_norm: 1.0
 
