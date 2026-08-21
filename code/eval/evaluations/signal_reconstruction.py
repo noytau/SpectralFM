@@ -17,7 +17,8 @@ Three reconstruction pathways, each loaded from its OWN checkpoint:
                      proj_recon_decoder (e.g. a Step 2-style run)
 
   Transformer recon: input → FE → LN → proj → Transformer → TransformerMirrorDecoder → signal
-                     checkpoint keys: transformer_mirror / backbone_ckpt
+                     checkpoint keys: transformer_mirror / backbone_ckpt, OR a native
+                     fairseq checkpoint carrying a trans_recon_decoder (e.g. Step 3)
                      The backbone (FE+LN+proj+transformer) is loaded from the fairseq
                      checkpoint referenced by `backbone_ckpt` (remapped into the HF
                      Data2VecAudioModel — no fairseq import needed).
@@ -238,6 +239,69 @@ def load_native_proj_recon(ckpt_path: str, device: str = "cpu", arch: str = "con
     return backbone, head, meta
 
 
+def is_native_trans_recon_ckpt(ckpt_path: str) -> bool:
+    """
+    True if ckpt_path is a plain fairseq hydra_train checkpoint (keys: cfg/model)
+    with a trans_recon_decoder attached (a Step 3-style transformer-reconstruction
+    run) — the decoder lives inline as `trans_recon_decoder.*` keys alongside the
+    full backbone, as opposed to load_tr_recon's separate transformer_mirror
+    standalone-save format.
+    """
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    return (
+        "cfg" in sd and "model" in sd
+        and any(k.startswith("trans_recon_decoder.") for k in sd["model"])
+    )
+
+
+def load_native_trans_recon(ckpt_path: str, device: str = "cpu", arch: str = "conv1d"):
+    """
+    Load the backbone + trans_recon_decoder straight out of a native fairseq
+    hydra_train checkpoint (a Step 3-style run). Architecturally identical to
+    load_native_proj_recon's _ProjMirrorHead (both trans_recon_decoder and
+    proj_recon_decoder are instantiated as the same _TransMirrorWrap class in
+    data2vec_audio.py — stem Conv1d -> pre_ln -> MirrorReconDecoder body), just
+    fed from a different point in the forward pass: the transformer encoder's
+    own output, not post_extract_proj's pre-transformer output.
+
+    Returns (backbone, head, meta) — same shape as load_tr_recon.
+    """
+    from ..checkpoint_loader import CheckpointLoader
+
+    raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if not ("cfg" in raw and "model" in raw):
+        raise ValueError(f"Not a native fairseq checkpoint: {ckpt_path}")
+    sd = raw["model"]
+    if not any(k.startswith("trans_recon_decoder.") for k in sd):
+        raise ValueError(f"No trans_recon_decoder found in checkpoint: {ckpt_path}")
+
+    print(f"[SignalRecon] native trans-recon backbone: {ckpt_path}")
+    backbone = CheckpointLoader.from_file(ckpt_path, arch=arch)
+    backbone.eval().to(device)
+
+    dec_state = {k[len("trans_recon_decoder."):]: v for k, v in sd.items()
+                 if k.startswith("trans_recon_decoder.")}
+    embed_dim = backbone.config.hidden_size if hasattr(backbone, "config") else 768
+    head = _ProjMirrorHead(in_dim=embed_dim, mid_dim=512, out_dim=245)
+    r = head.load_state_dict(dec_state, strict=False)
+    if r.missing_keys or r.unexpected_keys:
+        raise RuntimeError(
+            f"native trans-recon load error: missing={r.missing_keys} unexpected={r.unexpected_keys}"
+        )
+    head.eval().to(device)
+
+    cfg = raw.get("cfg", {})
+    model_cfg = cfg.get("model", cfg) if isinstance(cfg, dict) else getattr(cfg, "model", cfg)
+    lambda_recon_trans = (model_cfg.get("lambda_recon_trans") if isinstance(model_cfg, dict)
+                           else getattr(model_cfg, "lambda_recon_trans", None))
+    task_cfg = cfg.get("task", cfg) if isinstance(cfg, dict) else getattr(cfg, "task", cfg)
+    normalize = (task_cfg.get("normalize") if isinstance(task_cfg, dict)
+                 else getattr(task_cfg, "normalize", True))
+    meta = {"lambda_recon_trans": lambda_recon_trans, "normalize": bool(normalize)}
+    print(f"[SignalRecon] native trans-recon head loaded: {os.path.basename(ckpt_path)}  meta={meta}")
+    return backbone, head, meta
+
+
 def load_tr_recon(ckpt_path: str, device: str = "cpu", arch: str = "conv1d",
                   backbone_ckpt: Optional[str] = None):
     """
@@ -440,7 +504,10 @@ def run(
             fe_parts = load_native_fe_recon(fe_ckpt, device=device)
         elif fe_ckpt:
             fe_parts = load_fe_recon(fe_ckpt, device=device)
-        tr_parts = load_tr_recon(tr_ckpt, device=device, arch=arch) if tr_ckpt else None
+        if tr_ckpt and is_native_trans_recon_ckpt(tr_ckpt):
+            tr_parts = load_native_trans_recon(tr_ckpt, device=device, arch=arch)
+        elif tr_ckpt:
+            tr_parts = load_tr_recon(tr_ckpt, device=device, arch=arch)
         proj_parts = load_native_proj_recon(proj_ckpt, device=device, arch=arch) if proj_ckpt else None
 
     if normalize is None:
