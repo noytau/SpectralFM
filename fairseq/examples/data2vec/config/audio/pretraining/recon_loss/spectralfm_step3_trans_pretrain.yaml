@@ -3,10 +3,17 @@
 # Step 3 (TASKS.md T11): Transformer fine-tune + d2v, on top of frozen FE+projection.
 #
 #   • FE:          FROZEN, init = Step 1 winner (step1_feProjJoint_lambdaFe0.5.pt)
-#   • Projection:  FROZEN, init = Step 2's winning capacity variant
-#                  (placeholder below: step2_projMlp2048_lambdaProj0.5.pt — swap for
-#                  whichever variant wins the 8-way comparison, and update
-#                  post_extract_proj_type/post_extract_proj_mlp_hidden to match)
+#   • Projection:  FROZEN, init = Step 2's winning capacity variant —
+#                  step2_projMlp768_lambdaProj0.5.pt. The 8-way comparison
+#                  (2026-08-21) showed mlp768 beating mlp2048 on label-regression
+#                  R² at 2c/3c (0.303/0.322 vs 0.235/0.253 -- even beating its own
+#                  FE source, step1 λ0.5's 0.284/0.303) while staying competitive on
+#                  shot-noise robustness (0.727/0.700 vs mlp2048's 0.742/0.721) and
+#                  actually winning on gaussian-noise robustness (0.994, best of the
+#                  three). mlp2048 only edges ahead at 1-component label-regression
+#                  (0.086 vs 0.084) and on raw reconstruction fidelity. Per this
+#                  pipeline's established practice (label-informativeness over
+#                  robustness when the two trade off), mlp768 is the pick.
 #   • Transformer: TRAIN, random init = base_libri_official.pt, trained on NOVA data
 #   • FE decoder:       FROZEN, carried from Step 1 (not in the loss — lambda_recon_fe=0)
 #   • Projection decoder: FROZEN, carried from Step 2 (not in the loss — lambda_recon_proj=0)
@@ -41,7 +48,7 @@ task:
 
 dataset:
   num_workers: 4
-  batch_size: 384
+  batch_size: 768
   train_subset: train
   valid_subset: valid
   disable_validation: true
@@ -116,7 +123,7 @@ model:
   # or load_post_extract_proj_from_ckpt's shape-safe merge silently loads 0 tensors
   # and the projection is left at random init instead of the intended warm start.
   post_extract_proj_type: mlp_gelu
-  post_extract_proj_mlp_hidden: 2048
+  post_extract_proj_mlp_hidden: 768
 
   # Transformer decoder — attached, trainable, random init.
   lambda_recon_trans: 0.5
@@ -134,8 +141,8 @@ model:
   init_fe_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
   init_ln_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
   init_fe_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
-  init_proj_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step2_projMlp2048_lambdaProj0.5.pt
-  init_proj_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step2_projMlp2048_lambdaProj0.5.pt
+  init_proj_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step2_projMlp768_lambdaProj0.5.pt
+  init_proj_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step2_projMlp768_lambdaProj0.5.pt
   init_transformer_ckpt: /storage/noy/SpectralFM/fairseq/base_libri_official.pt
   # Transformer decoder stays random (no init_trans_recon_decoder_ckpt) -- freshly
   # initialized this step.
