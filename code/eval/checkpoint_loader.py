@@ -30,25 +30,48 @@ _3AE_AUX_PREFIXES = ("fe_recon_decoder.", "trans_recon_decoder.")
 
 def _install_mlp_projection(model, raw_sd: dict, prefix: str = "post_extract_proj.") -> bool:
     """
-    If the fairseq-format state dict carries an MLP post_extract_proj
-    (mlp_gelu: Linear→GELU→Linear, keys `post_extract_proj.0.*` / `.2.*`),
+    If the fairseq-format state dict carries a Sequential post_extract_proj
+    (mlp_gelu: Linear→GELU→Linear, keys `post_extract_proj.0.*` / `.2.*`; or
+    either shape with a trailing LayerNorm — `post_extract_proj_layernorm=True`,
+    keys `post_extract_proj.1.*` for linear+LN or `.3.*` for mlp_gelu+LN),
     replace the HF single-Linear `feature_projection.projection` with a matching
     nn.Sequential so the remapped keys land instead of being silently dropped.
-    Dims are inferred from the tensors. Returns True if installed.
+    Dims are inferred from the tensors. Returns True if installed (False for a
+    bare Linear with no trailing LayerNorm, which HF's default already handles).
     """
     import torch.nn as nn
 
     w0 = raw_sd.get(prefix + "0.weight")
     w2 = raw_sd.get(prefix + "2.weight")
-    if w0 is None or w2 is None:
+    if w0 is None:
         return False
-    hidden, in_dim = w0.shape
-    out_dim = w2.shape[0]
-    proj = nn.Sequential(nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim))
+
+    if w2 is not None:
+        # mlp_gelu: 0=Linear, 1=GELU (no params), 2=Linear, optionally 3=LayerNorm
+        hidden, in_dim = w0.shape
+        out_dim = w2.shape[0]
+        layers = [nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim)]
+        desc = f"{in_dim}→{hidden}→GELU→{out_dim}"
+        ln_idx = 3
+    else:
+        # linear + LayerNorm: 0=Linear, 1=LayerNorm (a bare Linear with no LN
+        # has no numeric-indexed keys at all and was already handled above)
+        if raw_sd.get(prefix + "1.weight") is None:
+            return False
+        out_dim, in_dim = w0.shape
+        layers = [nn.Linear(in_dim, out_dim)]
+        desc = f"{in_dim}→{out_dim}"
+        ln_idx = 1
+
+    if raw_sd.get(f"{prefix}{ln_idx}.weight") is not None:
+        layers.append(nn.LayerNorm(layers[-1].out_features))
+        desc += "→LayerNorm"
+
+    proj = nn.Sequential(*layers)
     proj.requires_grad_(False)
     model.feature_projection.projection = proj
-    print(f"[CheckpointLoader] MLP projection detected — installed Sequential "
-          f"({in_dim}→{hidden}→GELU→{out_dim}) at feature_projection.projection")
+    print(f"[CheckpointLoader] Sequential projection detected — installed "
+          f"({desc}) at feature_projection.projection")
     return True
 
 

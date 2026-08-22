@@ -118,6 +118,12 @@ model:
   # mlp2048 capacity -- T6's established winner (linear/mlp768 not re-swept here).
   post_extract_proj_type: mlp_gelu
   post_extract_proj_mlp_hidden: 2048
+  # Constrains post_extract_proj's output scale (otherwise architecturally
+  # unconstrained, unlike the FE which always has a LayerNorm after it). Added
+  # after the lr=1e-4 fix (see optimization.lr comment) let proj_seq's output
+  # std balloon 1.47->4.46, degrading reconstruction despite the training loss
+  # itself converging -- this directly fixes the root cause instead.
+  post_extract_proj_layernorm: true
 
   # Projection decoder — attached, trainable, random init.
   lambda_recon_proj: 0.5

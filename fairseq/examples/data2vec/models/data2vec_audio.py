@@ -203,26 +203,38 @@ def _maybe_apply_recon_components(model, cfg) -> None:
 
 
 def build_post_extract_proj(
-    in_dim: int, out_dim: int, proj_type: str, mlp_hidden: int
+    in_dim: int, out_dim: int, proj_type: str, mlp_hidden: int,
+    layernorm: bool = False,
 ) -> nn.Module:
     """FE channel space → transformer embed dim (cf. wav2vec2 post_extract_proj).
 
     See fairseq/models/wav2vec/wav2vec2.py (conditional Linear when embed !=
     encoder_embed_dim) and Data2VecAudioModel below.
+
+    ``layernorm`` appends an ``nn.LayerNorm(out_dim)`` as the final layer.
+    Off by default for backward compatibility with existing checkpoints
+    (whose post_extract_proj has no such layer) — opt in via
+    ``cfg.post_extract_proj_layernorm`` for new training runs. Without it,
+    this projection's output scale is architecturally unconstrained (unlike
+    the FE, which is always followed by an explicit LayerNorm) and can drift
+    arbitrarily far from unit scale during training, degrading anything
+    downstream that assumes a roughly-normalized input (the frozen
+    transformer in a later step, or a reconstruction decoder trained against
+    a unit-scale target).
     """
     t = (proj_type or "linear").strip().lower()
     if t == "mlp_gelu":
         h = max(1, int(mlp_hidden))
-        return nn.Sequential(
-            nn.Linear(in_dim, h),
-            nn.GELU(),
-            nn.Linear(h, out_dim),
-        )
-    if t != "linear":
-        logger.warning(
-            "Unknown post_extract_proj_type=%r; using linear", proj_type
-        )
-    return nn.Linear(in_dim, out_dim)
+        layers = [nn.Linear(in_dim, h), nn.GELU(), nn.Linear(h, out_dim)]
+    else:
+        if t != "linear":
+            logger.warning(
+                "Unknown post_extract_proj_type=%r; using linear", proj_type
+            )
+        layers = [nn.Linear(in_dim, out_dim)]
+    if layernorm:
+        layers.append(nn.LayerNorm(out_dim))
+    return layers[0] if len(layers) == 1 else nn.Sequential(*layers)
 
 
 # Debug plotting configuration
@@ -557,6 +569,16 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     post_extract_proj_mlp_hidden: int = field(
         default=1536,
         metadata={"help": "Hidden size when post_extract_proj_type=mlp_gelu"},
+    )
+    post_extract_proj_layernorm: bool = field(
+        default=False,
+        metadata={
+            "help": "Append an nn.LayerNorm(encoder_embed_dim) after post_extract_proj. "
+            "Off by default for backward compatibility with existing checkpoints -- "
+            "without it, post_extract_proj's output scale is unconstrained and can "
+            "drift arbitrarily during training (unlike the FE, which always has an "
+            "explicit LayerNorm after it)."
+        },
     )
     lambda_var: float = field(
         default=0.0,
@@ -1005,6 +1027,7 @@ class Data2VecAudioModel(BaseFairseqModel):
             cfg.encoder_embed_dim,
             getattr(cfg, "post_extract_proj_type", "linear"),
             int(getattr(cfg, "post_extract_proj_mlp_hidden", 1536)),
+            layernorm=bool(getattr(cfg, "post_extract_proj_layernorm", False)),
         )
 
         self.mask_prob = cfg.mask_prob
