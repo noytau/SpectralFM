@@ -1143,6 +1143,20 @@ def _recon_combined_table(results: dict) -> list:
     return lines
 
 
+def _md_inline_to_html(text: str) -> str:
+    """
+    Convert the inline markdown the reconstruction block is written in - `code` and
+    **bold** - into HTML. The same strings feed both the markdown and HTML reports, and
+    previously the HTML path just stripped the markers, so backticks rendered literally.
+    """
+    import html as _html
+    import re as _re
+    out = _html.escape(text, quote=False)
+    out = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
+    out = _re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    return out
+
+
 def _md_to_html_table(lines: list) -> str:
     """Render the markdown tables built above as HTML, reusing the report's own CSS."""
     rows = [ln for ln in lines if ln.strip().startswith("|")]
@@ -1152,10 +1166,12 @@ def _md_to_html_table(lines: list) -> str:
         return [c.strip() for c in ln.strip().strip("|").split("|")]
     head = cells(rows[0])
     body = [cells(ln) for ln in rows[2:]]
-    out = ["<table>", "<thead><tr>"] + ["<th>%s</th>" % h for h in head] + ["</tr></thead>",
-                                                                            "<tbody>"]
+    out = (["<table>", "<thead><tr>"]
+           + ["<th>%s</th>" % _md_inline_to_html(h) for h in head]
+           + ["</tr></thead>", "<tbody>"])
     for row in body:
-        out.append("<tr>" + "".join("<td>%s</td>" % c for c in row) + "</tr>")
+        out.append("<tr>" + "".join("<td>%s</td>" % _md_inline_to_html(c)
+                                    for c in row) + "</tr>")
     out += ["</tbody>", "</table>"]
     return "\n".join(out)
 
@@ -1175,11 +1191,11 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
         s = ln.strip()
         if not s or s.startswith("|"):
             continue
-        s = s.replace("**", "").replace("`", "")
         if s.startswith(">"):
-            intro_html.append("<blockquote><p>%s</p></blockquote>" % s.lstrip("> "))
+            intro_html.append("<blockquote><p>%s</p></blockquote>"
+                              % _md_inline_to_html(s.lstrip("> ")))
         else:
-            intro_html.append(para(s))
+            intro_html.append(para(_md_inline_to_html(s)))
 
     parts = ["<section>", "<h2>Signal Reconstruction (3AE)</h2>"]
     model = first.get("_model_name") or ""
@@ -1199,7 +1215,8 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
     for key in keys:
         r = results[key]
         alias = _split_eval_key(key)[1]
-        parts.append("<h4>%s</h4>" % _recon_dataset_heading(r, alias))
+        parts.append("<h4>%s</h4>"
+                     % _md_inline_to_html(_recon_dataset_heading(r, alias)))
         if r.get("skipped"):
             parts.append(para("<em>Skipped — %s.</em>" % r.get("error", "n/a")))
             continue
@@ -1210,13 +1227,14 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
     parts += ["<h3>2. The whole dataset</h3>",
               para("The same reconstructions aggregated over every sample drawn: the "
                    "headline numbers per head, then which kinds of spectra fail."),
-              para(_RECON_TABLE_LEGEND.replace("**", "").replace("`", ""))]
+              para(_md_inline_to_html(_RECON_TABLE_LEGEND))]
     for key in keys:
         r = results[key]
         alias = _split_eval_key(key)[1]
         if r.get("skipped"):
             continue
-        parts.append("<h4>%s</h4>" % _recon_dataset_heading(r, alias))
+        parts.append("<h4>%s</h4>"
+                     % _md_inline_to_html(_recon_dataset_heading(r, alias)))
         parts.append(_md_to_html_table(_recon_summary_table(r)))
         spec = r.get("spectrum_df")
         if isinstance(spec, pd.DataFrame) and not spec.empty:
