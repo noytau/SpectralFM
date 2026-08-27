@@ -358,6 +358,33 @@ It also drops verified byte-identical duplicate components: in both `multi_chann
 ~2/14 of the mass and inflate every components-per-spectrum count by 2. `sampled_data` has no
 duplicates.
 
+#### PDF for an e-ink reader
+
+`--pdf` additionally writes `eval_report_eink.pdf` — the same content, laid out for an
+e-paper device (BOOX and similar) rather than a monitor:
+
+```bash
+python -m eval.runner ... --evals signal_reconstruction --recon_ckpt <ckpt> --pdf
+python -m eval.runner ... --pdf --pdf_page 8x10.6      # for a 13.3in device
+```
+
+| Screen assumption | What changes |
+|---|---|
+| no colour | greyscale palette, and heads separated by **line style, marker and hatch** — which also makes the colour figures readable without hue |
+| no reflow, small screen | a 6×8in page, so 11pt text reads like a paperback on a 7.8in or 10.3in panel with no zooming |
+| portrait, fixed aspect | the wide multi-dataset grids are transposed — one dataset per row instead of four side by side, which a portrait page could only shrink into illegibility |
+| slow refresh | one figure per page at 0.86 text-height, explanation on the next page; sharing a page caps the image enough that a near-page-shaped figure cannot use the full width either |
+| bitmap text is the worst case | the on-image footnote is dropped; the explanation is set as real type instead |
+
+Needs `pdflatex`. The TeX install on the eval host is partial — `hyperref` and `fontenc`
+both fail on missing dependencies (`pdftexcmds`, `infwarerr`) — so `report_pdf.py` uses
+only `geometry`, `graphicx`, `longtable`, `array`, `tabularx`, and maps every non-ASCII
+character to a TeX macro rather than relying on an input encoding.
+
+**One caveat:** `--pdf` switches the figure style for the whole run, so the PNGs and the
+HTML report from that run are greyscale too. Run without `--pdf` when you want the colour
+HTML, or run twice.
+
 #### Self-test
 
 ```bash
