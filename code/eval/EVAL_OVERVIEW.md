@@ -360,20 +360,37 @@ duplicates.
 
 #### PDF for an e-ink reader
 
-`--pdf` additionally writes `eval_report_eink.pdf` — the same content, laid out for an
-e-paper device (BOOX and similar) rather than a monitor:
+`--pdf` additionally writes one PDF per page size — the same content, laid out for an
+e-paper device (Onyx BOOX and similar) rather than a monitor:
 
 ```bash
 python -m eval.runner ... --evals signal_reconstruction --recon_ckpt <ckpt> --pdf
-python -m eval.runner ... --pdf --pdf_page 8x10.6      # for a 13.3in device
+python -m eval.runner ... --pdf --pdf_page onyx10        # just the 10.3in size
+python -m eval.runner ... --pdf --pdf_page 9x12          # any WxH in inches
 ```
+
+**Page size is the setting that matters most**, and the rule is simple: a page the same
+physical size as the panel renders 1:1, so 11pt type really is 11pt. A smaller page is
+scaled up — bigger text, less content per screen. A larger page is scaled down, and text
+can end up smaller than intended. So the presets are the panels' *physical* dimensions,
+not their diagonals:
+
+| Preset | Page | Device | Pixels / ppi |
+|---|---|---|---|
+| `onyx13` | 8.0 × 10.6 in | 13.3in Tab X, Max Lumi | 1650×2200 @ 207 |
+| `onyx10` | 6.2 × 8.3 in | 10.3in Note Air, Tab Ultra | 1404×1872 @ 226 |
+| `onyx8` | 4.7 × 6.2 in | 7.8in Nova Air | 1404×1872 @ 300 |
+
+Default is `onyx13,onyx10` — several sizes cost only an extra `pdflatex` pass each, since
+they share the figures, so a run hands out a copy per device instead of making anyone
+guess.
 
 | Screen assumption | What changes |
 |---|---|
-| no colour | greyscale palette, and heads separated by **line style, marker and hatch** — which also makes the colour figures readable without hue |
-| no reflow, small screen | a 6×8in page, so 11pt text reads like a paperback on a 7.8in or 10.3in panel with no zooming |
-| portrait, fixed aspect | the wide multi-dataset grids are transposed — one dataset per row instead of four side by side, which a portrait page could only shrink into illegibility |
-| slow refresh | one figure per page at 0.86 text-height, explanation on the next page; sharing a page caps the image enough that a near-page-shaped figure cannot use the full width either |
+| no colour | greyscale palette, and heads separated by **line style, marker and hatch** — which also makes the colour figures readable without hue. The rank heatmap drops RdYlGn for a single white→grey luminance ramp: red and green have nearly the same luminance, so in greyscale the two ends of that scale collapse together |
+| no reflow | page sized to the panel, per the table above |
+| portrait, fixed aspect | the wide multi-dataset grids are transposed — one dataset per row instead of four side by side, which a portrait page could only shrink into illegibility. All six summary figures come out at or above the text-area aspect (0.72), so they fill the width rather than being height-limited |
+| slow refresh | a page turn costs a full-screen refresh, so on a page ≥ 9.5in tall (`onyx13`) the figure and its explanation share one page — 30 pages instead of 48. Below that the figure needs the page to itself or it gets squeezed to nothing |
 | bitmap text is the worst case | the on-image footnote is dropped; the explanation is set as real type instead |
 
 Needs `pdflatex`. The TeX install on the eval host is partial — `hyperref` and `fontenc`

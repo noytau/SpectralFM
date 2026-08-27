@@ -2084,8 +2084,9 @@ def generate_report(results: dict, output_dir: str, config=None,
     if pdf:
         try:
             from . import report_pdf
-            report_pdf.build_pdf(results, figures_by_eval, recon_summary_figs,
-                                 run_dir, config)
+            report_pdf.build_pdfs(results, figures_by_eval, recon_summary_figs,
+                                  run_dir, config,
+                                  pages=getattr(config, "pdf_page", None))
         except Exception as e:
             print(f"[Report] PDF build failed: {type(e).__name__}: {e}")
 

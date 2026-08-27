@@ -26,11 +26,54 @@ import re
 import shutil
 import subprocess
 
-# Roughly the usable area of a BOOX Note Air / Page in portrait, at 3:4. Figures are
-# scaled into it; text is set at 11pt, which on a 7.8in panel reads like a paperback.
-PAGE_W_IN = 6.0
-PAGE_H_IN = 8.0
+# Page size is the one setting that matters most on e-paper, and the rule is simple: a
+# PDF page the same physical size as the panel renders 1:1, so 11pt type is really 11pt.
+# A smaller page is scaled up - larger text, less content per screen; a larger page is
+# scaled down, and text can end up smaller than intended. So the presets are the panels'
+# actual physical dimensions, not their diagonals.
+#
+#   Onyx BOOX 10.3in (Note Air, Tab Ultra): 1404x1872 px @ 226 ppi = 6.2 x 8.3 in
+#   Onyx BOOX 13.3in (Tab X, Max Lumi):     1650x2200 px @ 207 ppi = 8.0 x 10.6 in
+#   Onyx BOOX 7.8in  (Nova Air):            1404x1872 px @ 300 ppi = 4.7 x 6.2 in
+PAGE_PRESETS = {
+    "onyx13": (8.0, 10.6),
+    "onyx10": (6.2, 8.3),
+    "onyx8": (4.7, 6.2),
+}
+DEFAULT_PAGES = ("onyx13", "onyx10")
+
+PAGE_W_IN = 8.0
+PAGE_H_IN = 10.6
 MARGIN_IN = 0.42
+
+# Above this page height the figure and its explanation fit on one page together, which
+# is worth a lot on a device where a page turn costs a full-screen refresh. Below it the
+# figure has to have the page to itself or it gets squeezed to nothing.
+COMBINE_MIN_H_IN = 9.5
+
+
+def parse_pages(spec: str) -> list:
+    """
+    Parse a page spec into [(label, w_in, h_in), ...].
+
+    Accepts preset names and explicit WxH, comma-separated: "onyx13,onyx10" or "8x10.6".
+    A run can emit several sizes for the cost of one pdflatex pass each, since they all
+    reuse the same figures.
+    """
+    out = []
+    for token in (t.strip() for t in spec.split(",") if t.strip()):
+        if token in PAGE_PRESETS:
+            w, h = PAGE_PRESETS[token]
+            out.append((token, w, h))
+            continue
+        try:
+            w, h = (float(v) for v in token.lower().split("x"))
+        except ValueError:
+            print("[ReportPDF] bad page spec %r — expected a preset (%s) or WxH"
+                  % (token, ", ".join(PAGE_PRESETS)))
+            continue
+        out.append(("%gx%g" % (w, h), w, h))
+    return out
 
 
 def available() -> bool:
@@ -197,18 +240,27 @@ def _figure_page(img_path: str, caption: str, explain: list, title: str) -> str:
     better trade on a device where the constraint is the screen, not the paper.
 
     The caption stays with the figure - it is one line and it is what the figure means.
+
+    On a page tall enough (COMBINE_MIN_H_IN, i.e. a 13.3in panel) the explanation joins
+    the figure instead: there is room for both, and on e-paper a page turn costs a
+    full-screen refresh, so not needing one is worth more than the extra figure height.
     """
+    combined = PAGE_H_IN >= COMBINE_MIN_H_IN and explain
+    # Sharing the page means leaving room for the text below the image.
+    img_h = "0.58" if combined else "0.90"
+
     out = [r"\subsubsection*{%s}" % tex_inline(title)]
     out.append(r"\begin{center}")
-    out.append(r"\includegraphics[width=\textwidth,height=0.90\textheight,"
-               r"keepaspectratio]{%s}" % img_path)
+    out.append(r"\includegraphics[width=\textwidth,height=%s\textheight,"
+               r"keepaspectratio]{%s}" % (img_h, img_path))
     out.append(r"\end{center}")
     out.append(r"\vspace{-0.4em}{\small\itshape %s\par}" % tex_inline(caption))
     if explain:
-        out.append(r"\clearpage")
-        out.append(r"{\small\textbf{%s}\par}" % tex_inline(title))
+        if not combined:
+            out.append(r"\clearpage")
+            out.append(r"{\small\textbf{%s}\par}" % tex_inline(title))
         out.append(r"\vspace{0.3em}")
-        out.append(r"\begin{itemize}\setlength{\itemsep}{0.5em}"
+        out.append(r"\begin{itemize}\setlength{\itemsep}{0.45em}"
                    r"\setlength{\leftmargini}{1.1em}")
         for label, text in explain:
             out.append(r"\item[] \textbf{%s.} %s" % (tex_inline(label), tex_inline(text)))
@@ -417,6 +469,29 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
     return "\n\n".join(doc)
 
 
+def build_pdfs(results: dict, figures_by_eval: dict, summary_figs: list,
+               run_dir: str, config=None, pages: str = None) -> list:
+    """
+    Build one PDF per requested page size. Returns the paths produced.
+
+    Several sizes cost only an extra pdflatex pass each - they share the figures - so a
+    run can hand out a copy for each device rather than making anyone guess which page
+    matches their panel.
+    """
+    global PAGE_W_IN, PAGE_H_IN
+    specs = parse_pages(pages or ",".join(DEFAULT_PAGES))
+    if not specs:
+        return []
+    out = []
+    for label, w, h in specs:
+        PAGE_W_IN, PAGE_H_IN = w, h
+        path = build_pdf(results, figures_by_eval, summary_figs, run_dir, config,
+                         name="eval_report_%s" % label)
+        if path:
+            out.append(path)
+    return out
+
+
 def build_pdf(results: dict, figures_by_eval: dict, summary_figs: list,
               run_dir: str, config=None, name: str = "eval_report_eink") -> str:
     """
@@ -464,6 +539,16 @@ def build_pdf(results: dict, figures_by_eval: dict, summary_figs: list,
         if os.path.isfile(stale):
             os.remove(stale)
     size_mb = os.path.getsize(pdf_path) / 1e6
-    print("[ReportPDF] %s  (%.1f MB, %.0fx%.0fin page)"
-          % (pdf_path, size_mb, PAGE_W_IN, PAGE_H_IN))
+    # Counting /Type /Page in the raw bytes reads 0 here, because pdfTeX puts the page
+    # objects in a compressed object stream. Ask pdfinfo when it is available.
+    pages = ""
+    if shutil.which("pdfinfo"):
+        info = subprocess.run(["pdfinfo", pdf_path], capture_output=True, text=True)
+        for line in info.stdout.splitlines():
+            if line.startswith("Pages:"):
+                pages = ", %s pages" % line.split(":", 1)[1].strip()
+                break
+    print("[ReportPDF] %s  (%.1f MB, %gx%gin page%s%s)"
+          % (pdf_path, size_mb, PAGE_W_IN, PAGE_H_IN, pages,
+             ", figure+text on one page" if PAGE_H_IN >= COMBINE_MIN_H_IN else ""))
     return pdf_path

@@ -180,7 +180,10 @@ class EvalConfig:
     # Also build eval_report_eink.pdf: the same content re-rendered for an e-ink reader
     # (greyscale figures, one per page, explanations as real type). Needs pdflatex.
     pdf: bool = False
-    pdf_page: str = "6x8"        # page size in inches, WxH — see --pdf_page
+    # Page sizes to emit, comma-separated: presets (onyx13/onyx10/onyx8) or WxH inches.
+    # Several cost only an extra pdflatex pass each, so the default covers both large
+    # Onyx panels rather than making anyone guess which page matches their device.
+    pdf_page: str = "onyx13,onyx10"
 
     def __post_init__(self):
         if self.device == "auto":
@@ -557,19 +560,15 @@ class EvalRunner:
 
     def _apply_pdf_style(self):
         """
-        Switch the figures to the greyscale e-ink styling and set the page size.
+        Switch the figures to the greyscale e-ink styling.
 
         Done before any figure is drawn, because the style changes the layouts, not just
         the colours - the wide multi-dataset grids are transposed to fit a portrait page.
+        Page sizes are handled by report_pdf at build time, since one set of figures
+        serves every page size.
         """
-        from . import recon_plots, report_pdf
+        from . import recon_plots
         recon_plots.set_style("eink")
-        try:
-            w, h = (float(v) for v in self.cfg.pdf_page.lower().split("x"))
-            report_pdf.PAGE_W_IN, report_pdf.PAGE_H_IN = w, h
-        except ValueError:
-            print(f"[EvalRunner] bad --pdf_page {self.cfg.pdf_page!r}, expected WxH "
-                  f"(e.g. 6x8) — using the default")
 
     def report(self, results: dict, output_dir: str | None = None) -> tuple[str, str]:
         """Generate markdown + HTML reports. Returns (md_path, html_path)."""
@@ -650,8 +649,13 @@ def main():
                              "from the same run is greyscale too — run without --pdf for "
                              "colour figures.")
     parser.add_argument("--pdf_page", default=None,
-                        help="PDF page size in inches as WxH (default 6x8, which suits a "
-                             "7.8in or 10.3in panel). Try 8x10.6 for a 13.3in device.")
+                        help="Page sizes to emit, comma-separated (default "
+                             "'onyx13,onyx10'). Presets are the panels' physical sizes: "
+                             "onyx13 = 8x10.6in (13.3in Tab X / Max Lumi), onyx10 = "
+                             "6.2x8.3in (10.3in Note Air / Tab Ultra), onyx8 = 4.7x6.2in "
+                             "(7.8in Nova Air). Or give WxH inches. A page matching the "
+                             "panel renders 1:1, so 11pt type really is 11pt; a smaller "
+                             "page is scaled up and a larger one down.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--nova_data_dir", default=None, help="nova_data/ root for structured similarity")
     parser.add_argument("--labeled_data_dir", default=None, help="Dataset with labels.tsv for label regression")
