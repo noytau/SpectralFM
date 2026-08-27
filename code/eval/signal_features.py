@@ -110,9 +110,13 @@ def quantile_bins(values: np.ndarray, n_bins: int = 5) -> tuple:
     # Bin labels are read by people, so escalate precision until the edges are
     # actually distinguishable — quantiles of a narrow distribution otherwise all
     # render as the same string (e.g. every bin labelled "1-1").
-    for precision in (3, 4, 5, 6):
+    for precision in (3, 4, 5, 6, 8, 10, 12):
         labels = [f"{edges[i]:.{precision}g}–{edges[i + 1]:.{precision}g}"
                   for i in range(len(edges) - 1)]
         if len(set(labels)) == len(labels):
             break
+    else:
+        # Edges this close cannot be told apart in decimal at any sane width - label the
+        # bins by rank instead of printing five identical-looking ranges.
+        labels = [f"q{i + 1}" for i in range(len(edges) - 1)]
     return out, labels
