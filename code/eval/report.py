@@ -172,6 +172,13 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     return figures
 
 
+def _recon_fig_caption(path: str) -> str:
+    """Short caption for a figure, from the shared recon_plots registry."""
+    from . import recon_plots
+    d = recon_plots.doc_for_figure(path)
+    return d["caption"] if d else os.path.basename(path)
+
+
 def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     """
     True signal reconstruction figures, styled after compare_fe_vs_trans_recon.py:
@@ -243,10 +250,7 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     path = _save_fig(fig, os.path.join(output_dir, "recon_overlay.png"))
-    figures.append((
-        "Individual reconstructions against the target (black), one column per decoder "
-        "head. The y-axis is fixed to the target's range per row, so a prediction drawn "
-        "flat at the edge is off-scale, not zero.", path))
+    figures.append((_recon_fig_caption(path), path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
     bar_cols = [(label, color, mse_col) for label, _, color, mse_col in pathways
@@ -269,9 +273,7 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         ax.set_title("Per-sample reconstruction MSE — per pathway", fontsize=10)
         fig.tight_layout()
         path = _save_fig(fig, os.path.join(output_dir, "recon_mse_bars.png"))
-        figures.append((
-            "Error for the six traces above, log scale — how much they differ from each "
-            "other, and from the dataset mean quoted in the legend.", path))
+        figures.append((_recon_fig_caption(path), path))
 
     return figures
 
@@ -996,17 +998,68 @@ def _recon_dataset_heading(r: dict, alias: str) -> str:
     return "%s — %s-component, n = %d" % (" / ".join(bits), group, n)
 
 
+# The four explanation fields, in reading order, with the labels used in the report.
+_EXPLAIN_FIELDS = [("what", "What this shows"), ("read", "How to read it"),
+                   ("good", "A good result"), ("caveats", "Caveats")]
+
+
+def _explain_lines(path: str) -> tuple:
+    """
+    The figure's explanation as (title, [(label, text), ...]), or ("", []) if the figure
+    is not registered.
+
+    The same text is drawn onto the PNG so a figure read on its own still makes sense,
+    but it is far easier to read here, so the report carries it too.
+    """
+    from . import recon_plots
+    from .evaluations.signal_reconstruction import CROSS_HEAD_CAVEAT
+
+    d = recon_plots.doc_for_figure(path)
+    if not d:
+        return "", []
+    out = []
+    for key, label in _EXPLAIN_FIELDS:
+        text = (d.get(key) or "").strip()
+        # Every figure repeats the cross-head confound verbatim. That is right on a
+        # standalone PNG and eighteen-fold repetition in a report that already states it
+        # up front, so here it becomes a pointer.
+        if CROSS_HEAD_CAVEAT.strip() in text:
+            text = text.replace(CROSS_HEAD_CAVEAT.strip(),
+                                "Comparing heads to each other is confounded — see the "
+                                "note at the top of this section.").strip()
+        if not text:
+            continue
+        if key == "read":                     # stored lowercase, mid-sentence
+            text = text[0].upper() + text[1:]
+        if not text.endswith("."):
+            text += "."
+        out.append((label, text))
+    return d.get("title", ""), out
+
+
 def _recon_md_figure(caption: str, path: str, run_dir: str) -> list:
-    """One image plus its one-line caption. Captions come ready to print."""
-    return ["", "![%s](%s)" % (caption, os.path.relpath(path, run_dir)),
-            "*" + caption + "*"]
+    """One image, its one-line caption, then the full explanation."""
+    title, explain = _explain_lines(path)
+    # Alt text is the short title, not the caption - the caption is printed right below
+    # the image, and repeating a full sentence twice reads badly in raw markdown.
+    lines = ["", "![%s](%s)" % (title or caption, os.path.relpath(path, run_dir)),
+             "*" + caption + "*", ""]
+    for label, text in explain:
+        lines.append("- **%s.** %s" % (label, text))
+    return lines
 
 
 def _recon_html_figure(caption: str, path: str) -> str:
+    title, explain = _explain_lines(path)
+    body = "".join("<li><strong>%s.</strong> %s</li>" % (label, _md_inline_to_html(text))
+                   for label, text in explain)
+    if body:
+        body = '<ul class="figexplain">%s</ul>' % body
     return ("<figure>"
             '<img src="%s" alt="%s">'
-            "<figcaption>%s</figcaption>"
-            "</figure>" % (_fig_to_b64(path), caption, _md_inline_to_html(caption)))
+            "<figcaption>%s</figcaption>%s"
+            "</figure>" % (_fig_to_b64(path), title or caption,
+                           _md_inline_to_html(caption), body))
 
 
 # A short legend for the summary tables: readers otherwise have to guess what a dash
@@ -1425,6 +1478,13 @@ td.bad  { color: #c0392b; font-weight: 600; }
 figure { margin: 1.5rem 0; text-align: center; }
 figure img { max-width: 100%; border-radius: 6px; border: 1px solid #e0e3ea; }
 figcaption { margin-top: .5rem; font-size: .82rem; color: #777; font-style: italic; }
+/* The same explanation is drawn onto the PNG, but it is much easier to read here. */
+ul.figexplain { margin: .7rem 0 .2rem; padding: .8rem 1rem .8rem 2rem;
+                background: #f7f8fa; border-left: 3px solid __ACCENT__;
+                border-radius: 3px; font-size: .82rem; color: #444; line-height: 1.55; }
+ul.figexplain li { margin-bottom: .45rem; }
+ul.figexplain li:last-child { margin-bottom: 0; }
+ul.figexplain strong { color: __DARK__; }
 .cp-section { border-top: 2px dashed #d0d4e0; margin-top: 2rem; padding-top: 1.2rem; }
 .cp-heading { font-size: 1rem; color: __ACCENT__; font-family: monospace;
               margin-bottom: 1rem; font-weight: 600; }
@@ -1504,7 +1564,9 @@ def _html_section_config(config) -> str:
     if config is None:
         return ""
     kv = {k: str(v) for k, v in vars(config).items()}
-    return f"<section>\n<h2>Configuration</h2>\n{_html_kv(kv)}\n</section>"
+    return (f"<section>\n<h2>Appendix — configuration</h2>\n"
+            f"<p>Every parameter this run was launched with.</p>\n"
+            f"{_html_kv(kv)}\n</section>")
 
 
 def _html_section_embedding(results: dict, figures: list) -> str:
@@ -1809,10 +1871,14 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         f"**Date:** {ts}",
     ]
 
+    # Configuration is reference material, not the story - it is appended at the end.
+    config_lines = []
     if config is not None:
-        lines += ["", "## Configuration", "", "| Parameter | Value |", "|-----------|-------|"]
+        config_lines = ["", "---", "", "## Appendix — configuration", "",
+                        "Every parameter this run was launched with.", "",
+                        "| Parameter | Value |", "|-----------|-------|"]
         for k, v in vars(config).items():
-            lines.append(f"| `{k}` | `{v}` |")
+            config_lines.append(f"| `{k}` | `{v}` |")
 
     _MD_TITLES = {
         "embedding_similarity": "Embedding Similarity (stack query)",
@@ -1884,13 +1950,14 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
     lines += _recon_md_block(results, figures_by_eval, recon_summary_figs, run_dir)
+    lines += config_lines
 
     with open(md_path, "w") as f:
         f.write("\n".join(lines))
 
     # ── HTML ──────────────────────────────────────────────────────────────────
     html_path = os.path.join(run_dir, "eval_report.html")
-    sections = [_html_section_config(config)]
+    sections = []
 
     def _html_cards(base, r):
         if base == "embedding_similarity":
@@ -1938,6 +2005,9 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         sections.append(_html_section_comparison(
             results, figures_by_eval.get("checkpoint_comparison", [])
         ))
+
+    # Reference material last.
+    sections.append(_html_section_config(config))
 
     with open(html_path, "w") as f:
         f.write(_build_html(results, config, ts, sections))

@@ -70,6 +70,61 @@ _REF_COLOR = "#b0b0b0"
 # ── Figure documentation ──────────────────────────────────────────────────────
 
 _FIG_DOC = {
+    "recon_overlay": {
+        "title": "Reconstruction overlay - individual samples",
+        "caption": (
+            "Individual reconstructions against the target (black), one column per "
+            "decoder head. The y-axis is fixed to the target's range per row, so a "
+            "prediction drawn flat at the edge is off-scale, not zero."
+        ),
+        "what": (
+            "Six samples drawn evenly across the eval subset, one row each. The target is "
+            "black; each column overlays one decoder head's reconstruction on it. The "
+            "per-sample MSE is printed in each panel title. Sample choice is "
+            "deterministic - evenly spaced by index, not best or worst - so it is a fair "
+            "look rather than a flattering one."
+        ),
+        "read": (
+            "look for whether the reconstruction follows the peaks and the fine structure "
+            "or only the broad envelope; a prediction that hugs the middle of the panel "
+            "and ignores the peaks is the mean-like failure the skill figure quantifies"
+        ),
+        "good": (
+            "The colored line sits on the black one, including at the narrow peaks, on "
+            "every row rather than just the easy ones."
+        ),
+        "caveats": (
+            "Six samples cannot tell you how often any of this happens - that is what the "
+            "dataset-level figures are for. The y-axis is clamped to the target's range "
+            "per row, so a prediction that leaves the panel is off-scale rather than zero. "
+            + CROSS_HEAD_CAVEAT
+        ),
+    },
+    "recon_mse_bars": {
+        "title": "Per-sample error for the overlay samples",
+        "caption": (
+            "Error for the six traces above, log scale - how much they differ from each "
+            "other, and from the dataset mean quoted in the legend."
+        ),
+        "what": (
+            "Per-sample reconstruction MSE for exactly the six samples shown in the "
+            "overlay above, one bar group per sample and one bar per decoder head, on a "
+            "log scale. The legend quotes each head's mean MSE over the whole subset."
+        ),
+        "read": (
+            "compare bar heights within a sample to rank the heads on it, and compare a "
+            "bar against the mean in the legend to see whether that sample is typical or "
+            "an outlier"
+        ),
+        "good": (
+            "Low bars that sit near the legend's mean, rather than a few towering ones - "
+            "though with only six samples this is an impression, not a measurement."
+        ),
+        "caveats": (
+            "Six samples, chosen by index rather than by difficulty. Read the error "
+            "distribution figure for the real spread. " + CROSS_HEAD_CAVEAT
+        ),
+    },
     "recon_error_distribution": {
         "title": "Reconstruction error distribution per dataset",
         "caption": (
@@ -303,6 +358,19 @@ _FIG_DOC = {
 
 
 _REQUIRED_DOC_KEYS = ("title", "caption", "what", "read", "good", "caveats")
+
+
+def doc_for_figure(path: str) -> dict:
+    """
+    The doc entry for a figure file, matched on its basename, or None if unregistered.
+    Longest key first so `recon_error_vs_signal_properties` is not matched by a shorter
+    key that happens to be a prefix.
+    """
+    base = os.path.splitext(os.path.basename(path))[0]
+    for key in sorted(_FIG_DOC, key=len, reverse=True):
+        if base.startswith(key):
+            return dict(_FIG_DOC[key], key=key)
+    return None
 
 
 def _doc(key: str) -> dict:
