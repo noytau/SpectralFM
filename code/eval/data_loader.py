@@ -114,9 +114,10 @@ def load_manifest_subset(
     if n <= 0:
         chosen = np.arange(n_blocks_total)
     else:
-        n_blocks = max(1, min(n // stack_size, n_blocks_total))
         rng = np.random.default_rng(seed)
-        chosen = np.sort(rng.choice(n_blocks_total, n_blocks, replace=False))
+        chosen = np.sort(rng.choice(
+            n_blocks_total, max(1, min(n // stack_size, n_blocks_total)), replace=False))
+    n_blocks = len(chosen)
 
     all_rows = []
     for stack_idx, b in enumerate(chosen):
