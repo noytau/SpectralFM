@@ -279,15 +279,19 @@ def observations(results: dict) -> list:
     return out
 
 
-def next_steps(results: dict) -> list:
+def next_steps(results: dict, config=None) -> list:
     """
     What to do next, conditioned on what this run actually showed.
 
     Only steps the numbers motivate. A checklist that would read the same whatever the
-    results were is not worth a section.
+    results were is not worth a section - and neither is advice to pass flags the run was
+    already given, which is why `config` is consulted for the sampling settings.
     """
     from .report import _recon_keys, _split_eval_key
 
+    uncapped = bool(config is not None
+                    and str(getattr(config, "eval_set_size", "")).strip().lower() == "all"
+                    and int(getattr(config, "recon_max_samples", 1) or 0) == 0)
     S = _summaries(results)
     if S.empty:
         return []
@@ -370,16 +374,29 @@ def next_steps(results: dict) -> list:
             "one or two component indices dominate that column, the fix is per-component, "
             "not per-model." % (ds, 100 * val))
 
-    # Scale: say plainly whether this run was big enough to trust.
+    # Scale: say plainly whether this run was big enough to trust - and do not recommend
+    # flags the run already used, which is what a naive version of this said.
     n_by_ds = {ds: int(S[S["dataset"] == ds]["n"].max()) for ds in S["dataset"].unique()}
     thin = {ds: n for ds, n in n_by_ds.items() if n < 2000}
     if thin:
-        out.append(
-            "**Re-run the thin datasets at full size.** %s were evaluated on under 2000 "
-            "samples, which is fine for medians but leaves the stratified panels with a "
-            "few hundred samples per bin and the tail poorly estimated. "
-            "`--eval_set_size all --recon_max_samples 0` covers whole splits."
-            % ", ".join("`%s` (n=%d)" % (d, n) for d, n in sorted(thin.items())))
+        listed = ", ".join("`%s` (n=%d)" % (d, n) for d, n in sorted(thin.items()))
+        if uncapped:
+            out.append(
+                "**%s are as large as they get.** This run already covered their whole "
+                "splits, so the thinness is the split, not the sampling — fine for medians, "
+                "but the stratified panels are down to a few hundred samples per bin and "
+                "the tail is poorly estimated. More in-distribution data means a bigger "
+                "subset: `single_channel_all` (valid = 10,000), `single_channel_one` "
+                "(valid = 1,000) or the `single_channel_10k` train split (10,611). Point "
+                "`DATASET_SPECS` at one of those and the panels get their resolution back."
+                % listed)
+        else:
+            out.append(
+                "**Re-run the thin datasets at full size.** %s were evaluated on under "
+                "2000 samples, which is fine for medians but leaves the stratified panels "
+                "with a few hundred samples per bin and the tail poorly estimated. "
+                "`--eval_set_size all --recon_max_samples 0` covers whole splits."
+                % listed)
 
     # The standing open question this eval cannot answer on its own.
     out.append(
@@ -392,9 +409,9 @@ def next_steps(results: dict) -> list:
     return out
 
 
-def section(results: dict) -> list:
+def section(results: dict, config=None) -> list:
     """The closing section as markdown lines, or [] if there is nothing to say."""
-    obs, nxt = observations(results), next_steps(results)
+    obs, nxt = observations(results), next_steps(results, config)
     if not obs and not nxt:
         return []
     lines = ["", "---", "", "### What this run shows", ""]

@@ -460,7 +460,7 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
     # Closing read of the numbers.
     try:
         from . import findings
-        obs, nxt = findings.observations(results), findings.next_steps(results)
+        obs, nxt = findings.observations(results), findings.next_steps(results, config)
     except Exception as e:
         print("[ReportPDF] findings section failed: %s: %s" % (type(e).__name__, e))
         obs, nxt = [], []

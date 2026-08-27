@@ -1167,7 +1167,7 @@ def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
     # drift into stock advice that would read the same whatever the results were.
     try:
         from . import findings
-        lines += findings.section(results)
+        lines += findings.section(results, config)
     except Exception as e:
         print(f"[Report] findings section failed: {type(e).__name__}: {e}")
 
@@ -1323,7 +1323,7 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
 
     try:
         from . import findings
-        obs, nxt = findings.observations(results), findings.next_steps(results)
+        obs, nxt = findings.observations(results), findings.next_steps(results, config)
     except Exception as e:
         print(f"[Report] findings section failed: {type(e).__name__}: {e}")
         obs, nxt = [], []
