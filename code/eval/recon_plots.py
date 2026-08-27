@@ -73,7 +73,8 @@ _FIG_DOC = {
     "recon_error_distribution": {
         "title": "Reconstruction error distribution per dataset",
         "caption": (
-            "How per-sample error is spread within each dataset. Further left is better; a long flat tail means a few samples are far worse than the median."
+            "How per-sample error is spread within each dataset. Further left is better; "
+            "a long flat tail means a few samples are far worse than the median."
         ),
         "what": (
             "Top row: the empirical cumulative distribution of per-sample reconstruction "
@@ -104,7 +105,8 @@ _FIG_DOC = {
     "recon_summary_heatmap": {
         "title": "Reconstruction metric summary - datasets x metrics",
         "caption": (
-            "Every dataset scored on every metric, one block per decoder head. Green is the better end of each column; read down a column, not across."
+            "Every dataset scored on every metric, one block per decoder head. Green is "
+            "the better end of each column; read down a column, not across."
         ),
         "what": (
             "One block per decoder head. Rows are datasets (single-component block first, "
@@ -130,7 +132,8 @@ _FIG_DOC = {
     "recon_skill_vs_baseline": {
         "title": "Reconstruction skill against a trivial baseline",
         "caption": (
-            "Does the model beat a flat line at each sample's own mean? Bars must clear R² = 0 to mean anything, and the percentage is how many samples clear it."
+            "Does the model beat a flat line at each sample's own mean? Bars must clear "
+            "R² = 0 to mean anything, and the percentage is how many samples clear it."
         ),
         "what": (
             "Left: median R-squared per head and dataset, where R2 = 1 - MSE / var(target). "
@@ -165,7 +168,9 @@ _FIG_DOC = {
     "recon_position_profile": {
         "title": "Where along the signal the error sits",
         "caption": (
-            "Where along the 245 bins the error sits. Flat and low is good; spikes at the two ends are convolution edge artifacts, and the lower row shows systematic bias."
+            "Where along the 245 bins the error sits. Flat and low is good; spikes at the "
+            "two ends are convolution edge artifacts, and the lower row shows systematic "
+            "bias."
         ),
         "what": (
             "Top row: mean absolute reconstruction error at each of the 245 signal bins, "
@@ -193,7 +198,8 @@ _FIG_DOC = {
     "recon_amplitude_calibration": {
         "title": "Amplitude calibration - is dynamic range preserved?",
         "caption": (
-            "Predicted against true amplitude. A tight diagonal cloud is faithful; a flattened cloud means the output is collapsing toward the mean."
+            "Predicted against true amplitude. A tight diagonal cloud is faithful; a "
+            "flattened cloud means the output is collapsing toward the mean."
         ),
         "what": (
             "Hexbin density of predicted value against target value over every "
@@ -226,7 +232,8 @@ _FIG_DOC = {
     "recon_spectral_fidelity": {
         "title": "Spectral fidelity - which frequencies survive reconstruction",
         "caption": (
-            "Which frequencies survive. A ratio dropping below 1 at high frequency means narrow spectral lines are being smoothed away — invisible in MSE."
+            "Which frequencies survive. A ratio dropping below 1 at high frequency means "
+            "narrow spectral lines are being smoothed away — invisible in MSE."
         ),
         "what": (
             "Top row: mean magnitude of the real FFT of the target (black) and of each "
@@ -260,7 +267,8 @@ _FIG_DOC = {
     "recon_error_vs_signal_properties": {
         "title": "Reconstruction error against signal properties",
         "caption": (
-            "Which kinds of spectra reconstruct badly. A flat line means the model is indifferent to that property; an upward slope names a weakness."
+            "Which kinds of spectra reconstruct badly. A flat line means the model is "
+            "indifferent to that property; an upward slope names a weakness."
         ),
         "what": (
             "Median reconstruction MSE (line) with the interquartile range (shaded) against "
