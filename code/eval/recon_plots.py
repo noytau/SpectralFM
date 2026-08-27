@@ -561,12 +561,15 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    fig, axes = plt.subplots(1, len(heads),
-                             figsize=(1.35 * len(_SUMMARY_METRICS) * len(heads),
-                                      1.05 * len(aliases) + 3.0),
+    # One block per head, stacked VERTICALLY. Side by side, 8 metric columns times three
+    # heads makes a 30-inch-wide figure in which the cell values are unreadably small;
+    # stacking keeps the width at one block and gives every cell room.
+    fig, axes = plt.subplots(len(heads), 1,
+                             figsize=(1.15 * len(_SUMMARY_METRICS) + 2.0,
+                                      (0.52 * len(aliases) + 1.5) * len(heads)),
                              squeeze=False)
     for c, k in enumerate(heads):
-        ax = axes[0][c]
+        ax = axes[c][0]
         rows, row_labels = [], []
         for a in aliases:
             sdf = by_alias[a].get("summary_df")
@@ -586,9 +589,19 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
         for j, (_, _, higher_better) in enumerate(_SUMMARY_METRICS):
             col = M[:, j]
             ok = np.isfinite(col)
-            if ok.sum() < 2 or np.ptp(col[ok]) == 0:
+            if ok.sum() < 2:
                 continue
-            norm = (col - np.nanmin(col[ok])) / np.ptp(col[ok])
+            spread = float(np.ptp(col[ok]))
+            scale = max(abs(float(np.nanmedian(col[ok]))), 1.0)
+            # Rank-normalising a column whose values are all equal amplifies float noise
+            # into a full-range colour ramp, which reads as real variation. A head locked
+            # to one output value produces exactly that. Leave such columns neutral.
+            # 1e-6 relative, not machine epsilon: a column whose values agree to six
+            # significant figures carries no ranking worth colouring, and float32 error
+            # accumulation puts a locked-output head's MSE column exactly there.
+            if spread <= 1e-6 * scale:
+                continue
+            norm = (col - np.nanmin(col[ok])) / spread
             if higher_better is None:            # amplitude ratio: distance from 1
                 norm = 1.0 - np.abs(col - 1.0) / max(np.nanmax(np.abs(col[ok] - 1.0)), 1e-9)
             elif not higher_better:
@@ -599,14 +612,25 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
         for i in range(M.shape[0]):
             for j in range(M.shape[1]):
                 v = M[i, j]
-                txt = "-" if not np.isfinite(v) else (
-                    "%.3f" % v if abs(v) < 100 and abs(v) >= 1e-3 else "%.2e" % v)
-                ax.text(j, i, txt, ha="center", va="center", fontsize=7.5)
+                if not np.isfinite(v):
+                    txt = "-"
+                elif abs(v) < 1e-9:
+                    txt = "0"                      # not "-2.22e-16"
+                elif 1e-3 <= abs(v) < 1e4:
+                    txt = "%.3f" % v
+                else:
+                    txt = "%.2e" % v
+                ax.text(j, i, txt, ha="center", va="center", fontsize=9)
         ax.set_xticks(range(len(_SUMMARY_METRICS)))
-        ax.set_xticklabels([lbl for _, lbl, _ in _SUMMARY_METRICS], fontsize=7)
+        # Only the bottom block needs metric labels; repeating them three times just
+        # eats vertical space between the blocks.
+        if c == len(heads) - 1:
+            ax.set_xticklabels([lbl for _, lbl, _ in _SUMMARY_METRICS], fontsize=8)
+        else:
+            ax.set_xticklabels([])
         ax.set_yticks(range(len(row_labels)))
-        ax.set_yticklabels(row_labels, fontsize=8)
-        ax.set_title(_head_title(k, width=40), fontsize=8, color=_HEAD_COLOR[k],
+        ax.set_yticklabels(row_labels, fontsize=9)
+        ax.set_title(_head_title(k, width=70), fontsize=9, color=_HEAD_COLOR[k],
                      fontweight="bold")
         # Divider between the single- and multi-component row blocks.
         groups = [by_alias[a].get("component_group", "single") for a in aliases
