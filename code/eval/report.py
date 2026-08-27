@@ -243,7 +243,10 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     path = _save_fig(fig, os.path.join(output_dir, "recon_overlay.png"))
-    figures.append(("Reconstruction overlay — target vs per-pathway recon", path))
+    figures.append((
+        "Individual reconstructions against the target (black), one column per decoder "
+        "head. The y-axis is fixed to the target's range per row, so a prediction drawn "
+        "flat at the edge is off-scale, not zero.", path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
     bar_cols = [(label, color, mse_col) for label, _, color, mse_col in pathways
@@ -266,7 +269,9 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         ax.set_title("Per-sample reconstruction MSE — per pathway", fontsize=10)
         fig.tight_layout()
         path = _save_fig(fig, os.path.join(output_dir, "recon_mse_bars.png"))
-        figures.append(("Per-sample reconstruction MSE", path))
+        figures.append((
+            "Error for the six traces above, log scale — how much they differ from each "
+            "other, and from the dataset mean quoted in the legend.", path))
 
     return figures
 
@@ -917,15 +922,12 @@ _RECON_INTRO = [
     "**Two kinds of data, never pooled.** `single_channel_*` names one wav per sample. "
     "`multi_channel`, `sampled_data` and `labeled_data` name one wav per *component*, and "
     "the physical sample is every wav sharing a `spec` index — so those datasets also get "
-    "a per-spectrum view, and the byte-identical duplicate components (comp20 = comp14, "
-    "comp21 = comp15) are dropped before aggregation.",
+    "a per-spectrum view. In `multi_channel` and `labeled_data` (not `sampled_data`) "
+    "component 20 is a byte-identical copy of component 14 and 21 of 15; both are dropped "
+    "before anything is aggregated, so the sample count for those datasets is lower than "
+    "the number drawn.",
     "",
-    "**How to read this section**, in the order it is laid out:",
-    "",
-    "1. **One sample at a time** — what a reconstruction actually looks like.",
-    "2. **The whole dataset** — the headline numbers and which spectra fail, per dataset.",
-    "3. **Across datasets** — the six aggregate figures, and what the "
-    "single-component to multi-component shift costs.",
+    "The three parts below go from one sample, to one dataset, to all of them.",
     "",
     "The single number worth checking first is **median R²**. It compares the model "
     "against the trivial predictor that outputs each sample's own mean value as a flat "
@@ -994,44 +996,28 @@ def _recon_dataset_heading(r: dict, alias: str) -> str:
     return "%s — %s-component, n = %d" % (" / ".join(bits), group, n)
 
 
-def _split_caption(caption: str) -> tuple:
-    """
-    recon_plots captions are "<title> - <how to read it>". Markdown alt-text and an HTML
-    figcaption both read badly at that length, so split them: the title labels the image,
-    the guidance sits beneath it as prose.
-    """
-    title, sep, how = caption.partition(" - ")
-    return (title, how) if sep else (caption, "")
-
-
 def _recon_md_figure(caption: str, path: str, run_dir: str) -> list:
-    title, how = _split_caption(caption)
-    lines = ["", "![%s](%s)" % (title, os.path.relpath(path, run_dir))]
-    if how:
-        lines.append("*How to read it: %s.*" % how)
-    return lines
+    """One image plus its one-line caption. Captions come ready to print."""
+    return ["", "![%s](%s)" % (caption, os.path.relpath(path, run_dir)),
+            "*" + caption + "*"]
 
 
 def _recon_html_figure(caption: str, path: str) -> str:
-    title, how = _split_caption(caption)
-    if not how:
-        return _html_figure(title, path)
-    src = _fig_to_b64(path)
     return ("<figure>"
             '<img src="%s" alt="%s">'
-            "<figcaption><strong>%s</strong><br><em>How to read it: %s.</em></figcaption>"
-            "</figure>" % (src, title, title, how))
+            "<figcaption>%s</figcaption>"
+            "</figure>" % (_fig_to_b64(path), caption, _md_inline_to_html(caption)))
 
 
 # A short legend for the summary tables: readers otherwise have to guess what a dash
 # means and which direction is good.
 _RECON_TABLE_LEGEND = (
     "Arrows mark the good direction. **amplitude ratio** is "
-    "`std(prediction) / std(target)`: 1 means the reconstruction keeps the target's "
-    "dynamic range, below 1 means it is flatter than the target. **beats baseline** is "
-    "the share of samples with R² above 0, i.e. better than a flat line at the sample's "
-    "own mean. A dash means the statistic is undefined — Pearson r has no value when a "
-    "head emits a constant signal, and R² has none when the target itself is constant."
+    "`std(prediction) / std(target)`: 1 keeps the target's dynamic range, below 1 is "
+    "flatter than the target. **beats baseline** is the share of samples the model "
+    "reconstructs better than a flat line at that sample's own mean. A dash means the "
+    "statistic is undefined — Pearson r has no value when a head emits a constant signal, "
+    "and R² has none when the target itself is constant."
 )
 
 

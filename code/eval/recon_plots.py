@@ -72,6 +72,9 @@ _REF_COLOR = "#b0b0b0"
 _FIG_DOC = {
     "recon_error_distribution": {
         "title": "Reconstruction error distribution per dataset",
+        "caption": (
+            "How per-sample error is spread within each dataset. Further left is better; a long flat tail means a few samples are far worse than the median."
+        ),
         "what": (
             "Top row: the empirical cumulative distribution of per-sample reconstruction "
             "MSE, one panel per decoder head, one curve per dataset. The x-axis is MSE on "
@@ -100,6 +103,9 @@ _FIG_DOC = {
     },
     "recon_summary_heatmap": {
         "title": "Reconstruction metric summary - datasets x metrics",
+        "caption": (
+            "Every dataset scored on every metric, one block per decoder head. Green is the better end of each column; read down a column, not across."
+        ),
         "what": (
             "One block per decoder head. Rows are datasets (single-component block first, "
             "then multi-component); columns are the summary metrics. Cell text is the "
@@ -123,6 +129,9 @@ _FIG_DOC = {
     },
     "recon_skill_vs_baseline": {
         "title": "Reconstruction skill against a trivial baseline",
+        "caption": (
+            "Does the model beat a flat line at each sample's own mean? Bars must clear R² = 0 to mean anything, and the percentage is how many samples clear it."
+        ),
         "what": (
             "Left: median R-squared per head and dataset, where R2 = 1 - MSE / var(target). "
             "R2 = 0 is the score of the trivial predictor that outputs each sample's own "
@@ -155,6 +164,9 @@ _FIG_DOC = {
     },
     "recon_position_profile": {
         "title": "Where along the signal the error sits",
+        "caption": (
+            "Where along the 245 bins the error sits. Flat and low is good; spikes at the two ends are convolution edge artifacts, and the lower row shows systematic bias."
+        ),
         "what": (
             "Top row: mean absolute reconstruction error at each of the 245 signal bins, "
             "one panel per dataset, one line per head, with the per-bin standard deviation "
@@ -180,6 +192,9 @@ _FIG_DOC = {
     },
     "recon_amplitude_calibration": {
         "title": "Amplitude calibration - is dynamic range preserved?",
+        "caption": (
+            "Predicted against true amplitude. A tight diagonal cloud is faithful; a flattened cloud means the output is collapsing toward the mean."
+        ),
         "what": (
             "Hexbin density of predicted value against target value over every "
             "(sample, bin) pair, one row per dataset and one column per head, with the "
@@ -210,6 +225,9 @@ _FIG_DOC = {
     },
     "recon_spectral_fidelity": {
         "title": "Spectral fidelity - which frequencies survive reconstruction",
+        "caption": (
+            "Which frequencies survive. A ratio dropping below 1 at high frequency means narrow spectral lines are being smoothed away — invisible in MSE."
+        ),
         "what": (
             "Top row: mean magnitude of the real FFT of the target (black) and of each "
             "head's reconstruction, one panel per dataset, log y-axis. Bottom row: the "
@@ -241,6 +259,9 @@ _FIG_DOC = {
     },
     "recon_error_vs_signal_properties": {
         "title": "Reconstruction error against signal properties",
+        "caption": (
+            "Which kinds of spectra reconstruct badly. A flat line means the model is indifferent to that property; an upward slope names a weakness."
+        ),
         "what": (
             "Median reconstruction MSE (line) with the interquartile range (shaded) against "
             "binned properties of the target signal: contrast, number of local maxima, peak "
@@ -273,7 +294,15 @@ _FIG_DOC = {
 }
 
 
+_REQUIRED_DOC_KEYS = ("title", "caption", "what", "read", "good", "caveats")
+
+
 def _doc(key: str) -> dict:
+    if key in _FIG_DOC:
+        missing = [k for k in _REQUIRED_DOC_KEYS if not _FIG_DOC[key].get(k)]
+        if missing:
+            raise KeyError("recon_plots: figure %r is missing _FIG_DOC keys %s"
+                           % (key, missing))
     if key not in _FIG_DOC:
         raise KeyError(
             "recon_plots: figure %r has no _FIG_DOC entry. Every figure must ship with "
@@ -283,8 +312,12 @@ def _doc(key: str) -> dict:
 
 
 def _caption(key: str) -> str:
-    d = _doc(key)
-    return "%s - %s." % (d["title"], d["read"])
+    """
+    The one-line caption the report prints under the figure. Deliberately short: the
+    long-form what/how/caveats lives in the on-image footnote and FIGURES.md, and a
+    paragraph under every image just gets skipped.
+    """
+    return _doc(key)["caption"]
 
 
 def _footnote(fig, key: str, extra: str = "", width: int = 150) -> None:
@@ -323,6 +356,7 @@ def write_figure_docs(keys, out_dir: str, header: str = "") -> str:
         d = _doc(key)
         lines += [
             "## " + d["title"], "", "`%s.png`" % key, "",
+            "*" + d["caption"] + "*", "",
             "**What this shows.** " + d["what"], "",
             "**How to read it.** " + d["read"][0].upper() + d["read"][1:] + ".", "",
             "**A good result.** " + d["good"], "",
