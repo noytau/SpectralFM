@@ -95,6 +95,37 @@ def set_style(name: str) -> None:
 def is_eink() -> bool:
     return _STYLE == "eink"
 
+
+def _head_text_color(k: str) -> str:
+    """
+    Colour for a panel title naming a head.
+
+    The greyscale head palette runs to #9a9a9a, which is fine for a line against white
+    but too light to read as text. Titles go black in the e-ink style; the head is already
+    named in the title, so the colour was only ever a convenience.
+    """
+    return "#000000" if _STYLE == "eink" else _HEAD_COLOR[k]
+
+
+def _rank_cmap():
+    """
+    Colormap for the rank-shaded summary heatmap.
+
+    RdYlGn is the wrong choice on e-paper twice over: there is no colour, and red and
+    green sit at almost the same luminance, so the two ends of the scale become the same
+    grey. The e-ink version runs white (better) to mid grey (worse) instead - a single
+    luminance ramp, and light enough throughout that the black cell values stay readable.
+    """
+    if _STYLE != "eink":
+        return "RdYlGn"
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list("eink_rank", ["#9a9a9a", "#ffffff"])
+
+
+def _density_cmap():
+    """Sequential map for the hexbin density; viridis is not luminance-ordered in grey."""
+    return "Greys" if _STYLE == "eink" else "viridis"
+
 # Dataset colors are independent of head colors: several figures use one visual channel
 # for heads and another for datasets, so the two palettes must not collide in meaning.
 _DATASET_COLORS = {
@@ -212,8 +243,9 @@ _FIG_DOC = {
     "recon_summary_heatmap": {
         "title": "Reconstruction metric summary - datasets x metrics",
         "caption": (
-            "Every dataset scored on every metric, one block per decoder head. Green is "
-            "the better end of each column; read down a column, not across."
+            "Every dataset scored on every metric, one block per decoder head. Shading "
+            "marks rank within a column, better end lighter in greyscale and green in "
+            "colour; read down a column, not across."
         ),
         "what": (
             "One block per decoder head. Rows are datasets (single-component block first, "
@@ -222,14 +254,16 @@ _FIG_DOC = {
             "colors compare datasets on one metric and mean nothing across columns."
         ),
         "read": (
-            "read down a column to rank datasets on one metric; green is the better end of "
-            "each column and red the worse, with the direction already accounted for "
-            "(lower MSE is better, higher R-squared is better)"
+            "read down a column to rank datasets on one metric; the shading marks rank "
+            "within that column, with the direction already accounted for (lower MSE is "
+            "better, higher R-squared is better) - in colour, green is the better end and "
+            "red the worse; in greyscale, lighter is better and darker worse"
         ),
         "good": (
             "mse_median small, r2_median near 1, frac_r2_positive at 1.0, pearson_median "
             "near 1, amp_ratio_median near 1. Watch for mse_mean sitting far above "
-            "mse_median: that ratio is the outlier tax on this dataset."
+            "mse_median: that ratio is the outlier tax on this dataset. A column left "
+            "unshaded is one whose values are all equal - see the caveats."
         ),
         "caveats": (
             "amp_ratio_median below 1 means the reconstruction is systematically flatter "
@@ -691,7 +725,8 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
         ax.set_ylabel("fraction of samples at or below", fontsize=8)
         ax.set_ylim(0, 1.02)
         ax.grid(True, alpha=0.3, which="both")
-        ax.set_title(_head_title(k), fontsize=8, color=_HEAD_COLOR[k], fontweight="bold")
+        ax.set_title(_head_title(k), fontsize=8, color=_head_text_color(k),
+                     fontweight="bold")
         ax.legend(fontsize=6.5, loc="lower right", title="dotted vline = median",
                   title_fontsize=6)
 
@@ -723,7 +758,7 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
             ax.set_ylabel("per-sample MSE, log\u2081\u2080 scale  (\u2193 better)", fontsize=8)
             ax.grid(True, alpha=0.3, axis="y")
             ax.set_title("distribution shape per dataset - %s" % PATHWAY_SHORT[k],
-                         fontsize=8.5, color=_HEAD_COLOR[k])
+                         fontsize=8.5, color=_head_text_color(k))
             _group_divider(ax, labels, by_alias, pos)
             # A decoder locked to one output value produces no spread at all. Say so
             # rather than leaving the reader to decode a 1e-9 axis.
@@ -810,7 +845,7 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
             elif not higher_better:
                 norm = 1.0 - norm
             shade[:, j] = norm
-        ax.imshow(shade, cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
+        ax.imshow(shade, cmap=_rank_cmap(), vmin=0, vmax=1, aspect="auto")
 
         for i in range(M.shape[0]):
             for j in range(M.shape[1]):
@@ -833,7 +868,7 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
             ax.set_xticklabels([])
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels, fontsize=9)
-        ax.set_title(_head_title(k, width=70), fontsize=9, color=_HEAD_COLOR[k],
+        ax.set_title(_head_title(k, width=70), fontsize=9, color=_head_text_color(k),
                      fontweight="bold")
         # Divider between the single- and multi-component row blocks.
         groups = [by_alias[a].get("component_group", "single") for a in aliases
@@ -1088,7 +1123,7 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             tf, pf = t.ravel(), p.ravel()
             lim_lo = float(min(tf.min(), np.percentile(pf, 0.1)))
             lim_hi = float(max(tf.max(), np.percentile(pf, 99.9)))
-            hb = ax.hexbin(tf, pf, gridsize=60, bins="log", cmap="viridis",
+            hb = ax.hexbin(tf, pf, gridsize=60, bins="log", cmap=_density_cmap(),
                            extent=(lim_lo, lim_hi, lim_lo, lim_hi), mincnt=1)
             ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], color="#ff4d4d", lw=1.4,
                     ls="--", label="y = x (perfect calibration)")
@@ -1103,7 +1138,7 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                 ax.set_ylabel("%s\n\npredicted value at a bin" % _ds_label(r, short=True),
                               fontsize=8)
             ax.set_title("%s — %s" % (PATHWAY_SHORT[k], group), fontsize=8.5,
-                         color=_HEAD_COLOR[k], fontweight="bold")
+                         color=_head_text_color(k), fontweight="bold")
             ax.legend(fontsize=6, loc="upper left", framealpha=0.75)
             if _STYLE != "eink":
                 # The colourbars cost a quarter of the width and the density scale is not
