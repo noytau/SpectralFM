@@ -196,49 +196,64 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     names   = panel.get("names") or []
     rdf     = results.get("results_df")
 
-    _PATHWAY_STYLE = [
-        ("fe",   "FE recon",          "#1f77b4"),
-        ("proj", "Projection recon",  "#2ca02c"),
-        ("tr",   "Transformer recon", "#d62728"),
-    ]
+    # Head colours, line styles and the e-ink switch all live in recon_plots, so this
+    # figure follows them too rather than keeping a private palette that would stay in
+    # colour when everything else went greyscale.
+    from . import recon_plots
+    eink = recon_plots.is_eink()
+
     pathways = [
-        (label, panel[f"pred_{key}"], color, f"{key}_mse")
-        for key, label, color in _PATHWAY_STYLE
+        (label, panel[f"pred_{key}"], recon_plots._HEAD_COLOR[key],
+         recon_plots._HEAD_LS[key], f"{key}_mse")
+        for key, label in (("fe", "FE recon"), ("proj", "Projection recon"),
+                           ("tr", "Transformer recon"))
         if panel.get(f"pred_{key}") is not None
     ]
     if target is None or not pathways:
         return figures
 
-    n = len(indices)
+    # Eighteen panels across a 6-inch page is nothing but ink. Fewer, taller rows on a
+    # page; the full six stay in the HTML, where there is room to scroll.
+    rows = list(range(len(indices)))
+    if eink and len(rows) > 3:
+        rows = [rows[i] for i in np.linspace(0, len(rows) - 1, 3).astype(int)]
+
+    n = len(rows)
     T = target.shape[1]
-    fig, axes = plt.subplots(n, len(pathways), figsize=(6.5 * len(pathways), 1.9 * n),
+    cell_w, cell_h = (2.3, 1.75) if eink else (6.5, 1.9)
+    fs_tick, fs_label, fs_title = (8, 10, 8) if eink else (6, 9, 7)
+    fig, axes = plt.subplots(n, len(pathways),
+                             figsize=(cell_w * len(pathways), cell_h * n),
                              squeeze=False)
-    for r in range(n):
-        tgt = target[r]
+    for r, ri in enumerate(rows):
+        tgt = target[ri]
         pad = 0.1 * max(tgt.max() - tgt.min(), 0.1)
         ylo, yhi = tgt.min() - pad, tgt.max() + pad
-        for c, (pw_label, pred, color, mse_col) in enumerate(pathways):
+        for c, (pw_label, pred, color, ls, mse_col) in enumerate(pathways):
             ax = axes[r, c]
             ax.plot(tgt, color="black", lw=1.6, label="target", alpha=0.9)
-            ax.plot(pred[r], color=color, lw=1.1, label=pw_label, alpha=0.9)
+            ax.plot(pred[ri], color=color, lw=1.3 if eink else 1.1, ls=ls,
+                    label=pw_label, alpha=0.9)
             ax.set_xlim(0, T - 1)
             ax.set_ylim(ylo, yhi)
-            ax.tick_params(labelsize=6, labelleft=(c == 0))
+            ax.tick_params(labelsize=fs_tick, labelleft=(c == 0))
             if c == 0:
-                ax.set_ylabel(f"idx {indices[r]}", fontsize=9, rotation=0, ha="right", labelpad=22)
+                ax.set_ylabel(f"idx {indices[ri]}", fontsize=fs_label, rotation=0,
+                              ha="right", labelpad=22)
             mse_val = ""
             if rdf is not None and mse_col in rdf.columns:
-                mse_val = f"    MSE = {rdf[rdf['index'] == indices[r]][mse_col].iloc[0]:.2e}"
-            title = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
-            ax.set_title(title, fontsize=7, loc="left")
+                mse_val = f"  MSE = {rdf[rdf['index'] == indices[ri]][mse_col].iloc[0]:.2e}"
+            title = f"{names[ri][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
+            ax.set_title(title, fontsize=fs_title, loc="left")
             if r == 0:
-                ax.legend(fontsize=7, loc="upper right")
+                ax.legend(fontsize=fs_title, loc="upper right")
 
     mean_bits = [
         f"{label} mean MSE = {results[f'recon_{key}_mse_mean']:.3e}"
         + (f" (MAE = {results[f'recon_{key}_mae_mean']:.3e})"
            if f"recon_{key}_mae_mean" in results else "")
-        for key, label, _ in _PATHWAY_STYLE
+        for key, label in (("fe", "FE recon"), ("proj", "Projection recon"),
+                           ("tr", "Transformer recon"))
         if f"recon_{key}_mse_mean" in results
     ]
     fig.suptitle(
@@ -253,16 +268,19 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     figures.append((_recon_fig_caption(path), path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
-    bar_cols = [(label, color, mse_col) for label, _, color, mse_col in pathways
+    bar_cols = [(label, color, mse_col.split("_")[0], mse_col)
+                for label, _, color, _, mse_col in pathways
                 if rdf is not None and mse_col in rdf.columns]
     if bar_cols:
-        sub = rdf[rdf["index"].isin(indices)]
+        sub = rdf[rdf["index"].isin([indices[i] for i in rows])]
         x = np.arange(len(sub))
         w = 0.8 / len(bar_cols)
-        fig, ax = plt.subplots(figsize=(9, 4))
-        for j, (label, color, mse_col) in enumerate(bar_cols):
+        fig, ax = plt.subplots(figsize=(6.4, 4.2) if eink else (9, 4))
+        for j, (label, color, head, mse_col) in enumerate(bar_cols):
             offset = (j - (len(bar_cols) - 1) / 2) * w
             ax.bar(x + offset, sub[mse_col], w, color=color,
+                   hatch=recon_plots._HEAD_HATCH.get(head, ""),
+                   edgecolor="white", linewidth=0.6,
                    label=f"{label}  (mean {rdf[mse_col].mean():.2e})")
         ax.set_xticks(x)
         ax.set_xticklabels([f"idx {i}" for i in sub["index"]], fontsize=8)
@@ -1779,11 +1797,16 @@ def _write_run_info(run_dir: str, ts: str, results: dict, config) -> str:
     return path
 
 
-def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, str]:
+def generate_report(results: dict, output_dir: str, config=None,
+                    pdf: bool = False) -> tuple[str, str]:
     """
     Generate markdown + self-contained HTML report from eval results.
     Each run gets its own timestamped subdirectory inside output_dir.
     Returns (md_path, html_path).
+
+    pdf=True additionally builds eval_report_eink.pdf — the same content, re-rendered
+    for an e-ink reader: greyscale figures, one per page, with the explanations set as
+    real type. Needs pdflatex; skipped with a message if absent.
     """
     os.makedirs(output_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -2058,6 +2081,14 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
                         f"{base}.csv"), index=False)
 
     total_figs = len(all_figures)
+    if pdf:
+        try:
+            from . import report_pdf
+            report_pdf.build_pdf(results, figures_by_eval, recon_summary_figs,
+                                 run_dir, config)
+        except Exception as e:
+            print(f"[Report] PDF build failed: {type(e).__name__}: {e}")
+
     print(f"[Report] Run dir  : {run_dir}")
     print(f"[Report] Markdown : {md_path}")
     print(f"[Report] HTML     : {html_path}")

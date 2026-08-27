@@ -177,6 +177,10 @@ class EvalConfig:
 
     # Output
     output_dir: str = "eval_outputs"
+    # Also build eval_report_eink.pdf: the same content re-rendered for an e-ink reader
+    # (greyscale figures, one per page, explanations as real type). Needs pdflatex.
+    pdf: bool = False
+    pdf_page: str = "6x8"        # page size in inches, WxH — see --pdf_page
 
     def __post_init__(self):
         if self.device == "auto":
@@ -312,6 +316,8 @@ class EvalRunner:
 
     def run(self) -> dict:
         cfg = self.cfg
+        if cfg.pdf:
+            self._apply_pdf_style()
         print(f"[EvalRunner] Device: {cfg.device}")
 
         if not (cfg.multi_dataset and cfg.nova_data_dir):
@@ -549,11 +555,28 @@ class EvalRunner:
 
         return all_results
 
+    def _apply_pdf_style(self):
+        """
+        Switch the figures to the greyscale e-ink styling and set the page size.
+
+        Done before any figure is drawn, because the style changes the layouts, not just
+        the colours - the wide multi-dataset grids are transposed to fit a portrait page.
+        """
+        from . import recon_plots, report_pdf
+        recon_plots.set_style("eink")
+        try:
+            w, h = (float(v) for v in self.cfg.pdf_page.lower().split("x"))
+            report_pdf.PAGE_W_IN, report_pdf.PAGE_H_IN = w, h
+        except ValueError:
+            print(f"[EvalRunner] bad --pdf_page {self.cfg.pdf_page!r}, expected WxH "
+                  f"(e.g. 6x8) — using the default")
+
     def report(self, results: dict, output_dir: str | None = None) -> tuple[str, str]:
         """Generate markdown + HTML reports. Returns (md_path, html_path)."""
         out = output_dir or self.cfg.output_dir
         os.makedirs(out, exist_ok=True)
-        return generate_report(results, output_dir=out, config=self.cfg)
+        return generate_report(results, output_dir=out, config=self.cfg,
+                               pdf=self.cfg.pdf)
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────────
@@ -617,6 +640,18 @@ def main():
     parser.add_argument("--mask_ratio", type=float, default=0.15)
     parser.add_argument("--masking_type", default="random")
     parser.add_argument("--output_dir", default="eval_outputs")
+    parser.add_argument("--pdf", action="store_true", default=None,
+                        help="Also build eval_report_eink.pdf — the same report laid out "
+                             "for an e-ink reader: greyscale figures (heads separated by "
+                             "line style, marker and hatch, not colour), one figure per "
+                             "page with its explanation on the next, small page so text "
+                             "is readable without zooming. Needs pdflatex. NOTE: this "
+                             "also switches the PNGs to greyscale, so the HTML report "
+                             "from the same run is greyscale too — run without --pdf for "
+                             "colour figures.")
+    parser.add_argument("--pdf_page", default=None,
+                        help="PDF page size in inches as WxH (default 6x8, which suits a "
+                             "7.8in or 10.3in panel). Try 8x10.6 for a 13.3in device.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--nova_data_dir", default=None, help="nova_data/ root for structured similarity")
     parser.add_argument("--labeled_data_dir", default=None, help="Dataset with labels.tsv for label regression")

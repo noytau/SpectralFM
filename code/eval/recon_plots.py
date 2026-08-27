@@ -46,6 +46,55 @@ _PATHWAY_STYLE = [
 _HEAD_COLOR = {k: c for k, _, c in _PATHWAY_STYLE}
 _HEAD_ORDER = [k for k, _, _ in _PATHWAY_STYLE]
 
+# Heads are also distinguished by line style, marker and hatch, not only by hue. That
+# keeps every figure readable in greyscale - on an e-ink reader, or printed - and for a
+# reader who cannot separate the three hues.
+_HEAD_LS = {"fe": "-", "proj": "--", "tr": ":"}
+_HEAD_MARKER = {"fe": "o", "proj": "s", "tr": "^"}
+_HEAD_HATCH = {"fe": "", "proj": "///", "tr": "xxx"}
+
+# Greyscale palettes for the e-ink style. Values are spaced far enough apart to survive
+# the limited contrast range of an e-paper panel; nothing lighter than #b0b0b0 is used
+# for a line, since it disappears.
+_EINK_HEAD_COLOR = {"fe": "#000000", "proj": "#5a5a5a", "tr": "#9a9a9a"}
+_EINK_DATASET_COLOR = {"sanity": "#8a8a8a", "in_dist": "#000000",
+                       "multi_ch": "#000000", "samples": "#8a8a8a",
+                       "labeled": "#5a5a5a"}
+
+_STYLE = "screen"
+
+
+def set_style(name: str) -> None:
+    """
+    Switch the figure style. 'screen' is the default colour styling; 'eink' swaps in a
+    greyscale palette, larger type and heavier lines, and drops the explanation footnote
+    from the image - the PDF carries that as real text, which is far easier to read on an
+    e-paper panel than 6.5pt type baked into a bitmap.
+    """
+    global _STYLE
+    if name not in ("screen", "eink"):
+        raise ValueError("unknown style %r (expected 'screen' or 'eink')" % name)
+    _STYLE = name
+    if name == "eink":
+        _HEAD_COLOR.update(_EINK_HEAD_COLOR)
+        _DATASET_COLORS.update(_EINK_DATASET_COLOR)
+        plt.rcParams.update({
+            "font.size": 11, "axes.titlesize": 11, "axes.labelsize": 10.5,
+            "xtick.labelsize": 9.5, "ytick.labelsize": 9.5, "legend.fontsize": 9,
+            "figure.titlesize": 13, "lines.linewidth": 1.9,
+            "axes.linewidth": 1.0, "grid.alpha": 0.45, "savefig.facecolor": "white",
+            "image.cmap": "Greys",
+        })
+    else:
+        _HEAD_COLOR.update({k: c for k, _, c in _PATHWAY_STYLE})
+        _DATASET_COLORS.update(_SCREEN_DATASET_COLOR)
+        plt.rcParams.update(plt.rcParamsDefault)
+        matplotlib.use("Agg")
+
+
+def is_eink() -> bool:
+    return _STYLE == "eink"
+
 # Dataset colors are independent of head colors: several figures use one visual channel
 # for heads and another for datasets, so the two palettes must not collide in meaning.
 _DATASET_COLORS = {
@@ -56,9 +105,12 @@ _DATASET_COLORS = {
     "labeled":  "#9467bd",
 }
 _FALLBACK_COLORS = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3"]
+_SCREEN_DATASET_COLOR = dict(_DATASET_COLORS)
 
 # Line style carries the component group everywhere one axis mixes the two.
 _GROUP_LS = {"single": "-", "multi": "--"}
+# Datasets share an axis with each other in the ECDF panels, so they need a mark too.
+_DATASET_MARKERS = ["o", "s", "^", "D", "v"]
 _GROUP_LABEL = {
     "single": "single-component (one wav = one sample)",
     "multi":  "multi-component (sample = all wavs sharing a spec index)",
@@ -397,7 +449,15 @@ def _caption(key: str) -> str:
 
 
 def _footnote(fig, key: str, extra: str = "", width: int = 150) -> None:
-    """Draw the explanation onto the figure itself, below the axes."""
+    """
+    Draw the explanation onto the figure itself, below the axes.
+
+    Skipped in the e-ink style: the PDF sets the same text as real type at a readable
+    size, and 6.5pt monospace rendered into a bitmap is exactly what an e-paper panel
+    handles worst.
+    """
+    if _STYLE == "eink":
+        return
     d = _doc(key)
     parts = ["WHAT THIS SHOWS: " + d["what"],
              "HOW TO READ IT: " + d["read"][0].upper() + d["read"][1:] + ".",
@@ -445,6 +505,18 @@ def write_figure_docs(keys, out_dir: str, header: str = "") -> str:
 
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
+
+def _tight(fig, reserve_in: float = 0.85) -> None:
+    """
+    tight_layout leaving a fixed height (in inches) clear for the suptitle.
+
+    A fractional rect does not travel between layouts: the 0.93 that leaves the right gap
+    on a 5-inch-tall figure leaves an inch of blank paper on the 11-inch ones the e-ink
+    layouts produce.
+    """
+    h = float(fig.get_size_inches()[1])
+    fig.tight_layout(rect=[0, 0, 1, max(0.70, 1.0 - reserve_in / max(h, 1e-6))])
+
 
 def _save_fig(fig, path: str) -> str:
     """Same convention as report.py:_save_fig - kept local to avoid a circular import."""
@@ -551,6 +623,25 @@ def _error_axis(ax, values, axis: str = "x") -> None:
           % ("log" if wide else "linear"), fontsize=8)
 
 
+def _two_row_grid(n_datasets: int, cell_w: float, cell_h: float, **kw):
+    """
+    A 2-rows-by-datasets grid, transposed in the e-ink style.
+
+    Four datasets side by side gives a figure nearly three times wider than it is tall,
+    which on a portrait e-reader page has to be shrunk until nothing is legible. Turned
+    on its side - one dataset per row, the two quantities as columns - it is close to
+    page-shaped. The returned `cell(row, col)` addresses cells logically either way.
+    """
+    if _STYLE == "eink":
+        fig, axes = plt.subplots(n_datasets, 2, squeeze=False,
+                                 figsize=(2 * cell_h * 0.92, n_datasets * cell_w * 0.62),
+                                 **kw)
+        return fig, (lambda r, c: axes[c][r])
+    fig, axes = plt.subplots(2, n_datasets, squeeze=False,
+                             figsize=(cell_w * n_datasets, cell_h * 2), **kw)
+    return fig, (lambda r, c: axes[r][c])
+
+
 def _heads_of(by_alias: dict) -> list:
     heads = set()
     for r in by_alias.values():
@@ -573,10 +664,10 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    fig, axes = plt.subplots(2, len(heads), figsize=(5.6 * len(heads), 8.4), squeeze=False)
+    fig, cell = _two_row_grid(len(heads), 5.6, 4.2)
 
     for c, k in enumerate(heads):
-        ax = axes[0][c]
+        ax = cell(0, c)
         all_mse = np.concatenate(
             [by_alias[a]["results_df"][f"{k}_mse"].to_numpy()
              for a in aliases if f"{k}_mse" in by_alias[a]["results_df"].columns]
@@ -592,6 +683,8 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
             group = r.get("component_group", "single")
             ax.plot(v, np.arange(1, len(v) + 1) / len(v),
                     color=_dataset_color(a, i), ls=_GROUP_LS[group], lw=1.6,
+                    marker=_DATASET_MARKERS[i % len(_DATASET_MARKERS)],
+                    markevery=max(len(v) // 12, 1), ms=4.5, markerfacecolor="none",
                     label="%s  [%s]" % (_ds_label(r, short=True), group))
             ax.axvline(np.median(v), color=_dataset_color(a, i), ls=":", lw=0.8, alpha=0.6)
         _error_axis(ax, all_mse)
@@ -602,7 +695,7 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
         ax.legend(fontsize=6.5, loc="lower right", title="dotted vline = median",
                   title_fontsize=6)
 
-        ax = axes[1][c]
+        ax = cell(1, c)
         data, labels, colors = [], [], []
         for i, a in enumerate(aliases):
             r = by_alias[a]
@@ -644,7 +737,7 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
                         bbox=dict(facecolor="white", alpha=0.85, edgecolor="#b00000"))
 
     _suptitle(fig, "recon_error_distribution", _run_note(by_alias))
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    _tight(fig, reserve_in=1.0)
     _footnote(fig, "recon_error_distribution")
     path = _save_fig(fig, os.path.join(out_dir, "recon_error_distribution.png"))
     return [(_caption("recon_error_distribution"), path)]
@@ -749,7 +842,7 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
             ax.axhline(groups.index("multi") - 0.5, color="#222222", lw=2.0)
 
     _suptitle(fig, "recon_summary_heatmap", _run_note(by_alias), y=1.02)
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    _tight(fig, reserve_in=1.0)
     _footnote(fig, "recon_summary_heatmap")
     path = _save_fig(fig, os.path.join(out_dir, "recon_summary_heatmap.png"))
     return [(_caption("recon_summary_heatmap"), path)]
@@ -763,8 +856,12 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.0 + 1.4 * len(aliases), 5.6),
-                             gridspec_kw={"width_ratios": [1.25, 1.0]})
+    if _STYLE == "eink":
+        fig, axes = plt.subplots(2, 1, figsize=(7.4, 11.0),
+                                 gridspec_kw={"height_ratios": [1.15, 1.0]})
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(7.0 + 1.4 * len(aliases), 5.6),
+                                 gridspec_kw={"width_ratios": [1.25, 1.0]})
 
     # ── Left: median R2 bars, grouped by dataset, one bar per head ────────────
     ax = axes[0]
@@ -784,6 +881,7 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
         if not xs:
             continue
         ax.bar(xs, vals, width, color=_HEAD_COLOR[k], alpha=0.9,
+               hatch=_HEAD_HATCH[k], edgecolor="white", linewidth=0.6,
                label=PATHWAY_LEGEND[k])
         bar_labels.extend(zip(xs, vals, fracs))
     ax.axhline(0.0, color="#000000", lw=1.8, zorder=3)
@@ -812,7 +910,7 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
     labels_.append("R\u00b2 = 0 \u2014 the trivial baseline: predicting each sample's "
                    "own mean value as a flat line")
     ax.legend(handles, labels_, fontsize=6.5, loc="upper center",
-              bbox_to_anchor=(0.5, -0.22), frameon=False)
+              bbox_to_anchor=(0.5, -0.34 if _STYLE == "eink" else -0.22), frameon=False)
     _group_divider(ax, aliases, by_alias, x)
 
     # ── Right: every sample, model error against the baseline it must beat ────
@@ -861,8 +959,8 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
         ax.set_yscale("log")
         ax.set_ylabel("model MSE   (\u2193 better; below the line = model helps)",
                       fontsize=8.5)
-        handles = [plt.Line2D([], [], color=_HEAD_COLOR[k], marker="o", ls="",
-                              label=PATHWAY_SHORT[k]) for k in heads]
+        handles = [plt.Line2D([], [], color=_HEAD_COLOR[k], marker=_HEAD_MARKER[k],
+                              ls="", label=PATHWAY_SHORT[k]) for k in heads]
         handles += [plt.Line2D([], [], color="#555555", marker="o", ls="",
                                label="circle = single-component sample"),
                     plt.Line2D([], [], color="#555555", marker="^", ls="",
@@ -893,7 +991,7 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
         ax.axis("off")
 
     _suptitle(fig, "recon_skill_vs_baseline", _run_note(by_alias), y=1.02)
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    _tight(fig, reserve_in=1.0)
     # The right panel has two modes and the fixed guidance text describes the diagonal
     # one, so say which mode actually ran.
     mode_note = (
@@ -917,15 +1015,14 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    fig, axes = plt.subplots(2, len(aliases), figsize=(4.9 * len(aliases), 7.2),
-                             squeeze=False, sharex=True)
+    fig, cell = _two_row_grid(len(aliases), 4.9, 3.6, sharex=True)
     for c, a in enumerate(aliases):
         r = by_alias[a]
         prof = r["profiles"]
         group = r.get("component_group", "single")
         bins = np.arange(len(prof["per_position_target_std"]))
 
-        ax = axes[0][c]
+        ax = cell(0, c)
         ax.fill_between(bins, 0, prof["per_position_target_std"],
                         color=_REF_COLOR, alpha=0.45,
                         label="target variability (per-bin std) — scale reference")
@@ -933,6 +1030,7 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
             key = f"per_position_abs_err_{k}"
             if key in prof:
                 ax.plot(bins, prof[key], color=_HEAD_COLOR[k], lw=1.3,
+                        ls=_HEAD_LS[k],
                         label="%s — mean |error|" % PATHWAY_SHORT[k])
         ax.set_ylabel("mean |error| at this bin  (↓ better)", fontsize=8)
         ax.set_title("%s\n[%s]" % (_ds_label(r), _GROUP_LABEL[group]), fontsize=8.5,
@@ -942,12 +1040,13 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
         if c == 0:
             ax.legend(fontsize=6.5, loc="upper center")
 
-        ax = axes[1][c]
+        ax = cell(1, c)
         ax.axhline(0.0, color="#000000", lw=1.0)
         for k in heads:
             key = f"per_position_signed_err_{k}"
             if key in prof:
                 ax.plot(bins, prof[key], color=_HEAD_COLOR[k], lw=1.3,
+                        ls=_HEAD_LS[k],
                         label="%s — mean signed error" % PATHWAY_SHORT[k])
         ax.set_ylabel("mean signed error  (0 = unbiased)", fontsize=8)
         ax.set_xlabel("signal bin index (0–%d)" % bins[-1], fontsize=8.5)
@@ -956,7 +1055,7 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
             ax.legend(fontsize=6.5, loc="upper center")
 
     _suptitle(fig, "recon_position_profile", _run_note(by_alias))
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    _tight(fig, reserve_in=1.0)
     _footnote(fig, "recon_position_profile")
     path = _save_fig(fig, os.path.join(out_dir, "recon_position_profile.png"))
     return [(_caption("recon_position_profile"), path)]
@@ -1006,7 +1105,10 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             ax.set_title("%s — %s" % (PATHWAY_SHORT[k], group), fontsize=8.5,
                          color=_HEAD_COLOR[k], fontweight="bold")
             ax.legend(fontsize=6, loc="upper left", framealpha=0.75)
-            fig.colorbar(hb, ax=ax, label="point density (log)", fraction=0.046)
+            if _STYLE != "eink":
+                # The colourbars cost a quarter of the width and the density scale is not
+                # what the figure is for; on a page that width is worth more.
+                fig.colorbar(hb, ax=ax, label="point density (log)", fraction=0.046)
 
         # Rightmost column: per-sample dynamic range.
         #
@@ -1029,6 +1131,7 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                 if not ratio.size:
                     continue
                 ax.hist(ratio, bins=40, color=_HEAD_COLOR[k], alpha=0.55,
+                        hatch=_HEAD_HATCH[k], edgecolor="white",
                         label="%s (median %.2f)" % (PATHWAY_SHORT[k], np.median(ratio)))
             ax.axvline(1.0, color="k", ls="--", lw=1.4,
                        label="ratio = 1 (range preserved)")
@@ -1044,8 +1147,9 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             for k in heads:
                 if k not in preds:
                     continue
-                ax.scatter(ts, preds[k].std(axis=1), s=6, alpha=0.4, linewidths=0,
-                           color=_HEAD_COLOR[k], label=PATHWAY_SHORT[k], rasterized=True)
+                ax.scatter(ts, preds[k].std(axis=1), s=8, alpha=0.4, linewidths=0,
+                           marker=_HEAD_MARKER[k], color=_HEAD_COLOR[k],
+                           label=PATHWAY_SHORT[k], rasterized=True)
             ax.plot([0, hi], [0, hi], "k--", lw=1.2, label="y = x (range preserved)")
             ax.plot([0, hi], [0, 0.5 * hi], color="#888888", lw=1.0, ls=":",
                     label="y = 0.5x (half the range lost)")
@@ -1059,7 +1163,7 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
         ax.legend(fontsize=6, loc="upper left")
 
     _suptitle(fig, "recon_amplitude_calibration", _run_note(by_alias))
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    _tight(fig, reserve_in=1.0)
     note = "the rightmost column is in %s mode" % " and ".join(sorted(range_modes))
     if "ratio-histogram" in range_modes:
         note += (" - target std is 1 for every sample under normalize=True, so the ratio "
@@ -1078,8 +1182,7 @@ def _plot_spectral_fidelity(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    fig, axes = plt.subplots(2, len(aliases), figsize=(4.9 * len(aliases), 7.2),
-                             squeeze=False, sharex=True)
+    fig, cell = _two_row_grid(len(aliases), 4.9, 3.6, sharex=True)
     for c, a in enumerate(aliases):
         r = by_alias[a]
         prof = r["profiles"]
@@ -1092,12 +1195,13 @@ def _plot_spectral_fidelity(by_alias: dict, out_dir: str) -> list:
         # row of the position-profile figure instead.
         tgt, freq = tgt_full[1:], freq_full[1:]
 
-        ax = axes[0][c]
+        ax = cell(0, c)
         ax.plot(freq, tgt, color="black", lw=1.8, label="target (ground truth)")
         for k in heads:
             key = f"mean_fft_pred_{k}"
             if key in prof:
                 ax.plot(freq, prof[key][1:], color=_HEAD_COLOR[k], lw=1.2,
+                        ls=_HEAD_LS[k],
                         label="%s reconstruction" % PATHWAY_SHORT[k])
         ax.set_yscale("log")
         # Clamp to the target's own range. A head that collapsed to a constant output has
@@ -1123,7 +1227,7 @@ def _plot_spectral_fidelity(by_alias: dict, out_dir: str) -> list:
         if c == 0:
             ax.legend(fontsize=6.5, loc="lower left")
 
-        ax = axes[1][c]
+        ax = cell(1, c)
         ax.axhline(1.0, color="black", lw=1.4, label="ratio = 1 (magnitude preserved)")
         ratios = []
         for k in heads:
@@ -1132,7 +1236,7 @@ def _plot_spectral_fidelity(by_alias: dict, out_dir: str) -> list:
                 with np.errstate(divide="ignore", invalid="ignore"):
                     ratio = np.where(tgt > 0, prof[key][1:] / tgt, np.nan)
                 ratios.append(ratio)
-                ax.plot(freq, ratio, color=_HEAD_COLOR[k], lw=1.2,
+                ax.plot(freq, ratio, color=_HEAD_COLOR[k], lw=1.2, ls=_HEAD_LS[k],
                         label="%s / target" % PATHWAY_SHORT[k])
         # Headroom for ratios above 1 - additive noise genuinely raises high-frequency
         # magnitude, and a hard 1.6 cap would silently hide it - but bounded so one
@@ -1152,7 +1256,7 @@ def _plot_spectral_fidelity(by_alias: dict, out_dir: str) -> list:
             ax.legend(fontsize=6.5, loc="lower left")
 
     _suptitle(fig, "recon_spectral_fidelity", _run_note(by_alias))
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    _tight(fig, reserve_in=1.0)
     _footnote(fig, "recon_spectral_fidelity")
     path = _save_fig(fig, os.path.join(out_dir, "recon_spectral_fidelity.png"))
     return [(_caption("recon_spectral_fidelity"), path)]
@@ -1183,9 +1287,10 @@ def _plot_error_vs_properties(r: dict, out_dir: str) -> list:
     has_spec = isinstance(spec_df, pd.DataFrame) and not spec_df.empty
     group = r.get("component_group", "single")
 
-    n_cols = min(4, max(1, len(axes_present)))
+    n_cols = min(2 if _STYLE == "eink" else 4, max(1, len(axes_present)))
     n_rows = int(np.ceil(len(axes_present) / n_cols)) + (1 if has_spec else 0)
-    fig, grid = plt.subplots(n_rows, n_cols, figsize=(4.6 * n_cols, 3.5 * n_rows),
+    cell_h = 2.75 if _STYLE == "eink" else 3.5
+    fig, grid = plt.subplots(n_rows, n_cols, figsize=(4.6 * n_cols, cell_h * n_rows),
                              squeeze=False)
 
     for i, axis in enumerate(axes_present):
@@ -1196,8 +1301,8 @@ def _plot_error_vs_properties(r: dict, out_dir: str) -> list:
             col = f"{k}_mse_median"
             if col not in sub.columns:
                 continue
-            ax.plot(x, sub[col], marker="o", ms=4, lw=1.5, color=_HEAD_COLOR[k],
-                    label=PATHWAY_SHORT[k])
+            ax.plot(x, sub[col], marker=_HEAD_MARKER[k], ms=4, lw=1.5,
+                    ls=_HEAD_LS[k], color=_HEAD_COLOR[k], label=PATHWAY_SHORT[k])
             ax.fill_between(x, sub[f"{k}_mse_q25"], sub[f"{k}_mse_q75"],
                             color=_HEAD_COLOR[k], alpha=0.16)
         ax.set_xticks(x)
@@ -1262,7 +1367,8 @@ def _plot_error_vs_properties(r: dict, out_dir: str) -> list:
                     continue
                 sv = np.sort(v)
                 ax.plot(sv, np.arange(1, len(sv) + 1) / len(sv),
-                        color=_HEAD_COLOR[k], lw=1.5, label=PATHWAY_SHORT[k])
+                        color=_HEAD_COLOR[k], lw=1.5, ls=_HEAD_LS[k],
+                        label=PATHWAY_SHORT[k])
             ax.set_xscale("log")
             ax.set_xlabel("within-spectrum MSE spread (worst − best component)", fontsize=7.5)
             ax.set_ylabel("fraction of spectra at or below", fontsize=7.5)
@@ -1279,7 +1385,7 @@ def _plot_error_vs_properties(r: dict, out_dir: str) -> list:
     fig.suptitle("%s\n%s — checkpoint=%s, normalize=%s"
                  % (d["title"], _ds_label(r), _ckpt_tag(r), r.get("normalize")),
                  fontsize=10.5, fontweight="bold", y=1.0)
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    _tight(fig, reserve_in=1.0)
     _footnote(fig, "recon_error_vs_signal_properties", extra=extra)
     path = _save_fig(fig, os.path.join(out_dir, "recon_error_vs_signal_properties.png"))
     return [(_caption("recon_error_vs_signal_properties"), path)]
