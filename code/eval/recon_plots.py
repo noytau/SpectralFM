@@ -397,7 +397,15 @@ def _group_divider(ax, aliases: list, by_alias: dict, positions) -> None:
     cut = groups.index("multi")
     x = (positions[cut - 1] + positions[cut]) / 2.0
     ax.axvline(x, color="#444444", lw=1.2, ls=":", zorder=0)
-    # Above the axes, so these never fight with bars, annotations or violins.
+    # Above the axes, so these never fight with bars, annotations or violins. The panel
+    # title lives there too, so push it up by one label line first - callers set the
+    # title before calling this, and without the extra pad the two overlap.
+    title = ax.get_title()
+    if title:
+        ax.set_title(title, fontsize=ax.title.get_fontsize(),
+                     color=ax.title.get_color(),
+                     fontweight=ax.title.get_fontweight(), pad=16)
+
     span = positions[-1] - positions[0]
     frac = (x - positions[0]) / span if span else 0.5
     ax.text(frac / 2, 1.005, "single-component", transform=ax.transAxes, fontsize=7,
@@ -752,7 +760,17 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
 
     _suptitle(fig, "recon_skill_vs_baseline", _run_note(by_alias), y=1.02)
     fig.tight_layout(rect=[0, 0, 1, 0.92])
-    _footnote(fig, "recon_skill_vs_baseline")
+    # The right panel has two modes and the fixed guidance text describes the diagonal
+    # one, so say which mode actually ran.
+    mode_note = (
+        "the right panel is in threshold mode - var(target) is effectively constant "
+        "under normalize=True, so the break-even line is HORIZONTAL, not a diagonal, and "
+        "the x-axis is peak prominence rather than baseline error. Points below the line "
+        "still mean the model beats the baseline."
+        if constant_baseline else
+        "the right panel is in diagonal mode - baseline error varies across samples, so "
+        "the break-even line is the y = x diagonal.")
+    _footnote(fig, "recon_skill_vs_baseline", extra=mode_note)
     path = _save_fig(fig, os.path.join(out_dir, "recon_skill_vs_baseline.png"))
     return [(_caption("recon_skill_vs_baseline"), path)]
 
@@ -821,6 +839,7 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
     n_cols = len(heads) + 1
     fig, axes = plt.subplots(len(aliases), n_cols,
                              figsize=(4.0 * n_cols, 3.7 * len(aliases)), squeeze=False)
+    range_modes = set()
     for rowi, a in enumerate(aliases):
         r = by_alias[a]
         t = r["_arrays"]["target"]
@@ -865,6 +884,7 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
         ax = axes[rowi][n_cols - 1]
         ts = t.std(axis=1)
         degenerate = ts.size > 0 and (ts.max() - ts.min()) < 1e-4 * max(ts.max(), 1e-9)
+        range_modes.add("ratio-histogram" if degenerate else "std-vs-std scatter")
 
         if degenerate:
             for k in heads:
@@ -906,7 +926,12 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
 
     _suptitle(fig, "recon_amplitude_calibration", _run_note(by_alias))
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    _footnote(fig, "recon_amplitude_calibration")
+    note = "the rightmost column is in %s mode" % " and ".join(sorted(range_modes))
+    if "ratio-histogram" in range_modes:
+        note += (" - target std is 1 for every sample under normalize=True, so the ratio "
+                 "std(prediction)/std(target) is plotted directly instead of a scatter "
+                 "against a constant")
+    _footnote(fig, "recon_amplitude_calibration", extra=note + ".")
     path = _save_fig(fig, os.path.join(out_dir, "recon_amplitude_calibration.png"))
     return [(_caption("recon_amplitude_calibration"), path)]
 
