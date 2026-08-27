@@ -457,6 +457,30 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
             title, explain = _explain_lines(f[1])
             doc.append(_figure_page(f[1], _recon_fig_caption(f[1]), explain, title))
 
+    # Closing read of the numbers.
+    try:
+        from . import findings
+        obs, nxt = findings.observations(results), findings.next_steps(results)
+    except Exception as e:
+        print("[ReportPDF] findings section failed: %s: %s" % (type(e).__name__, e))
+        obs, nxt = [], []
+    for heading, items in (("What this run shows", obs), ("What to do next", nxt)):
+        if not items:
+            continue
+        doc.append(r"\section*{%s}" % tex_inline(heading))
+        doc.append(r"\begin{itemize}\setlength{\itemsep}{0.5em}")
+        for item in items:
+            # A finding's nested "  - " lines become sub-items.
+            head, *subs = item.split("\n  - ")
+            doc.append(r"\item %s" % tex_inline(head))
+            if subs:
+                doc.append(r"\begin{itemize}")
+                for s in subs:
+                    doc.append(r"\item %s" % tex_inline(s))
+                doc.append(r"\end{itemize}")
+        doc.append(r"\end{itemize}")
+    doc.append(r"\clearpage")
+
     # Appendix.
     if config is not None:
         doc.append(r"\section*{Appendix — configuration}")

@@ -1163,6 +1163,14 @@ def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
         for f in summary_figs:
             lines += _recon_md_figure(f[0], f[1], run_dir) + [""]
 
+    # Closing read of the numbers. Generated from this run's own values, so it cannot
+    # drift into stock advice that would read the same whatever the results were.
+    try:
+        from . import findings
+        lines += findings.section(results)
+    except Exception as e:
+        print(f"[Report] findings section failed: {type(e).__name__}: {e}")
+
     # Collapse runs of blank lines. The block is assembled from many small pieces that
     # each pad themselves, and doubled blanks render as ragged extra space.
     out = []
@@ -1312,6 +1320,21 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
             parts += ["<h4>Summary table — all datasets</h4>", _md_to_html_table(combined)]
         for f in summary_figs:
             parts.append(_recon_html_figure(f[0], f[1]))
+
+    try:
+        from . import findings
+        obs, nxt = findings.observations(results), findings.next_steps(results)
+    except Exception as e:
+        print(f"[Report] findings section failed: {type(e).__name__}: {e}")
+        obs, nxt = [], []
+    for heading, items in (("What this run shows", obs), ("What to do next", nxt)):
+        if not items:
+            continue
+        parts.append("<h3>%s</h3>" % heading)
+        parts.append('<ul class="figexplain">%s</ul>'
+                     % "".join("<li>%s</li>"
+                               % _md_inline_to_html(i).replace("\n  - ", "<br>&bull; ")
+                               for i in items))
 
     parts.append("</section>")
     return "\n".join(p for p in parts if p)
@@ -1797,8 +1820,53 @@ def _write_run_info(run_dir: str, ts: str, results: dict, config) -> str:
     return path
 
 
+def _build_eink_pdfs(results: dict, run_dir: str, config) -> list:
+    """
+    Render a greyscale copy of every figure, then build the PDFs from those.
+
+    The e-ink style is not a colour swap - it changes layouts, drops the on-image
+    footnote and re-shades the heatmap - so the PDF cannot reuse the HTML's figures. It
+    would once have been enough to switch style before the run, but that made the HTML
+    greyscale too. Rendering twice costs a minute of matplotlib and no re-inference, and
+    means one run produces a colour HTML and an e-ink PDF, which is what the pipeline
+    wants by default.
+    """
+    from . import recon_plots, report_pdf
+
+    if not report_pdf.available():
+        print("[Report] pdflatex not found — skipping the e-ink PDF")
+        return []
+
+    eink_dir = os.path.join(run_dir, "eink_figures")
+    os.makedirs(eink_dir, exist_ok=True)
+    recon_plots.set_style("eink")
+    try:
+        figures_by_eval, summary_figs = {}, []
+        for key, r in results.items():
+            if _split_eval_key(key)[0] != "signal_reconstruction":
+                continue
+            if not isinstance(r, dict) or r.get("skipped"):
+                continue
+            alias = _split_eval_key(key)[1] or "dataset"
+            target = os.path.join(eink_dir, _method_dirname("signal_reconstruction", alias))
+            figures_by_eval[key] = _relocate(_plot_reconstruction_all(r, eink_dir), target)
+
+        recon_keys = _recon_keys(results)
+        if recon_keys:
+            by_alias = {(_split_eval_key(k)[1] or "dataset"): results[k]
+                        for k in recon_keys}
+            summary_figs = recon_plots.plot_recon_across_datasets(
+                by_alias, os.path.join(eink_dir, "reconstruction_summary"))
+
+        return report_pdf.build_pdfs(results, figures_by_eval, summary_figs, run_dir,
+                                     config, pages=getattr(config, "pdf_page", None))
+    finally:
+        # Always restore, or a later report in the same process comes out greyscale.
+        recon_plots.set_style("screen")
+
+
 def generate_report(results: dict, output_dir: str, config=None,
-                    pdf: bool = False) -> tuple[str, str]:
+                    pdf: bool = True) -> tuple[str, str]:
     """
     Generate markdown + self-contained HTML report from eval results.
     Each run gets its own timestamped subdirectory inside output_dir.
@@ -2083,10 +2151,7 @@ def generate_report(results: dict, output_dir: str, config=None,
     total_figs = len(all_figures)
     if pdf:
         try:
-            from . import report_pdf
-            report_pdf.build_pdfs(results, figures_by_eval, recon_summary_figs,
-                                  run_dir, config,
-                                  pages=getattr(config, "pdf_page", None))
+            _build_eink_pdfs(results, run_dir, config)
         except Exception as e:
             print(f"[Report] PDF build failed: {type(e).__name__}: {e}")
 

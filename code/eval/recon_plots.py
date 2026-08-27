@@ -61,6 +61,12 @@ _EINK_DATASET_COLOR = {"sanity": "#8a8a8a", "in_dist": "#000000",
                        "multi_ch": "#000000", "samples": "#8a8a8a",
                        "labeled": "#5a5a5a"}
 
+# A summary-heatmap column has to vary by this fraction of its own magnitude before it is
+# shaded at full strength. Half means a column whose best and worst differ by half the
+# column's typical value is coloured hard, while one differing by a per cent or two is
+# barely tinted - the honest reading of a small difference.
+_FULL_SATURATION_AT = 0.5
+
 _STYLE = "screen"
 
 
@@ -250,14 +256,19 @@ _FIG_DOC = {
         "what": (
             "One block per decoder head. Rows are datasets (single-component block first, "
             "then multi-component); columns are the summary metrics. Cell text is the "
-            "actual value; cell color is that value's rank within its own column, so "
-            "colors compare datasets on one metric and mean nothing across columns."
+            "actual value; cell shading is that value's rank within its own column, so "
+            "shading compares datasets on one metric and means nothing across columns. "
+            "Shading strength tracks how much the column actually varies - a column whose "
+            "values differ by half their own magnitude or more is shaded at full strength, "
+            "one varying by a per cent or two is left almost neutral - so a difference in "
+            "the fourth decimal cannot look like a real gap."
         ),
         "read": (
             "read down a column to rank datasets on one metric; the shading marks rank "
             "within that column, with the direction already accounted for (lower MSE is "
-            "better, higher R-squared is better) - in colour, green is the better end and "
-            "red the worse; in greyscale, lighter is better and darker worse"
+            "better, higher R-squared is better) - in colour green is the better end and "
+            "red the worse, in greyscale lighter is better and darker worse; a pale or "
+            "neutral column is one whose values are all close together"
         ),
         "good": (
             "mse_median small, r2_median near 1, frac_r2_positive at 1.0, pearson_median "
@@ -830,21 +841,26 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
             if ok.sum() < 2:
                 continue
             spread = float(np.ptp(col[ok]))
-            scale = max(abs(float(np.nanmedian(col[ok]))), 1.0)
-            # Rank-normalising a column whose values are all equal amplifies float noise
-            # into a full-range colour ramp, which reads as real variation. A head locked
-            # to one output value produces exactly that. Leave such columns neutral.
-            # 1e-6 relative, not machine epsilon: a column whose values agree to six
-            # significant figures carries no ranking worth colouring, and float32 error
-            # accumulation puts a locked-output head's MSE column exactly there.
-            if spread <= 1e-6 * scale:
+            scale = max(abs(float(np.nanmedian(col[ok]))), 1e-12)
+
+            # Rank alone is the wrong thing to colour. Normalising a column to its own
+            # min and max spans the full ramp however small the spread is, so two values
+            # differing in the fourth decimal come out fully red and fully green - the
+            # figure then asserts a difference that is not there. Colour SATURATION is
+            # therefore scaled by the spread relative to the column's own magnitude: a
+            # column varying by _FULL_SATURATION_AT or more is shaded at full strength,
+            # anything tighter stays near neutral, and a column that is effectively
+            # constant is left alone entirely.
+            saturation = min(1.0, (spread / scale) / _FULL_SATURATION_AT)
+            if saturation < 0.02:
                 continue
+
             norm = (col - np.nanmin(col[ok])) / spread
             if higher_better is None:            # amplitude ratio: distance from 1
                 norm = 1.0 - np.abs(col - 1.0) / max(np.nanmax(np.abs(col[ok] - 1.0)), 1e-9)
             elif not higher_better:
                 norm = 1.0 - norm
-            shade[:, j] = norm
+            shade[:, j] = 0.5 + (norm - 0.5) * saturation
         ax.imshow(shade, cmap=_rank_cmap(), vmin=0, vmax=1, aspect="auto")
 
         for i in range(M.shape[0]):

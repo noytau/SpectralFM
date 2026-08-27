@@ -144,7 +144,7 @@ class EvalConfig:
     # data_source behaviour.
     multi_dataset: bool = True
     eval_set_sizes: Optional[str] = None
-    eval_set_size: Optional[int] = None
+    eval_set_size: Optional[str] = None      # int, or "all" for whole splits
 
     # Signal reconstruction (per-component checkpoints, independent of checkpoint_mode)
     recon_ckpt: Optional[str] = None         # single 3AE ckpt: all pathways (fe/proj/transformer)
@@ -155,7 +155,13 @@ class EvalConfig:
     # 1000, not 200: the dataset-level figures are distributions, stratified medians and
     # per-spectrum aggregates, and 200 samples spread over five quantile bins (and, on
     # multi-component data, over component indices) leaves bins too thin to quote.
+    # 0 means no cap: evaluate every sample loaded. Metrics and profiles are streamed,
+    # so memory is bounded by the loaded signals rather than by N x heads x 245.
     recon_max_samples: int = 1000
+    # Raw signals kept for the figures that plot individual points (hexbin, dynamic
+    # range). Everything else covers all N; a few thousand points already saturate a
+    # density plot.
+    recon_max_figure_samples: int = 2000
     recon_n_examples: int = 6                # sample-level overlay traces
     recon_seed: int = 42                     # which samples get drawn
     # Component metadata unlocks the multi-component views (per-spectrum aggregation,
@@ -177,9 +183,10 @@ class EvalConfig:
 
     # Output
     output_dir: str = "eval_outputs"
-    # Also build eval_report_eink.pdf: the same content re-rendered for an e-ink reader
-    # (greyscale figures, one per page, explanations as real type). Needs pdflatex.
-    pdf: bool = False
+    # Build the e-ink PDFs alongside the HTML. On by default: it costs one extra
+    # matplotlib pass and no re-inference, and the two formats no longer interfere -
+    # the PDF renders its own greyscale figures, so the HTML keeps its colour ones.
+    pdf: bool = True
     # Page sizes to emit, comma-separated: presets (onyx13/onyx10/onyx8) or WxH inches.
     # Several cost only an extra pdflatex pass each, so the default covers both large
     # Onyx panels rather than making anyone guess which page matches their device.
@@ -246,13 +253,18 @@ class EvalRunner:
     def _dataset_sizes(self) -> dict:
         cfg = self.cfg
         sizes = {alias: n for alias, (_, _, n) in DATASET_SPECS.items()}
+        # "all" (either flag) loads every row of each dataset's split. 0 means the same
+        # thing and is what reaches load_manifest_subset.
+        if str(cfg.eval_set_sizes).strip().lower() == "all" or \
+                str(cfg.eval_set_size).strip().lower() == "all":
+            return {alias: 0 for alias in sizes}
         if cfg.eval_set_size:
             sizes = {alias: int(cfg.eval_set_size) for alias in sizes}
         if cfg.eval_set_sizes:
             for part in str(cfg.eval_set_sizes).split(","):
                 alias, _, val = part.strip().partition("=")
                 if alias in sizes and val:
-                    sizes[alias] = int(val)
+                    sizes[alias] = 0 if val.strip().lower() == "all" else int(val)
         return sizes
 
     def _needed_aliases(self) -> set:
@@ -319,8 +331,6 @@ class EvalRunner:
 
     def run(self) -> dict:
         cfg = self.cfg
-        if cfg.pdf:
-            self._apply_pdf_style()
         print(f"[EvalRunner] Device: {cfg.device}")
 
         if not (cfg.multi_dataset and cfg.nova_data_dir):
@@ -381,6 +391,7 @@ class EvalRunner:
                         device=cfg.device, arch=cfg.arch,
                         normalize=cfg.recon_normalize,
                         max_samples=cfg.recon_max_samples,
+                        max_figure_samples=cfg.recon_max_figure_samples,
                         n_examples=cfg.recon_n_examples,
                         seed=cfg.recon_seed,
                         batch_size=cfg.batch_size,
@@ -558,18 +569,6 @@ class EvalRunner:
 
         return all_results
 
-    def _apply_pdf_style(self):
-        """
-        Switch the figures to the greyscale e-ink styling.
-
-        Done before any figure is drawn, because the style changes the layouts, not just
-        the colours - the wide multi-dataset grids are transposed to fit a portrait page.
-        Page sizes are handled by report_pdf at build time, since one set of figures
-        serves every page size.
-        """
-        from . import recon_plots
-        recon_plots.set_style("eink")
-
     def report(self, results: dict, output_dir: str | None = None) -> tuple[str, str]:
         """Generate markdown + HTML reports. Returns (md_path, html_path)."""
         out = output_dir or self.cfg.output_dir
@@ -619,11 +618,15 @@ def main():
                              "the E4 datasets from --nova_data_dir instead.")
     parser.add_argument("--single_dataset", action="store_true",
                         help="Disable E4 multi-dataset mode; evaluate --data_source only.")
+    # NOTE: this caps how many rows are LOADED; --recon_max_samples caps how many of
+    # those are evaluated. Running a whole split needs both raised.
     parser.add_argument("--eval_set_sizes", default=None,
                         help="Per-dataset sample counts, e.g. 'sanity=100,in_dist=500,"
                              "multi_ch=1000,samples=1000'. Defaults per DATASET_SPECS.")
-    parser.add_argument("--eval_set_size", type=int, default=None,
-                        help="Global sample-count override for all datasets (smoke runs).")
+    parser.add_argument("--eval_set_size", default=None,
+                        help="Global sample-count override for all datasets, or 'all' to "
+                             "load every row of each split. Pair with "
+                             "--recon_max_samples 0 to evaluate all of it.")
     parser.add_argument("--checkpoint_mode", default="file", choices=CHECKPOINT_MODES)
     parser.add_argument("--checkpoint_path", default=None, help="Path to .pt file or checkpoint dir")
     parser.add_argument("--checkpoint_paths", nargs="+", default=None,
@@ -639,15 +642,11 @@ def main():
     parser.add_argument("--mask_ratio", type=float, default=0.15)
     parser.add_argument("--masking_type", default="random")
     parser.add_argument("--output_dir", default="eval_outputs")
-    parser.add_argument("--pdf", action="store_true", default=None,
-                        help="Also build eval_report_eink.pdf — the same report laid out "
-                             "for an e-ink reader: greyscale figures (heads separated by "
-                             "line style, marker and hatch, not colour), one figure per "
-                             "page with its explanation on the next, small page so text "
-                             "is readable without zooming. Needs pdflatex. NOTE: this "
-                             "also switches the PNGs to greyscale, so the HTML report "
-                             "from the same run is greyscale too — run without --pdf for "
-                             "colour figures.")
+    parser.add_argument("--no_pdf", dest="pdf", action="store_false", default=None,
+                        help="Skip the e-ink PDFs. They are built by default alongside "
+                             "the HTML: greyscale figures with heads separated by line "
+                             "style, marker and hatch, one page per figure, sized to the "
+                             "panel. Needs pdflatex.")
     parser.add_argument("--pdf_page", default=None,
                         help="Page sizes to emit, comma-separated (default "
                              "'onyx13,onyx10'). Presets are the panels' physical sizes: "
@@ -680,9 +679,13 @@ def main():
                         help="Override per-sample layer_norm normalization for reconstruction "
                              "(default: use the flag recorded in the checkpoint).")
     parser.add_argument("--recon_max_samples", type=int, default=None,
-                        help="Samples per dataset for reconstruction (default 1000). The "
-                             "dataset-level figures are distributions and stratified "
-                             "medians, so they need more than the old 200.")
+                        help="Samples per dataset for reconstruction (default 1000). Use "
+                             "0 for no cap — every sample loaded is evaluated. Metrics "
+                             "and profiles are streamed, so this is limited by manifest "
+                             "read time (~1300 wavs/s) rather than memory.")
+    parser.add_argument("--recon_max_figure_samples", type=int, default=None,
+                        help="Raw signals kept for the point-plotting figures (default "
+                             "2000). All other statistics cover every sample regardless.")
     parser.add_argument("--recon_n_examples", type=int, default=None,
                         help="Sample-level overlay traces per dataset (default 6).")
     parser.add_argument("--recon_seed", type=int, default=None,

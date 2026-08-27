@@ -88,6 +88,8 @@ def load_manifest_subset(
     """
     Load a deterministic n-sample subset from a fairseq manifest (train.tsv/valid.tsv).
 
+    n <= 0 loads the entire split.
+
     Samples WHOLE stacks (contiguous blocks of `stack_size` manifest rows) so the
     stack structure needed by the stack-query/clustering evals survives the draw:
     n // stack_size blocks are chosen with a seeded RNG, each contributing its
@@ -107,10 +109,14 @@ def load_manifest_subset(
             root = dst + root[len(src):]
             break
 
+    # n <= 0 means the entire split, in manifest order - no sampling at all.
     n_blocks_total = len(rows) // stack_size
-    n_blocks = max(1, min(n // stack_size, n_blocks_total))
-    rng = np.random.default_rng(seed)
-    chosen = np.sort(rng.choice(n_blocks_total, n_blocks, replace=False))
+    if n <= 0:
+        chosen = np.arange(n_blocks_total)
+    else:
+        n_blocks = max(1, min(n // stack_size, n_blocks_total))
+        rng = np.random.default_rng(seed)
+        chosen = np.sort(rng.choice(n_blocks_total, n_blocks, replace=False))
 
     all_rows = []
     for stack_idx, b in enumerate(chosen):

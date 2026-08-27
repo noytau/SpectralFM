@@ -391,6 +391,74 @@ def load_3ae_recon(ckpt_path: str, device: str = "cpu"):
     return backbone, heads, meta
 
 
+def _figure_subsample(n_total: int, cap: int, seed: int) -> np.ndarray:
+    """
+    Indices of the samples whose raw signals are kept for the point-plotting figures.
+
+    The hexbin and dynamic-range panels are the only things that need individual signals
+    rather than aggregates, and a few thousand samples already saturate a density plot -
+    2000 samples is half a million points. Everything else (per-sample metrics, profiles)
+    covers all N regardless, so this caps memory without capping the statistics.
+    """
+    if cap <= 0 or n_total <= cap:
+        return np.arange(n_total)
+    idx = np.random.default_rng(seed).choice(n_total, cap, replace=False)
+    idx.sort()
+    return idx
+
+
+class _StreamingProfiles:
+    """
+    Per-position and per-frequency means accumulated batch by batch.
+
+    Holding every prediction to average at the end costs N x heads x 245 floats - about
+    670 MB for multi_channel's full 170k-row valid split, on top of the targets. These
+    are all means, so running sums give the identical answer in O(245) memory and let a
+    run cover a whole split instead of a sample of it.
+    """
+
+    def __init__(self, length: int, heads: list):
+        self.length = length
+        self.heads = list(heads)
+        self.n = 0
+        self._t_sum = np.zeros(length)
+        self._t_sq = np.zeros(length)
+        self._fft_t = np.zeros(length // 2 + 1)
+        self._abs = {k: np.zeros(length) for k in heads}
+        self._signed = {k: np.zeros(length) for k in heads}
+        self._fft_p = {k: np.zeros(length // 2 + 1) for k in heads}
+
+    def update(self, target: np.ndarray, preds: dict) -> None:
+        t = np.asarray(target, dtype=np.float64)
+        self.n += len(t)
+        self._t_sum += t.sum(axis=0)
+        self._t_sq += (t ** 2).sum(axis=0)
+        self._fft_t += np.abs(np.fft.rfft(t, axis=1)).sum(axis=0)
+        for k, p in preds.items():
+            p = np.asarray(p, dtype=np.float64)
+            self._abs[k] += np.abs(p - t).sum(axis=0)
+            self._signed[k] += (p - t).sum(axis=0)
+            self._fft_p[k] += np.abs(np.fft.rfft(p, axis=1)).sum(axis=0)
+
+    def result(self) -> dict:
+        n = max(self.n, 1)
+        mean = self._t_sum / n
+        # Variance from the running sums; clipped because catastrophic cancellation can
+        # push a near-zero variance slightly negative.
+        var = np.maximum(self._t_sq / n - mean ** 2, 0.0)
+        prof = {
+            "per_position_target_mean": mean,
+            "per_position_target_std": np.sqrt(var),
+            "mean_fft_target": self._fft_t / n,
+            "freq_bins": np.fft.rfftfreq(self.length, d=1.0),
+        }
+        for k in self.heads:
+            prof[f"per_position_abs_err_{k}"] = self._abs[k] / n
+            prof[f"per_position_signed_err_{k}"] = self._signed[k] / n
+            prof[f"mean_fft_pred_{k}"] = self._fft_p[k] / n
+        return prof
+
+
 @torch.no_grad()
 def _3ae_reconstruct_all(backbone, heads: dict, source: torch.Tensor) -> dict:
     """
@@ -692,6 +760,7 @@ def run(
     arch: str = "conv1d",
     normalize: Optional[bool] = None,
     max_samples: int = 200,
+    max_figure_samples: int = 2000,
     n_examples: int = 6,
     batch_size: int = 32,
     seed: int = 42,
@@ -767,7 +836,9 @@ def run(
     data = np.stack(df["data"].apply(np.array).values).astype(np.float32)
     fnames = (df["filename"].tolist() if "filename" in df.columns
               else [str(i) for i in range(len(df))])
-    if len(data) > max_samples:
+    # max_samples <= 0 means no cap: evaluate everything that was loaded. The metrics
+    # and profiles are streamed, so the cost is linear in N with bounded memory.
+    if max_samples > 0 and len(data) > max_samples:
         idx = np.random.default_rng(seed).choice(len(data), max_samples, replace=False)
         idx.sort()
         data = data[idx]
@@ -782,23 +853,61 @@ def run(
     # ── Reconstruct: preds keyed by pathway ('fe' / 'proj' / 'tr') ────────────
     pathway_names = (sorted(heads_3ae) if heads_3ae is not None
                      else [n for n, p in (("fe", fe_parts), ("tr", tr_parts), ("proj", proj_parts)) if p])
-    preds = {k: torch.zeros_like(target) for k in pathway_names}
-    for i in range(0, len(target), batch_size):
-        batch = target[i : i + batch_size].to(device)
+    def _reconstruct_batch(batch: torch.Tensor) -> dict:
         if heads_3ae is not None:
-            batch_preds = _3ae_reconstruct_all(backbone_3ae, heads_3ae, batch)
-            for k, v in batch_preds.items():
-                preds[k][i : i + batch_size] = v[..., :L].cpu()
-        else:
-            if fe_parts:
-                fe, ln, decoder, _ = fe_parts
-                preds["fe"][i : i + batch_size] = _fe_reconstruct(fe, ln, decoder, batch).cpu()
-            if tr_parts:
-                backbone, head, _ = tr_parts
-                preds["tr"][i : i + batch_size] = _tr_reconstruct(backbone, head, batch)[..., :L].cpu()
-            if proj_parts:
-                backbone, head, _ = proj_parts
-                preds["proj"][i : i + batch_size] = _proj_reconstruct(backbone, head, batch)[..., :L].cpu()
+            return {k: v[..., :L] for k, v in
+                    _3ae_reconstruct_all(backbone_3ae, heads_3ae, batch).items()}
+        got = {}
+        if fe_parts:
+            fe, ln, decoder, _ = fe_parts
+            got["fe"] = _fe_reconstruct(fe, ln, decoder, batch)[..., :L]
+        if tr_parts:
+            backbone, head, _ = tr_parts
+            got["tr"] = _tr_reconstruct(backbone, head, batch)[..., :L]
+        if proj_parts:
+            backbone, head, _ = proj_parts
+            got["proj"] = _proj_reconstruct(backbone, head, batch)[..., :L]
+        return got
+
+    # Stream the predictions: per-sample metrics and the position/frequency profiles are
+    # accumulated batch by batch, and only a bounded subsample of raw signals is kept for
+    # the figures that plot individual points. Holding every prediction would cost
+    # N x heads x 245 floats, which is what limited a run to a sample of a split.
+    profiles = _StreamingProfiles(L, pathway_names)
+    per_sample = {k: {name: [] for name in ("mse", "mae", "r2", "pearson",
+                                            "amp_ratio", "peak_err")}
+                  for k in pathway_names}
+    fig_idx = _figure_subsample(len(target), max_figure_samples, seed)
+    fig_set = set(fig_idx.tolist())
+    kept_target, kept_preds = [], {k: [] for k in pathway_names}
+
+    for i in range(0, len(target), batch_size):
+        batch = target[i : i + batch_size]
+        batch_np = batch.numpy()
+        batch_preds = {k: v.cpu().numpy() for k, v in
+                       _reconstruct_batch(batch.to(device)).items()}
+        profiles.update(batch_np, batch_preds)
+
+        for k, pred_np in batch_preds.items():
+            err = pred_np.astype(np.float64) - batch_np
+            mse = (err ** 2).mean(axis=1)
+            per_sample[k]["mse"].append(mse)
+            per_sample[k]["mae"].append(np.abs(err).mean(axis=1))
+            for name, values in _per_sample_metrics(batch_np, pred_np, mse).items():
+                per_sample[k][name].append(values)
+
+        local = [j for j in range(len(batch_np)) if (i + j) in fig_set]
+        if local:
+            kept_target.append(batch_np[local])
+            for k, pred_np in batch_preds.items():
+                kept_preds[k].append(pred_np[local])
+
+    kept_target = (np.concatenate(kept_target) if kept_target
+                   else np.zeros((0, L), dtype=np.float32))
+    kept_preds = {k: (np.concatenate(v) if v else np.zeros((0, L), dtype=np.float32))
+                  for k, v in kept_preds.items()}
+    per_sample = {k: {name: np.concatenate(v) for name, v in m.items()}
+                  for k, m in per_sample.items()}
 
     # ── Metrics + results ─────────────────────────────────────────────────────
     rows = {"index": np.arange(len(target)), "filename": fnames}
@@ -822,8 +931,8 @@ def run(
         out["proj_meta"] = proj_parts[2]
 
     for k in pathway_names:
-        mse = F.mse_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
-        mae = F.l1_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
+        mse = per_sample[k]["mse"]
+        mae = per_sample[k]["mae"]
         rows[f"{k}_mse"] = mse
         rows[f"{k}_mae"] = mae
         out[f"recon_{k}_mse_mean"] = float(mse.mean())
@@ -837,9 +946,8 @@ def run(
         out[f"recon_{k}_mae_median"] = float(np.median(mae))
 
         # Skill metrics beyond error magnitude — see _per_sample_metrics.
-        for name, values in _per_sample_metrics(
-                target_np, preds[k].numpy(), mse).items():
-            rows[f"{k}_{name}"] = values
+        for name in ("r2", "pearson", "amp_ratio", "peak_err"):
+            rows[f"{k}_{name}"] = per_sample[k][name]
 
     rdf = pd.DataFrame(rows)
 
@@ -875,15 +983,23 @@ def run(
 
     rdf["component_group"] = "multi" if is_multi else "single"
 
-    # Dropping redundant-component rows above means target/preds no longer line up with
-    # rdf, so re-index everything the figures read from the surviving `index` column.
-    keep = rdf["index"].to_numpy()
-    if len(keep) != len(target):
-        target_np = target_np[keep]
-        preds = {k: v[keep] for k, v in preds.items()}
-        fnames = [fnames[i] for i in keep]
-        rdf = rdf.assign(index=np.arange(len(keep)))
-        out["n_samples"] = len(keep)
+    # Dropping redundant-component rows means the kept raw signals no longer line up with
+    # rdf. The per-sample metrics and profiles were computed before the drop, so the
+    # profiles now cover a few rows that rdf excludes - a sub-percent effect on a mean
+    # over thousands of samples, and the alternative is a second inference pass.
+    keep_rows = rdf["index"].to_numpy()
+    if len(keep_rows) != len(target):
+        surviving = set(int(i) for i in keep_rows)
+        sel = [j for j, gi in enumerate(fig_idx) if int(gi) in surviving]
+        kept_target = kept_target[sel]
+        kept_preds = {k: v[sel] for k, v in kept_preds.items()}
+        fig_idx = fig_idx[sel]
+        fnames = [fnames[i] for i in keep_rows]
+        # fig_idx indexed the original draw; remap it onto rdf's new 0..n-1 rows.
+        remap = {int(gi): new for new, gi in enumerate(keep_rows)}
+        fig_idx = np.array([remap[int(gi)] for gi in fig_idx], dtype=int)
+        rdf = rdf.assign(index=np.arange(len(keep_rows)))
+        out["n_samples"] = len(keep_rows)
 
     out["results_df"] = rdf
     out["component_group"] = "multi" if is_multi else "single"
@@ -908,26 +1024,30 @@ def run(
         strat_axes += ["comp", "n_comps"]
     out["strat_df"] = _stratified_table(rdf, pathway_names, strat_axes)
 
-    pred_np = {k: (preds[k] if isinstance(preds[k], np.ndarray) else preds[k].numpy())
-               for k in pathway_names}
-    out["profiles"] = _profiles(target_np, pred_np)
+    out["profiles"] = profiles.result()
 
-    # Full arrays for the hexbin / calibration figures. ~1 MB per pathway at n=1000;
-    # nothing serializes the results dict, and the CSV pass only touches DataFrames.
-    out["_arrays"] = {"target": target_np, "preds": pred_np}
+    # Raw signals for the hexbin / calibration figures — a bounded subsample, see
+    # _figure_subsample. Nothing serializes the results dict, and the CSV pass only
+    # touches DataFrames.
+    out["_arrays"] = {"target": kept_target, "preds": kept_preds,
+                      "n_kept": len(kept_target), "n_total": len(target)}
 
     # Example panel for the overlay plot (deterministic pick)
-    n_kept = len(target_np)
-    ex_idx = np.linspace(0, n_kept - 1, min(n_examples, n_kept), dtype=int)
+    # The overlay panel draws real signals, so it can only use samples that were kept.
+    n_kept = len(kept_target)
+    n_ex = min(n_examples, n_kept)
+    local = np.linspace(0, n_kept - 1, n_ex, dtype=int) if n_ex else np.array([], int)
+    global_idx = fig_idx[local] if n_ex else local
     out["panel"] = {
-        "indices": ex_idx.tolist(),
-        "names": [fnames[i] for i in ex_idx],
-        "target": target_np[ex_idx],
-        **{f"pred_{k}": pred_np[k][ex_idx] for k in pathway_names},
+        "indices": [int(i) for i in global_idx],
+        "names": [fnames[i] for i in global_idx],
+        "target": kept_target[local],
+        **{f"pred_{k}": kept_preds[k][local] for k in pathway_names},
     }
 
     label = dataset_alias or dataset_subset or "dataset"
-    msg = [f"[SignalRecon] {label} ({out['component_group']}-component) n={n_kept}"]
+    msg = [f"[SignalRecon] {label} ({out['component_group']}-component) "
+           f"n={out['n_samples']} (raw signals kept for figures: {n_kept})"]
     for k in pathway_names:
         s = out["summary_df"].set_index("head").loc[k]
         msg.append(f"{k.upper()} MSE med={s['mse_median']:.4e} mean={s['mse_mean']:.4e} "
