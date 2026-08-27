@@ -857,7 +857,7 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
         return []
 
     if _STYLE == "eink":
-        fig, axes = plt.subplots(2, 1, figsize=(7.4, 11.0),
+        fig, axes = plt.subplots(2, 1, figsize=(7.4, 9.2),
                                  gridspec_kw={"height_ratios": [1.15, 1.0]})
     else:
         fig, axes = plt.subplots(1, 2, figsize=(7.0 + 1.4 * len(aliases), 5.6),

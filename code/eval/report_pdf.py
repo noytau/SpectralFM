@@ -106,14 +106,25 @@ def _breakable_code(s: str) -> str:
     """
     s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", r"\\allowbreak{}", s)
     s = s.replace(r"\_", r"\_\allowbreak{}")
-    parts = []
-    for token in re.split(r"(\\allowbreak\{\})", s):
-        if token.startswith("\\") or len(token) <= 14:
-            parts.append(token)
-        else:
-            parts.append(r"\allowbreak{}".join(
-                token[i:i + 14] for i in range(0, len(token), 14)))
-    return "".join(parts)
+
+    # The length fallback has to count TeX atoms, not characters. Chunking by character
+    # can cut between the backslash and the letter of an escape - splitting \_ leaves a
+    # bare backslash that merges with the inserted \allowbreak into \\, and an
+    # unescaped _ that TeX reads as a subscript. That aborted the build on a real run,
+    # where config paths are long enough to reach the fallback.
+    atoms = re.findall(r"\\[a-zA-Z]+(?:\{\})?|\\.|.", s, flags=re.S)
+    out, run = [], 0
+    for atom in atoms:
+        if atom == r"\allowbreak{}":
+            out.append(atom)
+            run = 0
+            continue
+        if run >= 14:
+            out.append(r"\allowbreak{}")
+            run = 0
+        out.append(atom)
+        run += 1
+    return "".join(out)
 
 
 def tex_inline(text: str) -> str:
@@ -189,7 +200,7 @@ def _figure_page(img_path: str, caption: str, explain: list, title: str) -> str:
     """
     out = [r"\subsubsection*{%s}" % tex_inline(title)]
     out.append(r"\begin{center}")
-    out.append(r"\includegraphics[width=\textwidth,height=0.86\textheight,"
+    out.append(r"\includegraphics[width=\textwidth,height=0.90\textheight,"
                r"keepaspectratio]{%s}" % img_path)
     out.append(r"\end{center}")
     out.append(r"\vspace{-0.4em}{\small\itshape %s\par}" % tex_inline(caption))
@@ -428,14 +439,24 @@ def build_pdf(results: dict, figures_by_eval: dict, summary_figs: list,
         f.write(tex)
 
     for _ in range(2):
-        proc = subprocess.run(
+        subprocess.run(
             ["pdflatex", "-interaction=nonstopmode", "-halt-on-error",
              "-jobname", name, tex_path],
             cwd=run_dir, capture_output=True, text=True)
     pdf_path = os.path.join(run_dir, name + ".pdf")
     if not os.path.isfile(pdf_path):
-        tail = "\n".join(proc.stdout.strip().splitlines()[-25:])
-        print("[ReportPDF] pdflatex failed:\n%s" % tail)
+        # Report from the .log, not the captured stdout: pdflatex's stdout can come back
+        # empty, and the log is the authoritative record anyway. Keep it on disk too.
+        log_path = os.path.join(run_dir, name + ".log")
+        lines = []
+        if os.path.isfile(log_path):
+            with open(log_path, errors="replace") as f:
+                lines = f.read().splitlines()
+        errs = [ln for ln in lines if ln.startswith("!")]
+        print("[ReportPDF] pdflatex failed. Errors:\n  %s\n  Log tail:\n%s\n  "
+              "Full log: %s"
+              % ("\n  ".join(errs[:8]) or "(none found)",
+                 "\n".join("    " + ln for ln in lines[-15:]), log_path))
         return ""
 
     for ext in (".aux", ".log", ".out", ".toc"):
