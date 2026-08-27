@@ -929,7 +929,10 @@ _RECON_INTRO = [
     "before anything is aggregated, so the sample count for those datasets is lower than "
     "the number drawn.",
     "",
-    "The three parts below go from one sample, to one dataset, to all of them.",
+    "The three parts below go from one sample, to one dataset, to all of them. Every "
+    "figure is followed by what it shows, how to read it, what a good result looks like "
+    "and its caveats; the same text is also drawn onto each PNG, so a figure opened on "
+    "its own still explains itself.",
     "",
     "The single number worth checking first is **median R²**. It compares the model "
     "against the trivial predictor that outputs each sample's own mean value as a flat "
@@ -1135,9 +1138,7 @@ def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
     if summary_figs:
         lines += ["---", "", "### 3. Across datasets", "",
                   "Every dataset in one view, with single-component and multi-component "
-                  "blocks kept visually separate. Each figure also carries its own "
-                  "explanation as a footnote on the image, and the full write-up of all "
-                  "of them is in `FIGURES.md` beside the PNGs.", ""]
+                  "blocks kept visually separate.", ""]
         combined = _recon_combined_table(results)
         if combined:
             lines += ["#### Summary table — all datasets", ""] + combined + [""]
@@ -1287,10 +1288,7 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
     if summary_figs:
         parts += ["<h3>3. Across datasets</h3>",
                   para("Every dataset in one view, with single-component and "
-                       "multi-component blocks kept visually separate. Each figure also "
-                       "carries its own explanation as a footnote on the image, and the "
-                       "full write-up of all of them is in <code>FIGURES.md</code> "
-                       "beside the PNGs.")]
+                       "multi-component blocks kept visually separate.")]
         combined = _recon_combined_table(results)
         if combined:
             parts += ["<h4>Summary table — all datasets</h4>", _md_to_html_table(combined)]
