@@ -462,7 +462,9 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
         from . import findings
         obs, nxt = findings.observations(results), findings.next_steps(results, config)
     except Exception as e:
-        print("[ReportPDF] findings section failed: %s: %s" % (type(e).__name__, e))
+        import traceback
+        traceback.print_exc()
+        print("[ReportPDF] findings section FAILED: %s: %s" % (type(e).__name__, e))
         obs, nxt = [], []
     for heading, items in (("What this run shows", obs), ("What to do next", nxt)):
         if not items:

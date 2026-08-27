@@ -1096,7 +1096,7 @@ _RECON_TABLE_LEGEND = (
 
 
 def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
-                    run_dir: str) -> list:
+                    run_dir: str, config=None) -> list:
     keys = _recon_keys(results)
     if not keys:
         return []
@@ -1169,7 +1169,14 @@ def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
         from . import findings
         lines += findings.section(results, config)
     except Exception as e:
-        print(f"[Report] findings section failed: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"[Report] findings section FAILED: {type(e).__name__}: {e}")
+        lines += ["", "---", "",
+                  "> **The closing section could not be generated** — "
+                  f"`{type(e).__name__}: {e}`. This is a bug in `findings.py`, not a "
+                  "property of the results; the figures and tables above are unaffected.",
+                  ""]
 
     # Collapse runs of blank lines. The block is assembled from many small pieces that
     # each pad themselves, and doubled blanks render as ragged extra space.
@@ -1242,7 +1249,8 @@ def _md_to_html_table(lines: list) -> str:
     return "\n".join(out)
 
 
-def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) -> str:
+def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list,
+                      config=None) -> str:
     keys = _recon_keys(results)
     if not keys:
         return ""
@@ -1325,8 +1333,13 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list) 
         from . import findings
         obs, nxt = findings.observations(results), findings.next_steps(results, config)
     except Exception as e:
-        print(f"[Report] findings section failed: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"[Report] findings section FAILED: {type(e).__name__}: {e}")
         obs, nxt = [], []
+        parts.append(para("<strong>The closing section could not be generated</strong> — "
+                          "<code>%s: %s</code>. This is a bug in findings.py, not a "
+                          "property of the results." % (type(e).__name__, e)))
     for heading, items in (("What this run shows", obs), ("What to do next", nxt)):
         if not items:
             continue
@@ -2038,7 +2051,8 @@ def generate_report(results: dict, output_dir: str, config=None,
             cap, path = fig[0], fig[1]
             lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
-    lines += _recon_md_block(results, figures_by_eval, recon_summary_figs, run_dir)
+    lines += _recon_md_block(results, figures_by_eval, recon_summary_figs, run_dir,
+                             config)
     lines += config_lines
 
     with open(md_path, "w") as f:
@@ -2086,7 +2100,7 @@ def generate_report(results: dict, output_dir: str, config=None,
         sections.append(_html_section_generic(
             title, _html_cards(base, r), figures_by_eval.get(key, [])))
 
-    recon_html = _recon_html_block(results, figures_by_eval, recon_summary_figs)
+    recon_html = _recon_html_block(results, figures_by_eval, recon_summary_figs, config)
     if recon_html:
         sections.append(recon_html)
 
