@@ -72,6 +72,7 @@ from .checkpoint_loader import CheckpointLoader
 from .data_loader import (
     load_data, build_dataloader, split_stack_holdout, split_partial_stack,
     load_manifest_subset,
+    parse_component_metadata,
 )
 from .evaluations import (
     EmbeddingSimilarityEval,
@@ -151,7 +152,16 @@ class EvalConfig:
     recon_proj_ckpt: Optional[str] = None    # native ckpt carrying a proj_recon_decoder
     recon_tr_ckpt: Optional[str] = None      # TR recon ckpt: transformer_mirror/backbone_ckpt keys
     recon_normalize: Optional[bool] = None   # None → use flag recorded in ckpt
-    recon_max_samples: int = 200
+    # 1000, not 200: the dataset-level figures are distributions, stratified medians and
+    # per-spectrum aggregates, and 200 samples spread over five quantile bins (and, on
+    # multi-component data, over component indices) leaves bins too thin to quote.
+    recon_max_samples: int = 1000
+    recon_n_examples: int = 6                # sample-level overlay traces
+    recon_seed: int = 42                     # which samples get drawn
+    # Component metadata unlocks the multi-component views (per-spectrum aggregation,
+    # component-index stratification). Scanning multi_channel's full train+valid costs
+    # ~17 s; set False to skip it and treat every dataset as single-component.
+    recon_component_meta: bool = True
 
     # Runtime
     batch_size: int = 16
@@ -273,6 +283,31 @@ class EvalRunner:
             datasets[alias] = {"df": df, "loader": loader, "df_raw": df_raw}
         return datasets
 
+    def _component_meta(self, alias: str):
+        """
+        Per-file component metadata for a dataset alias, or None if it has none.
+
+        Cached: the same manifest is scanned once even when several evals want it.
+        A dataset whose filenames carry no `comp` field (every single_channel_* subset)
+        yields an empty frame, which is itself the single-vs-multi-component signal, and
+        is returned as None so the eval treats it as single-component.
+        """
+        if not self.cfg.recon_component_meta or not self.cfg.nova_data_dir:
+            return None
+        cache = getattr(self, "_comp_meta_cache", None)
+        if cache is None:
+            cache = self._comp_meta_cache = {}
+        if alias not in cache:
+            subdir, split, _ = DATASET_SPECS[alias]
+            try:
+                meta = parse_component_metadata(
+                    os.path.join(self.cfg.nova_data_dir, subdir), split=split)
+            except (FileNotFoundError, OSError) as e:
+                print(f"[EvalRunner] no component metadata for {alias}: {e}")
+                meta = None
+            cache[alias] = meta if (meta is not None and len(meta)) else None
+        return cache[alias]
+
     # ── Main run ──────────────────────────────────────────────────────────────
 
     def run(self) -> dict:
@@ -326,6 +361,7 @@ class EvalRunner:
                 if alias not in datasets:
                     continue
                 print(f"\n[EvalRunner] Running: signal_reconstruction on {alias}")
+                subdir, split, _ = DATASET_SPECS[alias]
                 try:
                     res = SignalReconstructionEval.run(
                         df=datasets[alias]["df_raw"],
@@ -336,7 +372,12 @@ class EvalRunner:
                         device=cfg.device, arch=cfg.arch,
                         normalize=cfg.recon_normalize,
                         max_samples=cfg.recon_max_samples,
+                        n_examples=cfg.recon_n_examples,
+                        seed=cfg.recon_seed,
                         batch_size=cfg.batch_size,
+                        sample_meta=self._component_meta(alias),
+                        dataset_alias=alias,
+                        dataset_subset=subdir,
                     )
                 except (ValueError, FileNotFoundError, RuntimeError) as e:
                     print(f"[EvalRunner] signal_reconstruction ({alias}) failed: {e}")
@@ -452,7 +493,10 @@ class EvalRunner:
                     device=cfg.device, arch=cfg.arch,
                     normalize=cfg.recon_normalize,
                     max_samples=cfg.recon_max_samples,
+                    n_examples=cfg.recon_n_examples,
+                    seed=cfg.recon_seed,
                     batch_size=cfg.batch_size,
+                    dataset_subset=str(cfg.data_source or ""),
                 )
             except (ValueError, FileNotFoundError, RuntimeError) as e:
                 print(f"[EvalRunner] signal_reconstruction failed: {e}")
@@ -596,7 +640,20 @@ def main():
     parser.add_argument("--recon_normalize", default=None, choices=["true", "false"],
                         help="Override per-sample layer_norm normalization for reconstruction "
                              "(default: use the flag recorded in the checkpoint).")
-    parser.add_argument("--recon_max_samples", type=int, default=200)
+    parser.add_argument("--recon_max_samples", type=int, default=None,
+                        help="Samples per dataset for reconstruction (default 1000). The "
+                             "dataset-level figures are distributions and stratified "
+                             "medians, so they need more than the old 200.")
+    parser.add_argument("--recon_n_examples", type=int, default=None,
+                        help="Sample-level overlay traces per dataset (default 6).")
+    parser.add_argument("--recon_seed", type=int, default=None,
+                        help="Seed for which samples are drawn (default 42).")
+    parser.add_argument("--no_recon_component_meta", dest="recon_component_meta",
+                        action="store_false", default=None,
+                        help="Skip the component-metadata manifest scan (~17s on "
+                             "multi_channel). Every dataset is then treated as "
+                             "single-component, disabling the per-spectrum and "
+                             "component-index views.")
 
     args = parser.parse_args()
     if args.recon_normalize is not None:

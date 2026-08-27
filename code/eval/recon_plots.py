@@ -1153,14 +1153,10 @@ def plot_recon_dataset_level(r: dict, out_dir: str) -> list:
     """
     if not isinstance(r, dict) or r.get("skipped"):
         return []
-    figures = _plot_error_vs_properties(r, out_dir)
-    if figures:
-        write_figure_docs(
-            DATASET_LEVEL_FIGURE_KEYS, out_dir,
-            header="Dataset: **%s** (%s-component). Checkpoint `%s`, normalize=%s."
-                   % (_ds_label(r), r.get("component_group", "single"),
-                      _ckpt_tag(r), r.get("normalize")))
-    return figures
+    # No FIGURES.md here: these figures are written flat and then relocated by the
+    # report, so a doc file written now would be stranded at the run root. The summary
+    # pass writes one covering every figure instead.
+    return _plot_error_vs_properties(r, out_dir)
 
 
 def plot_recon_across_datasets(by_alias: dict, out_dir: str) -> list:
@@ -1187,7 +1183,9 @@ def plot_recon_across_datasets(by_alias: dict, out_dir: str) -> list:
             keys.append(key)
 
     if keys:
-        write_figure_docs(keys, out_dir, header=_run_note(usable))
+        # Document the per-dataset figures here too - they have no doc file of their own.
+        write_figure_docs(keys + DATASET_LEVEL_FIGURE_KEYS, out_dir,
+                          header=_run_note(usable))
     return figures
 
 

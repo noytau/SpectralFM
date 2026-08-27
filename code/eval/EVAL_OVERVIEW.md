@@ -262,10 +262,112 @@ The 3AE path runs one backbone forward per batch with hooks at the three tap poi
 mirroring training. Score: per-sample `MSE(recon, target)` where target is the (optionally
 normalized) input.
 
-- **Metrics:** `recon_{fe,proj,tr}_mse_mean` / `_median`.
-- **Figures:** `recon_overlay.png` (target vs each pathway, per-row y-limits), `recon_mse_bars.png`
-  (per-sample, log scale).
-- **CSV:** `recon_df.csv` — per-sample `fe_mse` / `proj_mse` / `tr_mse`.
+#### Dataset-level metrics
+
+Per-sample MSE alone cannot separate a working reconstruction from a decoder that emits each
+sample's own mean value as a flat line — that degenerate model posts a respectable MSE while
+carrying no information. Three levels are computed, all against the same target the head was
+trained on (post `F.layer_norm` when the checkpoint recorded `normalize`):
+
+**L1, per component** — one row per sample in `recon_df.csv`:
+
+| Column | Meaning | Catches |
+|---|---|---|
+| `{h}_mse`, `{h}_mae` | error magnitude | baseline |
+| `{h}_r2` | `1 − MSE / var(target)` | skill vs the mean-predictor baseline; `≤ 0` = degenerate |
+| `{h}_pearson` | `corr(target, pred)` | shape agreement, scale-invariant |
+| `{h}_amp_ratio` | `std(pred) / std(target)` | dynamic-range collapse |
+| `{h}_peak_err` | signed error at the target's argmax | spectral-line fidelity |
+
+Plus per-sample signal descriptors used as stratification axes (`contrast`, `peak_count`,
+`peak_prominence`, `centroid`, `peak_position`; see `signal_features.py`) and, on
+multi-component datasets, the parsed `dataset_id` / `comp` / `spec` / `n_comps`.
+
+**L2, per spectrum** — multi-component datasets only, `spectrum_df.csv`. Every wav in
+`multi_channel`, `sampled_data` and `labeled_data` is a single *component*; the physical sample
+is every wav sharing a `spec` index. Collapsing a spectrum's components into `mse_mean`,
+`mse_max` (worst component) and `mse_spread` separates "this whole spectrum reconstructs badly"
+from "one weak component in an otherwise fine spectrum" — a question single-component data
+cannot pose.
+
+**L3, group summary** — `summary_df.csv` per dataset, `recon_summary_all_datasets.csv` across
+all of them. Median leads and mean follows: on the multi-component sets a handful of outliers
+pull the mean far above the typical sample (the recorded T6 round has `samples` `fe_mse` mean
+1.96 against a median of 0.36). Single-component and multi-component results are reported as
+separate blocks and never averaged together.
+
+#### Figures
+
+Sample level (unchanged): `recon_overlay.png` (target vs each pathway, per-row y-limits) and
+`recon_mse_bars.png` (per-sample, log scale).
+
+Dataset level, in `<model>/reconstruction_<dataset>/` and `<model>/reconstruction_summary/`:
+
+| Figure | Answers |
+|---|---|
+| `recon_error_distribution` | how big the error is, and how much the single→multi-component shift costs — ECDF plus violins, single and multi blocks divided |
+| `recon_summary_heatmap` | all datasets × all metrics at a glance, colored by within-column rank |
+| `recon_skill_vs_baseline` | **check this first** — is the model beating a flat line at the sample mean at all? |
+| `recon_position_profile` | where along the 245 bins the error sits: conv edge artifacts, bias, period-5 ripple from the final `(512,5,5)` FE stage |
+| `recon_amplitude_calibration` | is dynamic range preserved, or has the output collapsed toward the mean? Hexbin with a best-fit slope |
+| `recon_spectral_fidelity` | do narrow spectral lines survive, or only the smooth envelope? |
+| `recon_error_vs_signal_properties` | *which* spectra fail — per dataset, with component index and the per-spectrum view on multi-component data |
+
+Every figure carries its own explanation as a footnote drawn onto the PNG, so a figure read
+outside the report is still self-explanatory; `FIGURES.md` next to the PNGs holds the full
+write-up of all of them. `_FIG_DOC` in `recon_plots.py` is the single source for that text, the
+report caption and `FIGURES.md` — a figure added without a doc entry raises rather than shipping
+unexplained.
+
+**One caveat is stated on every cross-head figure** (TASKS.md T7): the FE decoder is a different
+architecture on a narrower input (47×512, `MirrorDecoder`) than the projection and transformer
+decoders (47×768, `TransformerMirrorDecoder`), so a gap between heads mixes encoder information
+content with decoder capacity. Comparing one head across datasets is clean; comparing heads to
+each other is not.
+
+#### Report layout
+
+The reconstruction section of `eval_report.md` / `.html` is a narrative rather than a figure
+dump: **1. One sample at a time** (what a reconstruction looks like) → **2. The whole dataset**
+(headline table per head, then which spectra fail) → **3. Across datasets** (the six aggregate
+figures and the combined summary table).
+
+#### Relevant flags
+
+```bash
+--recon_max_samples 1000      # default; the dataset-level figures are distributions and
+                              # stratified medians, so 200 leaves the bins too thin
+--recon_n_examples 6          # sample-level overlay traces
+--recon_seed 42               # which samples get drawn
+--no_recon_component_meta     # skip the manifest scan (~17s on multi_channel); every dataset
+                              # is then treated as single-component, disabling the
+                              # per-spectrum and component-index views
+```
+
+#### Component metadata
+
+`data_loader.parse_component_metadata(dataset_dir, split)` scans the **full** manifest, not the
+drawn subset: `load_manifest_subset` takes contiguous 10-row blocks and the multi-component
+manifests are shuffled, so a subset never holds a whole spectrum. It reports two counts —
+`n_comps` (components of this spectrum across the whole dataset) and `n_comps_in_split` (those
+present in this split), which diverge sharply: `multi_channel/valid.tsv` holds a single
+component for 93k of its 96k spectra while the dataset provides 6 or 10 per spectrum.
+
+It also drops verified byte-identical duplicate components: in both `multi_channel` and
+`labeled_data`, `comp20 ≡ comp14` and `comp21 ≡ comp15`. Left in, they double-count ~2/12 and
+~2/14 of the mass and inflate every components-per-spectrum count by 2. `sampled_data` has no
+duplicates.
+
+#### Self-test
+
+```bash
+python -m eval.recon_plots /tmp/recon_selftest
+```
+
+Renders every figure from synthetic data with known pathologies (one head faithful, one
+amplitude-compressed to 50%, one emitting the sample mean) and asserts the metric signatures —
+`r2 ≈ 0` and `amp_ratio ≈ 0` for the mean predictor, `amp_ratio ≈ 0.5` with `pearson ≈ 1` for
+the compressed head, `r2 ≈ 1` for the faithful one. No checkpoint or GPU needed.
 
 ### 3. `noise_robustness` — embedding stability under input noise
 

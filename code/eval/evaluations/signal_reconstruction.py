@@ -841,24 +841,58 @@ def run(
     # ── Sample descriptors + component metadata → stratification axes ──────────
     rdf = pd.concat([rdf, compute_signal_features(target_np)], axis=1)
 
+    is_multi = False
     if sample_meta is not None and len(sample_meta):
         meta_cols = [c for c in sample_meta.columns if c != "filename"]
         rdf = rdf.merge(sample_meta[["filename"] + meta_cols], on="filename", how="left")
         matched = int(rdf["comp"].notna().sum())
-        if matched == 0:
-            print(f"[SignalRecon] WARNING: sample_meta matched 0 of {len(rdf)} filenames "
-                  f"— falling back to single-component treatment")
+        frac = matched / len(rdf) if len(rdf) else 0.0
+
+        if frac < 0.5:
+            # The metadata does not describe this draw (wrong split, wrong dataset).
+            # Better to treat the dataset as single-component than to drop most of it.
+            print(f"[SignalRecon] WARNING: component metadata matched only "
+                  f"{matched}/{len(rdf)} filenames — treating as single-component")
+            rdf = rdf.drop(columns=[c for c in meta_cols if c in rdf.columns])
         else:
-            print(f"[SignalRecon] component metadata matched {matched}/{len(rdf)} samples")
-    is_multi = "comp" in rdf.columns and rdf["comp"].notna().any()
-    if "component_group" not in rdf.columns:
-        rdf["component_group"] = "single"
-    rdf["component_group"] = rdf["component_group"].fillna("single")
+            # Unmatched rows are the redundant components the metadata scan removed
+            # (comp20 duplicates comp14, comp21 duplicates comp15). They have to be
+            # dropped here too, not relabelled: leaving them in would double-count their
+            # twins in every L1 statistic, which is the whole point of the dedup.
+            dropped = len(rdf) - matched
+            rdf = rdf[rdf["comp"].notna()].reset_index(drop=True)
+            is_multi = True
+            msg = f"[SignalRecon] component metadata matched {matched}/{matched + dropped}"
+            if dropped:
+                msg += (f" — dropped {dropped} redundant-component samples "
+                        f"(comp20/comp21 duplicate comp14/comp15)")
+            print(msg)
+
+    rdf["component_group"] = "multi" if is_multi else "single"
+
+    # Dropping redundant-component rows above means target/preds no longer line up with
+    # rdf, so re-index everything the figures read from the surviving `index` column.
+    keep = rdf["index"].to_numpy()
+    if len(keep) != len(target):
+        target_np = target_np[keep]
+        preds = {k: v[keep] for k, v in preds.items()}
+        fnames = [fnames[i] for i in keep]
+        rdf = rdf.assign(index=np.arange(len(keep)))
+        out["n_samples"] = len(keep)
 
     out["results_df"] = rdf
     out["component_group"] = "multi" if is_multi else "single"
     out["dataset_alias"] = dataset_alias
     out["dataset_subset"] = dataset_subset
+
+    # Recompute the long-standing scalars from the final row set. They were computed
+    # above over every drawn sample; if redundant-component rows were dropped they would
+    # otherwise disagree with summary_df, which is the same statistic over the same data.
+    for k in pathway_names:
+        out[f"recon_{k}_mse_mean"] = float(rdf[f"{k}_mse"].mean())
+        out[f"recon_{k}_mse_median"] = float(rdf[f"{k}_mse"].median())
+        out[f"recon_{k}_mae_mean"] = float(rdf[f"{k}_mae"].mean())
+        out[f"recon_{k}_mae_median"] = float(rdf[f"{k}_mae"].median())
 
     # ── L3 summary, L2 per-spectrum, stratified medians, profiles ─────────────
     out["summary_df"] = _summary_table(rdf, pathway_names)
@@ -869,24 +903,26 @@ def run(
         strat_axes += ["comp", "n_comps"]
     out["strat_df"] = _stratified_table(rdf, pathway_names, strat_axes)
 
-    out["profiles"] = _profiles(target_np, {k: preds[k].numpy() for k in pathway_names})
+    pred_np = {k: (preds[k] if isinstance(preds[k], np.ndarray) else preds[k].numpy())
+               for k in pathway_names}
+    out["profiles"] = _profiles(target_np, pred_np)
 
     # Full arrays for the hexbin / calibration figures. ~1 MB per pathway at n=1000;
     # nothing serializes the results dict, and the CSV pass only touches DataFrames.
-    out["_arrays"] = {"target": target_np,
-                      "preds": {k: preds[k].numpy() for k in pathway_names}}
+    out["_arrays"] = {"target": target_np, "preds": pred_np}
 
     # Example panel for the overlay plot (deterministic pick)
-    ex_idx = np.linspace(0, len(target) - 1, min(n_examples, len(target)), dtype=int)
+    n_kept = len(target_np)
+    ex_idx = np.linspace(0, n_kept - 1, min(n_examples, n_kept), dtype=int)
     out["panel"] = {
         "indices": ex_idx.tolist(),
         "names": [fnames[i] for i in ex_idx],
-        "target": target[ex_idx].numpy(),
-        **{f"pred_{k}": preds[k][ex_idx].numpy() for k in pathway_names},
+        "target": target_np[ex_idx],
+        **{f"pred_{k}": pred_np[k][ex_idx] for k in pathway_names},
     }
 
     label = dataset_alias or dataset_subset or "dataset"
-    msg = [f"[SignalRecon] {label} ({out['component_group']}-component) n={len(target)}"]
+    msg = [f"[SignalRecon] {label} ({out['component_group']}-component) n={n_kept}"]
     for k in pathway_names:
         s = out["summary_df"].set_index("head").loc[k]
         msg.append(f"{k.upper()} MSE med={s['mse_median']:.4e} mean={s['mse_mean']:.4e} "
