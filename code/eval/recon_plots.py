@@ -30,6 +30,7 @@ matplotlib.use("Agg")
 
 from .evaluations.signal_reconstruction import (
     CROSS_HEAD_CAVEAT,
+    PATHWAY_DETAIL,
     PATHWAY_LEGEND,
     PATHWAY_SHORT,
 )
@@ -407,8 +408,7 @@ def _group_divider(ax, aliases: list, by_alias: dict, positions) -> None:
 
 def _head_title(k: str, width: int = 46) -> str:
     """Head name plus its tap, wrapped - the untruncated description overruns a panel."""
-    detail = PATHWAY_LEGEND[k].split(" - ", 1)[-1]
-    return "%s\n%s" % (PATHWAY_SHORT[k], textwrap.fill(detail, width=width))
+    return "%s\n%s" % (PATHWAY_SHORT[k], textwrap.fill(PATHWAY_DETAIL[k], width=width))
 
 
 def _suptitle(fig, key: str, subtitle: str, width: int = 120, y: float = 1.0) -> None:
@@ -642,8 +642,7 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
         if not xs:
             continue
         ax.bar(xs, vals, width, color=_HEAD_COLOR[k], alpha=0.9,
-               label="%s \u2014 %s" % (PATHWAY_SHORT[k],
-                                        PATHWAY_LEGEND[k].split(" - ", 1)[-1]))
+               label=PATHWAY_LEGEND[k])
         bar_labels.extend(zip(xs, vals, fracs))
     ax.axhline(0.0, color="#000000", lw=1.8, zorder=3)
     ax.set_xticks(x)
@@ -689,7 +688,8 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
          for a in aliases if "contrast" in by_alias[a]["results_df"].columns]
         or [np.array([])])
     finite = base_all[np.isfinite(base_all) & (base_all > 0)]
-    constant_baseline = finite.size > 0 and (finite.max() / finite.min()) < 1.01
+    constant_baseline = finite.size > 0 and (
+        np.percentile(finite, 99) / np.percentile(finite, 1)) < 2.0
 
     x_col, x_label = "peak_prominence", FEATURE_LABELS["peak_prominence"]
     plotted = False

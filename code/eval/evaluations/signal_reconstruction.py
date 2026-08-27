@@ -471,15 +471,20 @@ def _proj_reconstruct(backbone, head, source: torch.Tensor) -> torch.Tensor:
 
 # Head key → full legend text. Plots must use these strings, never the bare keys:
 # a reader outside the project cannot be expected to know what 'proj' taps.
-PATHWAY_LEGEND = {
-    "fe":   "FE decoder — from the post-LayerNorm conv feature-extractor output "
-            "[47×512], MirrorDecoder (~3.7M params)",
-    "proj": "Projection decoder — from post_extract_proj, before the transformer "
-            "[47×768], TransformerMirrorDecoder (~4.1M params)",
-    "tr":   "Transformer decoder — from the transformer encoder output "
-            "[47×768], TransformerMirrorDecoder (~4.1M params)",
-}
 PATHWAY_SHORT = {"fe": "FE decoder", "proj": "Projection decoder", "tr": "Transformer decoder"}
+
+# What each head reads and decodes with. Kept separate from PATHWAY_SHORT rather than
+# packed into one string: the text itself contains dashes, so splitting a combined label
+# back apart silently returned the whole thing.
+PATHWAY_DETAIL = {
+    "fe":   "from the post-LayerNorm conv feature-extractor output [47×512], "
+            "MirrorDecoder (~3.7M params)",
+    "proj": "from post_extract_proj, before the transformer [47×768], "
+            "TransformerMirrorDecoder (~4.1M params)",
+    "tr":   "from the transformer encoder output [47×768], "
+            "TransformerMirrorDecoder (~4.1M params)",
+}
+PATHWAY_LEGEND = {k: "%s — %s" % (PATHWAY_SHORT[k], PATHWAY_DETAIL[k]) for k in PATHWAY_SHORT}
 
 # Cross-head comparisons are confounded and every figure that makes one must say so.
 CROSS_HEAD_CAVEAT = (
