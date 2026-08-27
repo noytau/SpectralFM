@@ -348,3 +348,123 @@ def split_partial_stack(df: pd.DataFrame, holdout_ratio: float = 0.3) -> pd.Data
         n = max(1, int(len(group) * holdout_ratio))
         parts.append(group.sample(n=n))
     return pd.concat(parts).reset_index(drop=True)
+
+# ── Component metadata (single- vs multi-component datasets) ───────────────────
+
+_COMP_PATTERN = re.compile(r"dataset(\d+)_comp(\d+)_spec_(\d+)\.wav")
+
+# Verified duplicates: in both multi_channel and labeled_data, comp20 is byte-identical
+# to comp14 and comp21 to comp15 (np.allclose on the raw wavs; per-component std matches
+# exactly at 0.0779 and 0.0546). sampled_data has no identical pairs. Left in place, they
+# double-count ~2/12 (multi_channel) and ~2/14 (labeled_data) of the mass and inflate
+# every components-per-spectrum count by 2.
+_DUPLICATE_COMPS = {
+    "multi_channel": {20: 14, 21: 15},
+    "labeled_data":  {20: 14, 21: 15},
+}
+
+_COMP_META_COLUMNS = ["filename", "dataset_id", "comp", "spec",
+                      "n_comps", "n_comps_in_split", "component_group"]
+
+
+def duplicate_comps_for(dataset_dir: str) -> dict:
+    """Redundant-component map for a dataset dir, keyed by its basename ({} if none)."""
+    return _DUPLICATE_COMPS.get(os.path.basename(os.path.normpath(dataset_dir)), {})
+
+
+def _scan_manifest_components(tsv: str, drop: set) -> list:
+    """Yield (filename, dataset_id, comp, spec) for every comp-named row of a manifest."""
+    rows = []
+    with open(tsv) as f:
+        f.readline()                                     # root path line
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            fname = line.split("\t")[0]
+            m = _COMP_PATTERN.match(os.path.basename(fname))
+            if m is None:
+                continue
+            comp = int(m.group(2))
+            if comp in drop:
+                continue
+            rows.append((fname, int(m.group(1)), comp, int(m.group(3))))
+    return rows
+
+
+def parse_component_metadata(
+    dataset_dir: str,
+    split: str = "valid",
+    drop_duplicate_comps: bool = True,
+    count_splits: tuple = ("train", "valid"),
+) -> pd.DataFrame:
+    """
+    Scan a manifest and describe each file's place in its spectrum.
+
+    Every wav in nova_data is a single 245-bin component. In the multi-component
+    subsets (multi_channel, sampled_data, labeled_data) the physical sample is the SET
+    of components sharing a spec index, named `dataset<D>_comp<C>_spec_<S>.wav`. The
+    single-channel subsets have no `comp` token at all — that absence IS the
+    single-vs-multi signal, and this function returns an empty frame for them.
+
+    Two component counts, because they answer different questions and disagree sharply:
+      n_comps           components of this spectrum across `count_splits` (the whole
+                        dataset). This is the physical component count.
+      n_comps_in_split  components of this spectrum present in `split` alone.
+    They diverge badly on multi_channel, whose valid split holds a scattered sample:
+    93k of its 96k spectra have a single component in valid.tsv while the dataset
+    actually provides 8–12 per spectrum. Use n_comps for "how many components does
+    this sample have"; n_comps_in_split only describes the draw.
+
+    `n_comps` cannot come from a loaded subset: `load_manifest_subset` draws contiguous
+    10-row blocks and the multi-component manifests are shuffled, so a subset never
+    holds a whole spectrum. Scanning multi_channel's full train+valid (3.4M rows) costs
+    ~7 s; pass count_splits=(split,) to skip it when only the draw matters.
+
+    Returns a DataFrame with the columns in _COMP_META_COLUMNS; `component_group` is
+    'multi' for every row of a multi-component manifest.
+    """
+    tsv = os.path.join(dataset_dir, f"{split}.tsv")
+    if not os.path.isfile(tsv):
+        raise FileNotFoundError(tsv)
+
+    name = os.path.basename(os.path.normpath(dataset_dir))
+    dupes = duplicate_comps_for(dataset_dir) if drop_duplicate_comps else {}
+    drop = set(dupes)
+
+    rows = _scan_manifest_components(tsv, drop)
+    if not rows:
+        print(f"[DataLoader] {name}/{split}: single-component "
+              f"(no comp field in filenames)")
+        return pd.DataFrame(columns=_COMP_META_COLUMNS)
+
+    df = pd.DataFrame(rows, columns=["filename", "dataset_id", "comp", "spec"])
+    df["n_comps_in_split"] = df.groupby(["dataset_id", "spec"])["comp"].transform("size")
+
+    # Dataset-wide component count, from every split that exists on disk.
+    universe = []
+    for s in count_splits:
+        path = os.path.join(dataset_dir, f"{s}.tsv")
+        if os.path.isfile(path):
+            universe.extend(_scan_manifest_components(path, drop))
+    if universe:
+        u = pd.DataFrame(universe, columns=["filename", "dataset_id", "comp", "spec"])
+        totals = (u.drop_duplicates(["dataset_id", "spec", "comp"])
+                   .groupby(["dataset_id", "spec"]).size().rename("n_comps"))
+        df = df.merge(totals, on=["dataset_id", "spec"], how="left")
+        df["n_comps"] = df["n_comps"].fillna(df["n_comps_in_split"]).astype(int)
+    else:
+        df["n_comps"] = df["n_comps_in_split"]
+
+    df["component_group"] = "multi"
+    df = df[_COMP_META_COLUMNS]
+
+    msg = (f"[DataLoader] {name}/{split}: multi-component — {len(df)} rows, "
+           f"{df.groupby(['dataset_id', 'spec']).ngroups} spectra, "
+           f"comps {sorted(int(c) for c in df['comp'].unique())}, "
+           f"n_comps per spectrum {sorted(int(v) for v in df['n_comps'].unique())}")
+    if dupes:
+        pairs = ", ".join(f"comp{d}≡comp{k}" for d, k in dupes.items())
+        msg += f"; dropped redundant {pairs}"
+    print(msg)
+    return df
