@@ -340,11 +340,18 @@ def _levels(rdf: pd.DataFrame, axis: str, n_bins: int = 5):
     categorical = ((axis in _CATEGORICAL_AXES and n_levels <= LIFT_MAX_LEVELS)
                    or (axis in _COUNT_AXES and n_levels <= _COUNT_MAX_LEVELS))
     if categorical:
-        vals = sorted(v for v in col.dropna().unique())
+        vals = sorted(col.dropna().unique(), key=lambda v: (str(type(v)), v))
         lookup = {v: i for i, v in enumerate(vals)}
         idx = col.map(lookup).to_numpy(dtype=float)
-        fmt = (lambda v: str(int(v))) if np.allclose(
-            [float(v) for v in vals], [round(float(v)) for v in vals]) else (lambda v: "%g" % v)
+        # Component and dataset ids arrive as floats from a merge with missing rows, and
+        # "comp = 26.0" is noise on a chart. Fall back to str() for anything non-numeric
+        # rather than letting a string level raise.
+        def fmt(v):
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return str(v)
+            return str(int(round(f))) if abs(f - round(f)) < 1e-9 else "%g" % f
         return idx, [fmt(v) for v in vals]
     return quantile_bins(col.to_numpy(dtype=float), n_bins=n_bins)
 
