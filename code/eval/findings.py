@@ -299,13 +299,20 @@ def observations(results: dict) -> list:
         best = min((r for *_, r in refs if np.isfinite(r)), default=float("nan"))
         if worse and len(worse) == len([r for *_, r in refs if np.isfinite(r)]):
             ds, h, ratio = max(worse, key=lambda t: t[2])
+            smooth = _smoothness(by.get(ds, {}))
+            note = ""
+            if np.isfinite(smooth) and smooth > SMOOTH_DATASET_RATIO:
+                note = (" That worst case is partly the data: `%s`'s components are smooth "
+                        "enough that the reference has almost nothing to lose (peaks about "
+                        "%.0f reference sample-spacings wide), so read the effective "
+                        "resolution there rather than the ratio." % (ds, smooth))
             out.append(
                 "**No head reaches a fair baseline.** Simply resampling the target at the "
                 "%d-step rate the feature extractor delivers and interpolating back beats "
                 "every head on every dataset — by %.1fx at best and %.1fx at worst (`%s`, "
                 "%s decoder). R² against a flat line said they were all doing real work; "
-                "against a reference at their own information rate, none of them is."
-                % (bk, best, ratio, ds, _SHORT.get(h, h)))
+                "against a reference at their own information rate, none of them is.%s"
+                % (bk, best, ratio, ds, _SHORT.get(h, h), note))
         elif worse:
             ds, h, ratio = max(worse, key=lambda t: t[2])
             out.append(
@@ -355,6 +362,21 @@ def observations(results: dict) -> list:
                 % ("%.0f%%" % (100 * cause["share"]), cause["axis"], levels,
                    cause["lift"], "their" if cause["n_levels"] > 1 else "its"))
     return out
+
+
+# A dataset whose peaks are this many reference sample-spacings wide is smooth enough
+# that interpolation is an unusually strong reference on it, and a large ratio there says
+# as much about the data as about the head.
+SMOOTH_DATASET_RATIO = 4.0
+
+
+def _smoothness(r: dict) -> float:
+    """Median main-peak width in units of the reference's sample spacing."""
+    ref = r.get("reference") or {}
+    fw, spacing = ref.get("peak_fwhm_median"), ref.get("sample_spacing")
+    if fw is None or spacing in (None, 0) or not np.isfinite(fw):
+        return float("nan")
+    return float(fw) / float(spacing)
 
 
 def _reference_rows(by: dict) -> list:
