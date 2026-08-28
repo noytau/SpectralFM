@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 
 from .checkpoint_loader import CheckpointLoader
+from .recon_analysis import DEFAULT_REF_LADDER
 from .data_loader import (
     load_data, build_dataloader, split_stack_holdout, split_partial_stack,
     load_manifest_subset,
@@ -168,6 +169,12 @@ class EvalConfig:
     # component-index stratification). Scanning multi_channel's full train+valid costs
     # ~17 s; set False to skip it and treat every dataset as single-component.
     recon_component_meta: bool = True
+    # Matched-rate reference reconstructions: resolutions to build the ladder at, how
+    # many worst-error signals to keep per head for the failure-anatomy panel, and what
+    # counts as "the tail". Empty ladder disables the reference figure entirely.
+    recon_ref_ladder: tuple = DEFAULT_REF_LADDER
+    recon_worst_keep: int = 64
+    recon_tail_frac: float = 0.05
 
     # Runtime
     batch_size: int = 16
@@ -395,6 +402,9 @@ class EvalRunner:
                         n_examples=cfg.recon_n_examples,
                         seed=cfg.recon_seed,
                         batch_size=cfg.batch_size,
+                        ref_ladder=cfg.recon_ref_ladder,
+                        worst_keep=cfg.recon_worst_keep,
+                        tail_frac=cfg.recon_tail_frac,
                         sample_meta=self._component_meta(alias),
                         dataset_alias=alias,
                         dataset_subset=subdir,
@@ -686,6 +696,22 @@ def main():
     parser.add_argument("--recon_max_figure_samples", type=int, default=None,
                         help="Raw signals kept for the point-plotting figures (default "
                              "2000). All other statistics cover every sample regardless.")
+    parser.add_argument("--recon_ref_ladder", default=None,
+                        help="Resolutions for the matched-rate reference ladder, "
+                             "comma-separated (default %s). Each rung reconstructs the "
+                             "target from that many evenly spaced samples of itself, "
+                             "giving a fair yardstick at a known information rate; 47 is "
+                             "the rate the feature extractor delivers. Pass 'none' to "
+                             "skip the reference figure."
+                             % ",".join(str(k) for k in DEFAULT_REF_LADDER))
+    parser.add_argument("--recon_tail_frac", type=float, default=None,
+                        help="What counts as the tail in the failure-anatomy figure "
+                             "(default 0.05 = the worst 5%% of samples).")
+    parser.add_argument("--recon_worst_keep", type=int, default=None,
+                        help="Worst-error raw signals kept per head, so the "
+                             "failure-anatomy panel draws the real tail rather than "
+                             "whatever the figure subsample happened to catch "
+                             "(default 64; 0 disables that panel).")
     parser.add_argument("--recon_n_examples", type=int, default=None,
                         help="Sample-level overlay traces per dataset (default 6).")
     parser.add_argument("--recon_seed", type=int, default=None,
@@ -700,6 +726,10 @@ def main():
     args = parser.parse_args()
     if args.recon_normalize is not None:
         args.recon_normalize = args.recon_normalize == "true"
+    if args.recon_ref_ladder is not None:
+        txt = str(args.recon_ref_ladder).strip().lower()
+        args.recon_ref_ladder = (() if txt in ("none", "off", "") else
+                                 tuple(int(x) for x in txt.replace(" ", "").split(",") if x))
     args.multi_dataset = not args.single_dataset
     del args.single_dataset
     runner = EvalRunner.from_args(args)

@@ -970,6 +970,8 @@ _RECON_SUMMARY_COLUMNS = [
     ("frac_r2_positive", "beats baseline ↑",      "{:.0%}"),
     ("pearson_median",   "Pearson r median ↑",    "{:.3f}"),
     ("amp_ratio_median", "amplitude ratio (1 = ideal)", "{:.3f}"),
+    ("peak_err_median",  "peak error (0 = ideal)", "{:.3f}"),
+    ("k_eff_median",     "effective resolution ↑", "{:.1f}"),
 ]
 
 

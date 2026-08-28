@@ -280,8 +280,12 @@ trained on (post `F.layer_norm` when the checkpoint recorded `normalize`):
 | `{h}_peak_err` | signed error at the target's argmax | spectral-line fidelity |
 
 Plus per-sample signal descriptors used as stratification axes (`contrast`, `peak_count`,
-`peak_prominence`, `centroid`, `peak_position`; see `signal_features.py`) and, on
-multi-component datasets, the parsed `dataset_id` / `comp` / `spec` / `n_comps`.
+`peak_prominence`, `centroid`, `peak_position`, `bandwidth`, `baseline`; see
+`signal_features.py`) and, on multi-component datasets, the parsed `dataset_id` / `comp` /
+`spec` / `n_comps`.
+
+Also per sample, when the reference ladder is enabled: `ref_interp{K}_mse` for every rung
+`K`, and `{h}_k_eff`, the head's **effective resolution** — see below.
 
 **L2, per spectrum** — multi-component datasets only, `spectrum_df.csv`. Every wav in
 `multi_channel`, `sampled_data` and `labeled_data` is a single *component*; the physical sample
@@ -289,6 +293,29 @@ is every wav sharing a `spec` index. Collapsing a spectrum's components into `ms
 `mse_max` (worst component) and `mse_spread` separates "this whole spectrum reconstructs badly"
 from "one weak component in an otherwise fine spectrum" — a question single-component data
 cannot pose.
+
+**Matched-rate references** — `recon_analysis.py`. R² = 0, a flat line at each sample's own
+mean, is a very weak baseline: every head clears it, which makes "the head is doing real work"
+an easy and uninformative conclusion. A fair reference discards the same information the
+model's bottleneck does. The conv feature extractor compresses 245 bins to 47 timesteps, so
+reconstructing the target from *K evenly spaced samples of itself* — linearly interpolated
+back, or ideally band-limited at the same rate — is a reconstruction at a known information
+rate. A ladder of those (`recon_ref_ladder`, default 3…121 with 47 included) turns a head's
+MSE into an **effective resolution**: the number of independent samples of the signal it
+actually delivers, read off that sample's own reference curve.
+
+The reference is an **oracle** at its sample points — it reads true target values the model
+never sees, and the real bottleneck is 47 timesteps of 512 or 768 channels, not 47 scalars. It
+is therefore not a bound on what a head could achieve. The useful direction is the negative
+one: a head below the reference at its own rate cannot blame the bottleneck.
+
+**Tail anatomy** — `tail_lift_df.csv` per dataset, `recon_tail_lift.csv` across all of them.
+For each head: what share of a dataset's total squared error its worst `recon_tail_frac`
+(default 5%) of samples carry, plus, for the head whose tail is most concentrated, the *lift*
+of every component index, source dataset and signal-property bin (its share of the tail
+divided by its share of the dataset) and how far the tail sits from the rest on each
+descriptor. Separation is a median difference in units of the population IQR, never a ratio —
+`baseline` crosses zero. `contrast` is dropped whenever `normalize=True` has collapsed it.
 
 **L3, group summary** — `summary_df.csv` per dataset, `recon_summary_all_datasets.csv` across
 all of them. Median leads and mean follows: on the multi-component sets a handful of outliers
@@ -311,6 +338,8 @@ Dataset level, in `<model>/reconstruction_<dataset>/` and `<model>/reconstructio
 | `recon_position_profile` | where along the 245 bins the error sits: conv edge artifacts, bias, period-5 ripple from the final `(512,5,5)` FE stage |
 | `recon_amplitude_calibration` | is dynamic range preserved, or has the output collapsed toward the mean? Hexbin with a best-fit slope |
 | `recon_spectral_fidelity` | do narrow spectral lines survive, or only the smooth envelope? |
+| `recon_reference_ladder` | is the head better than resampling the target at the rate its own bottleneck provides? Reports **effective resolution** in samples of signal |
+| `recon_failure_anatomy` | what the worst few per cent are made of — error concentration, lift per component/property, and the actual worst traces |
 | `recon_error_vs_signal_properties` | *which* spectra fail — per dataset, with component index and the per-spectrum view on multi-component data |
 
 Every figure carries its own explanation as a footnote drawn onto the PNG, so a figure read
@@ -329,7 +358,7 @@ each other is not.
 
 The reconstruction section of `eval_report.md` / `.html` is a narrative rather than a figure
 dump: **1. One sample at a time** (what a reconstruction looks like) → **2. The whole dataset**
-(headline table per head, then which spectra fail) → **3. Across datasets** (the six aggregate
+(headline table per head, then which spectra fail) → **3. Across datasets** (the aggregate
 figures and the combined summary table).
 
 #### Relevant flags
@@ -342,6 +371,15 @@ figures and the combined summary table).
 --no_recon_component_meta     # skip the manifest scan (~17s on multi_channel); every dataset
                               # is then treated as single-component, disabling the
                               # per-spectrum and component-index views
+--recon_ref_ladder 3,5,...    # resolutions for the matched-rate reference (default
+                              # 3,5,7,9,13,17,25,31,37,47,61,81,121). 'none' skips the
+                              # reference figure. The coarse rungs matter: multi_channel
+                              # components are nearly smooth ramps, and without them every
+                              # head clamps to the floor and the figure reports a bound
+--recon_tail_frac 0.05        # what counts as the tail in the failure-anatomy figure
+--recon_worst_keep 64         # worst-error raw signals kept per head, so that figure draws
+                              # the real tail rather than whatever the figure subsample
+                              # happened to catch (0 disables the trace panel)
 ```
 
 #### Component metadata

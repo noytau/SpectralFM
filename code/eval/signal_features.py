@@ -30,7 +30,12 @@ FEATURE_LABELS = {
 }
 
 # Axes offered as stratifiers, in the order they should be plotted.
-STRATIFIER_ORDER = ["contrast", "peak_count", "peak_prominence", "centroid", "peak_position"]
+# `bandwidth` and `baseline` were computed from the start but left out of this list, so
+# they never reached a figure. The tail analysis then found them to be two of the three
+# strongest separators of the worst-reconstructed samples on `sampled_data` (tail median
+# bandwidth 84 against 64 for the rest), which is reason enough to stratify on them.
+STRATIFIER_ORDER = ["contrast", "peak_count", "peak_prominence", "centroid",
+                    "peak_position", "bandwidth", "baseline"]
 
 
 def compute_signal_features(signals: np.ndarray) -> pd.DataFrame:

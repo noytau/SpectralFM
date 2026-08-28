@@ -34,6 +34,8 @@ from .evaluations.signal_reconstruction import (
     PATHWAY_LEGEND,
     PATHWAY_SHORT,
 )
+from . import recon_analysis
+from .recon_analysis import LIFT_AXIS_LABELS
 from .signal_features import FEATURE_LABELS
 
 # Head colors match report.py's existing _PATHWAY_STYLE so the new figures read as the
@@ -451,6 +453,96 @@ _FIG_DOC = {
             "label. " + CROSS_HEAD_CAVEAT
         ),
     },
+    "recon_reference_ladder": {
+        "title": "Reconstruction skill against matched-rate references",
+        "caption": (
+            "How each head compares with simply resampling the target at the same rate its "
+            "bottleneck provides. Effective resolution is the head's error read back as a "
+            "number of signal samples."
+        ),
+        "what": (
+            "The reference curve reconstructs each target from K evenly spaced samples of "
+            "itself, linearly interpolated back to full length (solid), and from an ideal "
+            "band-limit at the same rate (dashed) - neither dominates, so the pair "
+            "brackets what the rate can express. The feature extractor compresses 245 "
+            "bins to 47 timesteps, so K = 47 is the temporal rate every head decodes from "
+            "and is marked on each panel. Reading a head's median error back onto the "
+            "interpolation curve gives its EFFECTIVE RESOLUTION: the number of samples of "
+            "the signal it actually delivers. The remaining panels compare that number "
+            "across heads and datasets, express the same thing as a ratio against the "
+            "reference at 47, and show the per-sample spread behind the medians."
+        ),
+        "read": (
+            "further right on the ladder is a finer reconstruction; a head sitting to the "
+            "LEFT of the K = 47 line delivers less resolution than the rate it decodes "
+            "from, and in the ratio panel any bar above 1.0 is a head with more error than "
+            "resampling the target at its own rate would incur"
+        ),
+        "good": (
+            "Effective resolution at or above 47 and a ratio at or below 1.0 - the head is "
+            "extracting everything its temporal rate carries. A head well short of 47 is "
+            "limited by what it learned, not by the bottleneck."
+        ),
+        "caveats": (
+            "The reference is an ORACLE at its sample points: it reads true target values "
+            "the model never sees, so it is not a bound on what the model could achieve. "
+            "It is a bound on what temporal downsampling alone costs, which is why the "
+            "useful direction is the negative one - a head below the reference at its own "
+            "rate cannot blame the bottleneck. The real bottleneck is also 47 timesteps of "
+            "512 or 768 channels, not 47 scalars, so the model has far more capacity per "
+            "step than the interpolant. Interpolation flatters smooth signals; the "
+            "subtitle reports what share of this data has structure narrower than the "
+            "reference's sample spacing, so the reader can discount accordingly. "
+            + CROSS_HEAD_CAVEAT
+        ),
+    },
+    "recon_failure_anatomy": {
+        "title": "Anatomy of the worst reconstructions",
+        "caption": (
+            "How much of the total error a few samples carry, and what those samples have "
+            "in common - component index, source dataset, or a property of the signal."
+        ),
+        "what": (
+            "Top: the cumulative share of a dataset's total squared error carried by its "
+            "worst samples, ranked worst first, one panel per head and one curve per "
+            "dataset; the diagonal is error spread perfectly evenly. Then the same thing "
+            "as a single number per head and dataset. The remaining panels open up ONE "
+            "dataset - the one whose error is most concentrated, named in their titles - "
+            "showing which levels of which property are over-represented in its tail "
+            "(lift = the level's share of the tail divided by its share of the dataset), "
+            "how far the tail sits from the rest on the property that separates them best, "
+            "and what the worst reconstructions actually look like. Heads are named in "
+            "short here; what each one taps and decodes with is spelled out in the "
+            "error-distribution figure."
+        ),
+        "read": (
+            "a curve bending sharply toward the top-left means a handful of samples carry "
+            "most of the error, so the mean describes them rather than the dataset; in the "
+            "lift panel a bar at 5 means that level appears five times as often in the "
+            "tail as in the data, and a level whose bar is tall AND whose tail share is "
+            "large is a named failure mode rather than a coincidence"
+        ),
+        "good": (
+            "Curves close to the diagonal and no level far above lift 1 - failure spread "
+            "evenly rather than concentrated in one component or one kind of spectrum. "
+            "Concentration is not itself a defect, but it does mean the average is the "
+            "wrong summary and that there is a specific thing to fix."
+        ),
+        "caveats": (
+            "The tail is defined per head, and the heads do not fail on the same samples, "
+            "so each head has its own; the opened-up panels follow the most concentrated "
+            "one, and every dataset's full table is exported to recon_tail_lift.csv "
+            "(and to tail_lift_df.csv beside each dataset's own figures). A level "
+            "needs enough tail and population rows to be charted - what that excludes is "
+            "stated on the panel rather than dropped silently. Lift on a quintile axis "
+            "cannot exceed 5 by construction, so categorical axes like component index can "
+            "outrank them structurally; compare bars within an axis type. Separation is "
+            "reported as a median difference in units of the population's interquartile "
+            "range, not a ratio, because several descriptors cross zero. When the "
+            "checkpoint used normalize=True the contrast descriptor is dropped: layer-norm "
+            "forces it to 1 for every sample and what remains is float noise."
+        ),
+    },
 }
 
 
@@ -687,6 +779,25 @@ def _two_row_grid(n_datasets: int, cell_w: float, cell_h: float, **kw):
     return fig, (lambda r, c: axes[r][c])
 
 
+def _flow_axes(n: int, cell_w: float, cell_h: float,
+               ncols_screen: int, ncols_eink: int = 2):
+    """
+    n panels flowed into a grid, narrower in the e-ink style.
+
+    `_two_row_grid` assumes exactly two quantities per dataset. The reference-ladder and
+    failure-anatomy figures mix per-dataset panels with aggregate ones, so they need a
+    plain flow instead. Unused cells are switched off rather than left as empty axes.
+    """
+    ncols = max(1, min(ncols_eink if _STYLE == "eink" else ncols_screen, n))
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                             figsize=(cell_w * ncols, cell_h * nrows))
+    flat = [axes[r][c] for r in range(nrows) for c in range(ncols)]
+    for ax in flat[n:]:
+        ax.axis("off")
+    return fig, flat[:n]
+
+
 def _heads_of(by_alias: dict) -> list:
     heads = set()
     for r in by_alias.values():
@@ -800,7 +911,9 @@ _SUMMARY_METRICS = [
     ("r2_median",        "R²\nmedian",     True),
     ("frac_r2_positive", "frac beating\nbaseline", True),
     ("pearson_median",   "Pearson r\nmedian",  True),
-    ("amp_ratio_median", "amplitude ratio\nmedian (1 = ideal)", None),
+    ("amp_ratio_median", "amplitude ratio\nmedian (1 = ideal)", 1.0),
+    ("peak_err_median",  "peak error\nmedian (0 = ideal)", 0.0),
+    ("k_eff_median",     "effective\nresolution", True),
 ]
 
 
@@ -856,8 +969,14 @@ def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
                 continue
 
             norm = (col - np.nanmin(col[ok])) / spread
-            if higher_better is None:            # amplitude ratio: distance from 1
-                norm = 1.0 - np.abs(col - 1.0) / max(np.nanmax(np.abs(col[ok] - 1.0)), 1e-9)
+            # A float in place of the direction flag names an ideal VALUE rather than a
+            # direction - amplitude ratio is best at 1, peak error best at 0 - and the
+            # shading then ranks by distance from it. isinstance(True, int) is True, so
+            # the bool check has to come first.
+            if not isinstance(higher_better, bool) and isinstance(higher_better, (int, float)):
+                tgt = float(higher_better)
+                norm = 1.0 - (np.abs(col - tgt)
+                              / max(np.nanmax(np.abs(col[ok] - tgt)), 1e-9))
             elif not higher_better:
                 norm = 1.0 - norm
             shade[:, j] = 0.5 + (norm - 0.5) * saturation
@@ -1446,6 +1565,423 @@ def _plot_error_vs_properties(r: dict, out_dir: str) -> list:
 
 # Cross-dataset figures, in the order a reader should meet them: how big is the error,
 # then how it compares to doing nothing, then where it lives, then what it destroys.
+# ── F7: skill against matched-rate reference reconstructions ──────────────────
+
+def _accent() -> str:
+    """Colour for a reference line that is neither a head nor a dataset."""
+    return "#000000" if _STYLE == "eink" else "#b00020"
+
+
+def _reference_of(r: dict):
+    ref = r.get("reference")
+    return ref if isinstance(ref, dict) and ref.get("ladder") else None
+
+
+def _plot_reference_ladder(by_alias: dict, out_dir: str) -> list:
+    aliases = [a for a in _ordered_aliases(by_alias) if _reference_of(by_alias[a])]
+    if not aliases:
+        return []
+    heads = _heads_of({a: by_alias[a] for a in aliases})
+    if not heads:
+        return []
+
+    n = len(aliases)
+    fig, axes = _flow_axes(n + 3, 4.7, 3.8, ncols_screen=max(2, min(n, 4)))
+
+    # ── One ladder per dataset ────────────────────────────────────────────────
+    for i, a in enumerate(aliases):
+        r, ax = by_alias[a], axes[i]
+        ref = _reference_of(r)
+        rdf = r["results_df"]
+        ks = np.asarray(ref["ladder"], dtype=float)
+        ax.plot(ks, ref["interp_mse_median"], "-o", color="#333333", ms=3.2, lw=1.5,
+                label="reference: interpolate the target through K points")
+        lp = ref.get("lowpass_mse_median")
+        if lp is not None:
+            ax.plot(ks, lp, "--", color="#777777", lw=1.2,
+                    label="reference: ideal band-limit at the same rate")
+
+        placed = []
+        coarsest = float(np.asarray(ref["interp_mse_median"], dtype=float)[0])
+        for k in heads:
+            if f"{k}_k_eff" not in rdf.columns or f"{k}_mse" not in rdf.columns:
+                continue
+            mse = float(rdf[f"{k}_mse"].median())
+            k_eff = float(rdf[f"{k}_k_eff"].median())
+            ax.axhline(mse, color=_HEAD_COLOR[k], ls=_HEAD_LS[k], lw=1.1, alpha=0.75)
+            # A head with more error than the coarsest rung has no place on the ladder.
+            # Its marker is pinned to the left edge, so the label has to say the number
+            # is a bound rather than let it read as a measurement.
+            placed.append((k, mse, k_eff, mse > coarsest))
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        for k, mse, k_eff, is_off in placed:
+            ax.plot([k_eff], [mse], marker=_HEAD_MARKER[k], color=_HEAD_COLOR[k],
+                    ms=8, mec="white", mew=0.9, ls="none", zorder=5,
+                    label="%s: effective resolution %s%.0f"
+                          % (PATHWAY_SHORT[k], "\u2264 " if is_off else "", k_eff))
+            ax.plot([k_eff, k_eff], [ax.get_ylim()[0], mse], color=_HEAD_COLOR[k],
+                    ls=":", lw=0.9, alpha=0.8, zorder=1)
+
+        bk = float(ref["bottleneck_k"])
+        ax.axvline(bk, color=_accent(), lw=1.5, ls="-.", zorder=2)
+        ax.text(bk, ax.get_ylim()[1], "K=%d: the rate the\nfeature extractor delivers " % bk,
+                color=_accent(), fontsize=6.8, va="top", ha="right")
+        ax.set_xlabel("K — samples of the signal the reference keeps  "
+                      "(→ finer)", fontsize=8)
+        ax.set_ylabel("median MSE  (↓ better)", fontsize=8)
+        smooth = ""
+        fw, spacing = ref.get("peak_fwhm_median"), ref.get("sample_spacing")
+        if fw is not None and np.isfinite(fw) and spacing:
+            smooth = ("\npeaks ~%.0f bins wide vs a %.1f-bin reference spacing at K=%d"
+                      % (fw, spacing, int(ref.get("bottleneck_k", 0))))
+        ax.set_title(_ds_label(r) + smooth, fontsize=9)
+        ax.grid(True, alpha=0.3, which="both")
+        leg = ax.legend(fontsize=6.2, loc="lower left", framealpha=0.9,
+                        title=("\u2264 marks a head off the coarse end of the ladder"
+                               if any(p[3] for p in placed) else None))
+        if leg.get_title().get_text():
+            leg.get_title().set_fontsize(6.0)
+            leg.get_title().set_color(_accent())
+
+    # ── Effective resolution, per head and dataset ───────────────────────────
+    ax = axes[n]
+    x = np.arange(len(aliases), dtype=float)
+    width = 0.8 / max(len(heads), 1)
+    bk = float(_reference_of(by_alias[aliases[0]])["bottleneck_k"])
+    for j, k in enumerate(heads):
+        xs, vals = [], []
+        for i, a in enumerate(aliases):
+            rdf = by_alias[a]["results_df"]
+            if f"{k}_k_eff" not in rdf.columns:
+                continue
+            xs.append(x[i] + (j - (len(heads) - 1) / 2) * width)
+            vals.append(float(rdf[f"{k}_k_eff"].median()))
+        if not xs:
+            continue
+        ax.bar(xs, vals, width, color=_HEAD_COLOR[k], alpha=0.9, hatch=_HEAD_HATCH[k],
+               edgecolor="white", linewidth=0.6, label=PATHWAY_SHORT[k])
+        for xi, v in zip(xs, vals):
+            ax.text(xi, v, "%.0f\n%.0f%%" % (v, 100 * v / bk), ha="center", va="bottom",
+                    fontsize=6.2)
+    ax.axhline(bk, color=_accent(), lw=1.6, ls="-.",
+               label="the %d the bottleneck provides" % bk)
+    ax.set_xticks(x)
+    ax.set_xticklabels([_ds_label(by_alias[a], short=True) for a in aliases],
+                       fontsize=7.5, rotation=12, ha="right")
+    ax.set_ylabel("effective resolution\n(samples delivered, ↑ better)", fontsize=8)
+    ax.set_ylim(0, max(ax.get_ylim()[1], bk * 1.6))
+    ax.set_title("How much resolution each head actually delivers", fontsize=9)
+    ax.grid(True, alpha=0.3, axis="y")
+    _group_divider(ax, aliases, by_alias, x)
+    ax.legend(fontsize=6.2, loc="upper center", ncol=2, framealpha=0.9)
+
+    # ── The same thing as a ratio against the reference at the bottleneck rate ─
+    ax = axes[n + 1]
+    for j, k in enumerate(heads):
+        xs, vals = [], []
+        for i, a in enumerate(aliases):
+            r = by_alias[a]
+            ref = _reference_of(r)
+            col = "ref_interp%d_mse" % int(ref["bottleneck_k"])
+            rdf = r["results_df"]
+            if col not in rdf.columns or f"{k}_mse" not in rdf.columns:
+                continue
+            denom = float(rdf[col].median())
+            if not np.isfinite(denom) or denom <= 0:
+                continue
+            xs.append(x[i] + (j - (len(heads) - 1) / 2) * width)
+            vals.append(float(rdf[f"{k}_mse"].median()) / denom)
+        if not xs:
+            continue
+        ax.bar(xs, vals, width, color=_HEAD_COLOR[k], alpha=0.9, hatch=_HEAD_HATCH[k],
+               edgecolor="white", linewidth=0.6, label=PATHWAY_SHORT[k])
+        for xi, v in zip(xs, vals):
+            ax.text(xi, v, "%.1fx" % v, ha="center", va="bottom", fontsize=6.4)
+    ax.axhline(1.0, color=_accent(), lw=1.6)
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels([_ds_label(by_alias[a], short=True) for a in aliases],
+                       fontsize=7.5, rotation=12, ha="right")
+    ax.set_ylabel("median MSE ÷ reference MSE at K=%d\n(↓ better, 1.0 = matched)"
+                  % bk, fontsize=8)
+    ax.set_title("Error relative to resampling the target at the same rate", fontsize=9)
+    ax.grid(True, alpha=0.3, axis="y", which="both")
+    _group_divider(ax, aliases, by_alias, x)
+
+    # ── Per-sample spread behind those medians ───────────────────────────────
+    ax = axes[n + 2]
+    positions, tick_pos, tick_lab, drawn = [], [], [], False
+    for i, a in enumerate(aliases):
+        rdf = by_alias[a]["results_df"]
+        base = i * (len(heads) + 1.0)
+        for j, k in enumerate(heads):
+            col = f"{k}_k_eff"
+            if col not in rdf.columns:
+                continue
+            v = rdf[col].to_numpy(dtype=float)
+            v = v[np.isfinite(v)]
+            if len(v) < 5:
+                continue
+            pos = base + j
+            parts = ax.violinplot([v], positions=[pos], widths=0.85,
+                                  showmedians=True, showextrema=False)
+            for body in parts["bodies"]:
+                body.set_facecolor(_HEAD_COLOR[k])
+                body.set_alpha(0.65)
+            if "cmedians" in parts:
+                parts["cmedians"].set_color("#000000")
+            positions.append(pos)
+            drawn = True
+        tick_pos.append(base + (len(heads) - 1) / 2.0)
+        tick_lab.append(_ds_label(by_alias[a], short=True))
+    if not drawn:
+        ax.axis("off")
+    else:
+        ax.axhline(bk, color=_accent(), lw=1.6, ls="-.",
+                   label="the %d the bottleneck provides" % bk)
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_lab, fontsize=7.5, rotation=12, ha="right")
+        ax.set_ylabel("effective resolution, per sample", fontsize=8)
+        ax.set_title("Spread behind the medians\n(one violin per head, order as above)",
+                     fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
+        ax.set_ylim(top=max(ax.get_ylim()[1], bk * 1.45))
+        ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, facecolor=_HEAD_COLOR[k],
+                                         alpha=0.65, label=PATHWAY_SHORT[k])
+                           for k in heads]
+                  + [plt.Line2D([], [], color=_accent(), lw=1.6, ls="-.",
+                                label="the %d the bottleneck provides" % bk)],
+                  fontsize=6.2, loc="upper center", ncol=2, framealpha=0.9)
+
+    # How smooth each dataset is decides how strong its reference is, and that varies a
+    # lot between them - so it is stated per panel, not once for whichever came first.
+    shares = [(_reference_of(by_alias[a]) or {}).get("narrow_peak_share") for a in aliases]
+    shares = [x for x in shares if x is not None and np.isfinite(x)]
+    note = ""
+    if shares:
+        lo, hi = 100 * min(shares), 100 * max(shares)
+        span = "%.0f%%" % hi if round(lo) == round(hi) else "%.0f-%.0f%%" % (lo, hi)
+        note = (" %s of samples have a main peak narrower than the reference's sample "
+                "spacing, so it is a %s reference for this data."
+                % (span, "strong" if max(shares) < 0.1 else "partly strained"))
+    _suptitle(fig, "recon_reference_ladder", _run_note(by_alias) + note, width=150)
+    _tight(fig, reserve_in=0.7)
+    _footnote(fig, "recon_reference_ladder")
+    return [(_caption("recon_reference_ladder"),
+             _save_fig(fig, os.path.join(out_dir, "recon_reference_ladder.png")))]
+
+
+# ── F8: anatomy of the worst reconstructions ─────────────────────────────────
+
+def _tail_of(r: dict):
+    t = r.get("tail")
+    return t if isinstance(t, dict) and t.get("per_head") else None
+
+
+def _plot_failure_anatomy(by_alias: dict, out_dir: str) -> list:
+    aliases = [a for a in _ordered_aliases(by_alias) if _tail_of(by_alias[a])]
+    if not aliases:
+        return []
+    heads = _heads_of({a: by_alias[a] for a in aliases})
+    if not heads:
+        return []
+
+    frac = float(_tail_of(by_alias[aliases[0]]).get("frac", 0.05))
+
+    # The dataset worth opening up is the one whose error is most concentrated: on a
+    # dataset where the worst 5% carry 13% of the error there is no tail to explain.
+    def _peak_share(a):
+        per = _tail_of(by_alias[a])["per_head"]
+        vals = [v["share"] for v in per.values() if np.isfinite(v.get("share", np.nan))]
+        return max(vals) if vals else -1.0
+
+    focus = max(aliases, key=_peak_share)
+    focus_r = by_alias[focus]
+    focus_head = _tail_of(focus_r).get("reference_head") or heads[0]
+
+    fig, axes = _flow_axes(len(heads) + 4, 4.7, 3.8,
+                           ncols_screen=max(2, min(len(heads) + 1, 4)))
+
+    # ── Lorenz curves, one panel per head ────────────────────────────────────
+    for j, k in enumerate(heads):
+        ax = axes[j]
+        ax.plot([0, 1], [0, 1], color="#999999", lw=1.0, ls="--",
+                label="error spread perfectly evenly")
+        for i, a in enumerate(aliases):
+            rdf = by_alias[a]["results_df"]
+            if f"{k}_mse" not in rdf.columns:
+                continue
+            xs, ys = recon_analysis.lorenz_curve(rdf[f"{k}_mse"].to_numpy(dtype=float))
+            share = _tail_of(by_alias[a])["per_head"].get(k, {}).get("share", np.nan)
+            ax.plot(xs, ys, color=_dataset_color(a, i),
+                    ls=_HEAD_LS[k] if _STYLE == "eink" else "-", lw=1.6,
+                    label="%s — worst %.0f%% carry %.0f%%"
+                          % (a, 100 * frac, 100 * share) if np.isfinite(share) else a)
+        ax.axvline(frac, color=_accent(), lw=1.2, ls=":")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.set_xlabel("fraction of samples, worst first", fontsize=8)
+        ax.set_ylabel("share of the dataset's total error", fontsize=8)
+        ax.set_title(_head_title(k), fontsize=8.5, color=_head_text_color(k))
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=6.2, loc="lower right", framealpha=0.9)
+
+    # ── Concentration as one number per head and dataset ─────────────────────
+    ax = axes[len(heads)]
+    x = np.arange(len(aliases), dtype=float)
+    width = 0.8 / max(len(heads), 1)
+    for j, k in enumerate(heads):
+        xs, vals = [], []
+        for i, a in enumerate(aliases):
+            share = _tail_of(by_alias[a])["per_head"].get(k, {}).get("share", np.nan)
+            if not np.isfinite(share):
+                continue
+            xs.append(x[i] + (j - (len(heads) - 1) / 2) * width)
+            vals.append(100 * share)
+        if not xs:
+            continue
+        ax.bar(xs, vals, width, color=_HEAD_COLOR[k], alpha=0.9, hatch=_HEAD_HATCH[k],
+               edgecolor="white", linewidth=0.6, label=PATHWAY_SHORT[k])
+        for xi, v in zip(xs, vals):
+            ax.text(xi, v, "%.0f%%" % v, ha="center", va="bottom", fontsize=6.4)
+    ax.axhline(100 * frac, color=_accent(), lw=1.6, ls="-.",
+               label="an even distribution would give %.0f%%" % (100 * frac))
+    ax.set_xticks(x)
+    ax.set_xticklabels([_ds_label(by_alias[a], short=True) for a in aliases],
+                       fontsize=7.5, rotation=12, ha="right")
+    ax.set_ylabel("%% of total error carried by the worst %.0f%%\n(↓ better)"
+                  % (100 * frac), fontsize=8)
+    ax.set_title("How concentrated the failure is", fontsize=9)
+    ax.grid(True, alpha=0.3, axis="y")
+    _group_divider(ax, aliases, by_alias, x)
+    ax.set_ylim(top=max(ax.get_ylim()[1] * 1.35, 100 * frac * 2))
+    ax.legend(fontsize=6.2, loc="upper center", ncol=2, framealpha=0.9)
+
+    # ── Lift: what the focus dataset's tail is made of ───────────────────────
+    ax = axes[len(heads) + 1]
+    lift = focus_r.get("tail_lift_df")
+    pooled = _tail_of(focus_r).get("pooled", {})
+    if isinstance(lift, pd.DataFrame) and len(lift):
+        top = lift.head(10).iloc[::-1]
+        ypos = np.arange(len(top), dtype=float)
+        ax.barh(ypos, top["lift"].to_numpy(), color="#555555" if _STYLE == "eink"
+                else "#4c72b0", alpha=0.9, edgecolor="white", linewidth=0.6)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(["%s = %s" % (a, b) for a, b in
+                            zip(top["axis"], top["bin_label"])], fontsize=7)
+        for y, (lv, sh, npop) in enumerate(zip(top["lift"], top["tail_share"],
+                                               top["n_pop"])):
+            ax.text(lv, y, "  %.0f%% of the tail, n=%d" % (100 * sh, npop),
+                    va="center", fontsize=6.2)
+        ax.axvline(1.0, color="#000000", lw=1.4)
+        ceiling = pooled.get("quantile_lift_ceiling")
+        if ceiling:
+            ax.axvline(ceiling, color=_accent(), lw=1.2, ls=":",
+                       label="lift ceiling for a quintile axis")
+            ax.legend(fontsize=6.2, loc="lower right", framealpha=0.9)
+        ax.set_xlim(0, max(1.6, float(top["lift"].max()) * 1.55))
+        ax.set_xlabel("lift — share of the tail ÷ share of the dataset",
+                      fontsize=8)
+        sub = ""
+        if pooled.get("worst_axis_n_tail"):
+            sub = "\n" + textwrap.fill(
+                "up to %d of %d tail samples sit in levels too small to chart (worst "
+                "axis: %s)" % (pooled["worst_axis_n_tail"], pooled.get("n_tail_total", 0),
+                               pooled.get("worst_axis")), 52)
+        ax.set_title("What the worst %.0f%% is made of — dataset `%s`, %s head%s"
+                     % (100 * frac, focus, PATHWAY_SHORT[focus_head], sub), fontsize=8.5)
+        ax.grid(True, alpha=0.3, axis="x")
+    else:
+        ax.axis("off")
+
+    # ── The property that separates that tail from the rest ──────────────────
+    ax = axes[len(heads) + 2]
+    eff = focus_r.get("tail_effect_df")
+    rdf = focus_r["results_df"]
+    axis_name = None
+    if isinstance(eff, pd.DataFrame) and len(eff):
+        axis_name = str(eff.iloc[0]["axis"])
+    if axis_name and axis_name in rdf.columns and f"{focus_head}_mse" in rdf.columns:
+        mask = recon_analysis.tail_mask(rdf[f"{focus_head}_mse"].to_numpy(dtype=float), frac)
+        v = rdf[axis_name].to_numpy(dtype=float)
+        for sel, label, color, lw in (
+                (~mask, "the other %.0f%%" % (100 * (1 - frac)), "#999999", 1.3),
+                (mask, "the worst %.0f%%" % (100 * frac), _accent(), 2.2)):
+            vals = np.sort(v[sel & np.isfinite(v)])
+            if len(vals) < 2:
+                continue
+            ax.plot(vals, np.arange(1, len(vals) + 1) / len(vals), color=color, lw=lw,
+                    label="%s (n=%d)" % (label, len(vals)))
+        row = eff.iloc[0]
+        ax.set_xlabel(LIFT_AXIS_LABELS.get(axis_name, axis_name), fontsize=8)
+        ax.set_ylabel("fraction of samples at or below", fontsize=8)
+        ax.set_title("The property that separates them best — dataset `%s`\n%s"
+                     % (focus, textwrap.fill(
+                         "median %.3g in the tail against %.3g in the rest "
+                         "(%+.1f interquartile ranges apart, KS %.2f)"
+                         % (row["tail_median"], row["rest_median"], row["effect"],
+                            row["ks"]), 52)), fontsize=8.5)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=6.6, loc="lower right", framealpha=0.9)
+    else:
+        ax.axis("off")
+
+    # ── What the worst reconstructions look like ─────────────────────────────
+    ax = axes[len(heads) + 3]
+    worst = (focus_r.get("_worst") or {}).get(focus_head)
+    if worst is not None and len(worst.get("mse", [])):
+        order = np.argsort(worst["mse"])[::-1][:3]
+        # A fixed offset works only if the traces happen to be unit-scale; the worst
+        # reconstructions are exactly the ones that are not, and they overlapped into an
+        # unreadable band. Space them by the range actually being drawn.
+        drawn = np.concatenate([worst["target"][order], worst["pred"][order]])
+        step = 1.25 * float(np.ptp(drawn)) if np.ptp(drawn) > 0 else 1.0
+        for rank, idx in enumerate(order):
+            off = rank * step
+            ax.plot(worst["target"][idx] + off, color="#000000", lw=1.1,
+                    label="target" if rank == 0 else None)
+            ax.plot(worst["pred"][idx] + off, color=_HEAD_COLOR[focus_head],
+                    ls=_HEAD_LS[focus_head], lw=1.3,
+                    label=PATHWAY_SHORT[focus_head] if rank == 0 else None)
+            ax.text(2, off + 0.42 * step, "MSE %.3g" % worst["mse"][idx], fontsize=6.6,
+                    bbox=dict(fc="white", ec="none", alpha=0.7, pad=1.0))
+        ax.set_xlabel("signal bin (0-%d)" % (worst["target"].shape[1] - 1), fontsize=8)
+        ax.set_ylabel("amplitude (traces offset for legibility)", fontsize=8)
+        ax.set_title("The three worst reconstructions — dataset `%s`\n(%s head, from the "
+                     "whole split, not the figure subsample)"
+                     % (focus, PATHWAY_SHORT[focus_head]),
+                     fontsize=8.5)
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=6.6, loc="upper right", framealpha=0.9)
+    else:
+        ax.axis("off")
+
+    dropped = _tail_of(focus_r).get("dropped_axes") or []
+    note = (" Opened up below: dataset `%s`, %s head - the most concentrated tail (all "
+            "datasets: recon_tail_lift.csv)." % (focus, PATHWAY_SHORT[focus_head]))
+    if dropped:
+        note += " Dropped as degenerate: %s." % ", ".join(dropped)
+    _suptitle(fig, "recon_failure_anatomy", _run_note(by_alias) + note, width=150)
+    _tight(fig, reserve_in=0.7)
+    _footnote(fig, "recon_failure_anatomy")
+
+    # Every dataset's lift table in one file, so the tail can be chased past the top ten.
+    frames = []
+    for a in aliases:
+        t = by_alias[a].get("tail_lift_df")
+        if isinstance(t, pd.DataFrame) and len(t):
+            frames.append(t.assign(dataset=a,
+                                   head=_tail_of(by_alias[a]).get("reference_head")))
+    if frames:
+        pd.concat(frames, ignore_index=True).to_csv(
+            os.path.join(out_dir, "recon_tail_lift.csv"), index=False)
+
+    return [(_caption("recon_failure_anatomy"),
+             _save_fig(fig, os.path.join(out_dir, "recon_failure_anatomy.png")))]
+
+
 _SUMMARY_FIGURES = [
     ("recon_error_distribution",     _plot_error_distribution),
     ("recon_summary_heatmap",        _plot_summary_heatmap),
@@ -1453,6 +1989,8 @@ _SUMMARY_FIGURES = [
     ("recon_position_profile",       _plot_position_profile),
     ("recon_amplitude_calibration",  _plot_amplitude_calibration),
     ("recon_spectral_fidelity",      _plot_spectral_fidelity),
+    ("recon_reference_ladder",       _plot_reference_ladder),
+    ("recon_failure_anatomy",        _plot_failure_anatomy),
 ]
 
 DATASET_LEVEL_FIGURE_KEYS = ["recon_error_vs_signal_properties"]
@@ -1536,16 +2074,28 @@ def _synthetic_results(seed: int = 0) -> dict:
     Four datasets mirroring the real matrix: two single-component, two multi-component.
     The heads are given deliberately different pathologies so a figure that fails to
     distinguish them is visibly broken:
-      fe    a faithful reconstruction plus modest noise
+      fe    the target resampled through 37 points plus modest noise — a faithful
+            reconstruction whose effective resolution is therefore known in advance
       proj  amplitude compressed to 50% — should show up in amp_ratio and in F4's slope
       tr    each sample's own mean, i.e. the trivial baseline — R2 must land at 0
+
+    On the multi-component datasets one component index is made deliberately terrible, so
+    the failure-anatomy figure has a planted answer to find: its tail should be that
+    component and nothing else, at a lift equal to the number of components.
     """
     from .evaluations.signal_reconstruction import (
         _per_sample_metrics, _profiles, _spectrum_table, _stratified_table,
         _summary_table)
+    from .recon_analysis import (DEFAULT_REF_LADDER, FE_BOTTLENECK_K,
+                                 effective_resolution, reference_operators,
+                                 tail_analysis)
     from .signal_features import STRATIFIER_ORDER, compute_signal_features
 
     rng = np.random.default_rng(seed)
+    ref_ops = reference_operators(245, DEFAULT_REF_LADDER)
+    ref_ks = sorted(ref_ops["interp"])
+    # The component the planted failure lives on, and how much worse it is made.
+    bad_comp, bad_scale = 3, 6.0
     specs = [("sanity", "single_channel_1k", 120, False),
              ("in_dist", "single_channel_10k", 200, False),
              ("multi_ch", "multi_channel", 200, True),
@@ -1558,13 +2108,24 @@ def _synthetic_results(seed: int = 0) -> dict:
         base += 3.0 * np.exp(-0.5 * ((np.arange(L) - rng.integers(40, 200, (n, 1))) / 6.0) ** 2)
         t = ((base - base.mean(1, keepdims=True)) / base.std(1, keepdims=True)).astype(np.float32)
         # Multi-component data is harder here, mirroring the real generalization gap.
-        noise = 0.5 if multi else 0.25
+        noise = 0.22 if multi else 0.10
+        # fe is built FROM a reference rung, so its effective resolution is known before
+        # the figure computes it: the added noise pushes it a little below 37, and the
+        # heavier multi-component noise pushes it further, which is the ordering the
+        # reference-ladder figure has to reproduce.
+        fe_base = (t.astype(np.float64) @ ref_ops["interp"][37].T)
         preds = {
-            "fe":   (t + rng.normal(0, noise, t.shape)).astype(np.float32),
+            "fe":   (fe_base + rng.normal(0, noise, t.shape)).astype(np.float32),
             "proj": (0.5 * t + rng.normal(0, noise, t.shape)).astype(np.float32),
             "tr":   np.repeat(t.mean(1, keepdims=True), L, axis=1).astype(np.float32),
         }
         heads = list(preds)
+        comps = np.array([i % 6 for i in range(n)]) if multi else np.zeros(n, int)
+        if multi:
+            hit = comps == bad_comp
+            for k in ("fe", "proj"):
+                preds[k] = preds[k] + (bad_scale * rng.normal(0, 1, t.shape)
+                                       * hit[:, None]).astype(np.float32)
 
         fnames = ([f"dataset0002_comp{i % 6}_spec_{i // 6}.wav" for i in range(n)] if multi
                   else [f"spectra0000_batch0_spec_{i}.wav" for i in range(n)])
@@ -1579,10 +2140,21 @@ def _synthetic_results(seed: int = 0) -> dict:
             rows[f"{k}_mae"] = np.abs(preds[k].astype(np.float64) - t).mean(1)
             for name, v in _per_sample_metrics(t, preds[k], mse).items():
                 rows[f"{k}_{name}"] = v
+        t64 = t.astype(np.float64)
+        ref_interp = np.stack([((t64 @ ref_ops["interp"][k].T - t64) ** 2).mean(1)
+                               for k in ref_ks], axis=1)
+        ref_lowpass = np.stack([((t64 @ ref_ops["lowpass"][k].T - t64) ** 2).mean(1)
+                                for k in ref_ks], axis=1)
+        for j, k in enumerate(ref_ks):
+            rows[f"ref_interp{k}_mse"] = ref_interp[:, j]
+        for k in heads:
+            rows[f"{k}_k_eff"] = effective_resolution(
+                rows[f"{k}_mse"], ref_ks, ref_interp)["k_eff"]
+
         rdf = pd.concat([pd.DataFrame(rows), compute_signal_features(t)], axis=1)
         if multi:
             rdf["dataset_id"] = 2
-            rdf["comp"] = [i % 6 for i in range(n)]
+            rdf["comp"] = comps
             rdf["spec"] = [i // 6 for i in range(n)]
             rdf["n_comps"] = 6
             rdf["n_comps_in_split"] = 6
@@ -1598,6 +2170,24 @@ def _synthetic_results(seed: int = 0) -> dict:
             r["spectrum_df"] = _spectrum_table(rdf, heads)
         r["profiles"] = _profiles(t, preds)
         r["_arrays"] = {"target": t, "preds": preds}
+        r["reference"] = {
+            "ladder": list(ref_ks), "bottleneck_k": FE_BOTTLENECK_K, "length": L,
+            "sample_spacing": L / float(FE_BOTTLENECK_K),
+            "interp_mse_median": np.median(ref_interp, axis=0),
+            "lowpass_mse_median": np.median(ref_lowpass, axis=0),
+            "k_eff_median": {k: float(np.median(rdf[f"{k}_k_eff"])) for k in heads},
+            "peak_fwhm_median": 14.0, "narrow_peak_share": 0.02, "narrow_peak_n": n,
+        }
+        tail = tail_analysis(rdf, heads, frac=0.05)
+        r["tail_lift_df"] = tail.pop("lift_df")
+        r["tail_effect_df"] = tail.pop("effect_df")
+        r["tail"] = tail
+        r["_worst"] = {}
+        for k in heads:
+            order = np.argsort(rdf[f"{k}_mse"].to_numpy())[::-1][:16]
+            r["_worst"][k] = {"index": order,
+                              "mse": rdf[f"{k}_mse"].to_numpy()[order],
+                              "target": t[order], "pred": preds[k][order]}
         out[alias] = r
     return out
 
@@ -1625,6 +2215,44 @@ def _selftest(out_dir: str) -> int:
         ("multi-component data is noisier here, so its MSE must be larger",
          by_alias["multi_ch"]["summary_df"].set_index("head").loc["fe", "mse_median"]
          > s.loc["fe", "mse_median"]),
+    ]
+    # Reference ladder: a head built from a known rung has to come back at that rung.
+    from .recon_analysis import (DEFAULT_REF_LADDER, effective_resolution,
+                                 reference_operators, tail_mask)
+    ops = reference_operators(245, DEFAULT_REF_LADDER)
+    ks = sorted(ops["interp"])
+    tgt = by_alias["in_dist"]["_arrays"]["target"].astype(np.float64)
+    ref = np.stack([((tgt @ ops["interp"][k].T - tgt) ** 2).mean(1) for k in ks], axis=1)
+    exact = {}
+    for k_true in (17, 31, 47):
+        m = ((tgt @ ops["interp"][k_true].T - tgt) ** 2).mean(1)
+        exact[k_true] = float(np.median(effective_resolution(m, ks, ref)["k_eff"]))
+    k_single = by_alias["in_dist"]["reference"]["k_eff_median"]["fe"]
+    k_multi = by_alias["multi_ch"]["reference"]["k_eff_median"]["fe"]
+
+    # Failure anatomy: the planted bad component must be what the tail is made of.
+    lift = by_alias["multi_ch"]["tail_lift_df"]
+    top = lift.iloc[0] if len(lift) else None
+
+    checks += [
+        ("a head equal to a reference rung must report that rung as its resolution",
+         all(abs(exact[k] - k) < 0.5 for k in exact)),
+        ("fe is built from rung 37 plus noise, so its resolution must sit below it",
+         20.0 < k_single < 37.0),
+        ("noisier multi-component data must report a lower effective resolution",
+         k_multi < k_single),
+        ("the mean-predictor head must fall off the coarse end of the ladder",
+         by_alias["in_dist"]["reference"]["k_eff_median"]["tr"] <= ks[0] + 1e-6),
+        ("the planted bad component must be the top of the tail lift table",
+         top is not None and top["axis"] == "comp" and str(top["bin_label"]) == "3"),
+        ("that component must account for the whole tail",
+         top is not None and top["tail_share"] > 0.95),
+        ("its lift must equal the number of components (6)",
+         top is not None and abs(top["lift"] - 6.0) < 0.5),
+        ("the mean-predictor head fails evenly, so its tail must not be concentrated",
+         abs(by_alias["multi_ch"]["tail"]["per_head"]["tr"]["share"] - 0.05) < 0.03),
+        ("contrast must be dropped as degenerate when targets are layer-normed",
+         "contrast" in (by_alias["in_dist"]["tail"].get("dropped_axes") or [])),
     ]
     for msg, ok in checks:
         print("  %s  %s" % ("PASS" if ok else "FAIL", msg))

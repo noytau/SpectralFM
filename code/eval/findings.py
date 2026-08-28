@@ -23,6 +23,16 @@ AMP_TOLERANCE = 0.10
 OUTLIER_TAX = 1.5
 # Ratio of high-frequency to full-band magnitude fidelity below this = losing fine structure.
 ROLLOFF_LIMIT = 0.85
+# A head delivering less than this share of the temporal resolution its bottleneck
+# provides is losing information it was handed, not information the architecture withheld.
+REF_RESOLUTION_LIMIT = 0.9
+# Worst-tail share above this multiple of the tail fraction means the error is
+# concentrated enough that the mean describes the outliers rather than the dataset.
+CONCENTRATION_FACTOR = 3.0
+# A tail level needs at least this lift, and this share of the tail, to be called a cause
+# rather than a coincidence.
+TAIL_LIFT_MIN = 3.0
+TAIL_SHARE_MIN = 0.5
 
 _SHORT = {"fe": "FE", "proj": "projection", "tr": "transformer"}
 
@@ -129,15 +139,18 @@ def observations(results: dict) -> list:
 
     # 1. Is anything degenerate? This is the first thing to know and the cheapest to say.
     dead = S[(S["r2_median"] <= DEGENERATE_R2) | (S["amp_ratio_median"] <= 0.5)]
+    has_reference = bool(_reference_rows(by))
     if dead.empty:
         worst = S.loc[S["r2_median"].idxmin()]
         out.append(
-            "**Every head is doing real work.** The weakest combination is the "
+            "**No head is degenerate.** The weakest combination is the "
             "%s decoder on `%s`, and it still reaches median R² = %.2f against the "
-            "flat-line baseline, beating it on %.0f%% of samples. Nothing here is the "
-            "degenerate mean-predictor."
+            "flat-line baseline, beating it on %.0f%% of samples. None of them is the "
+            "mean-predictor.%s"
             % (_SHORT.get(worst["head"], worst["head"]), worst["dataset"],
-               worst["r2_median"], 100 * worst["frac_r2_positive"]))
+               worst["r2_median"], 100 * worst["frac_r2_positive"],
+               " That is a floor, not a pass mark — see the matched-rate reference below."
+               if has_reference else ""))
     else:
         for _, row in dead.iterrows():
             out.append(
@@ -276,7 +289,124 @@ def observations(results: dict) -> list:
                 "affects all of its components, so this is a per-spectrum property rather "
                 "than a per-component one."
                 % (worst[0], 100 * val, _SHORT.get(worst[1], worst[1]), cnt))
+
+    # ── Against a fair reference rather than a flat line ─────────────────────
+    refs = _reference_rows(by)
+    if refs:
+        bk = refs[0][3]
+        worse = [(ds, h, ratio) for ds, h, _, _, ratio in refs
+                 if np.isfinite(ratio) and ratio > 1.0]
+        best = min((r for *_, r in refs if np.isfinite(r)), default=float("nan"))
+        if worse and len(worse) == len([r for *_, r in refs if np.isfinite(r)]):
+            ds, h, ratio = max(worse, key=lambda t: t[2])
+            out.append(
+                "**No head reaches a fair baseline.** Simply resampling the target at the "
+                "%d-step rate the feature extractor delivers and interpolating back beats "
+                "every head on every dataset — by %.1fx at best and %.1fx at worst (`%s`, "
+                "%s decoder). R² against a flat line said they were all doing real work; "
+                "against a reference at their own information rate, none of them is."
+                % (bk, best, ratio, ds, _SHORT.get(h, h)))
+        elif worse:
+            ds, h, ratio = max(worse, key=lambda t: t[2])
+            out.append(
+                "**Some heads lose to a fair baseline**: resampling the target at the %d-step "
+                "rate the feature extractor delivers beats %d of %d head/dataset pairs, "
+                "worst by %.1fx (`%s`, %s decoder)."
+                % (bk, len(worse), len(refs), ratio, ds, _SHORT.get(h, h)))
+        else:
+            out.append(
+                "**Every head beats a fair baseline** — each one has less error than "
+                "resampling the target at the %d-step rate it decodes from, so the heads "
+                "are extracting more than temporal position alone." % bk)
+
+        short = [(ds, h, k) for ds, h, k, b, _ in refs if k < REF_RESOLUTION_LIMIT * b]
+        if short:
+            ds, h, k = min(short, key=lambda t: t[2])
+            out.append(
+                "**Effective resolution falls short of the bottleneck.** The %s decoder on "
+                "`%s` delivers the equivalent of %.0f independent samples of the signal "
+                "against the %d its input carries (%.0f%%). What it loses is a limit of "
+                "what it learned, not of the architecture."
+                % (_SHORT.get(h, h), ds, k, bk, 100 * k / bk))
+
+    # ── How concentrated the failure is, and what it is made of ──────────────
+    tails = _tail_rows(by)
+    if tails:
+        ds, h, share, frac = max(tails, key=lambda t: t[2])
+        if share >= CONCENTRATION_FACTOR * frac:
+            out.append(
+                "**The error is concentrated in a few samples**: on `%s` the worst %.0f%% "
+                "of samples carry %.0f%% of the %s decoder's total error (an even spread "
+                "would be %.0f%%). Its mean is a statement about those samples, not about "
+                "the dataset." % (ds, 100 * frac, 100 * share, _SHORT.get(h, h), 100 * frac))
+        else:
+            out.append(
+                "**No dataset has a dominant tail** — the worst %.0f%% of samples carry at "
+                "most %.0f%% of the total error (`%s`, %s decoder), close enough to even "
+                "that the mean is a fair summary."
+                % (100 * frac, 100 * share, ds, _SHORT.get(h, h)))
+
+        cause = _top_tail_cause(by.get(ds, {}))
+        if cause:
+            levels = " and ".join("`%s`" % v for v in cause["levels"])
+            out.append(
+                "**That tail has a name**: %s of it is %s = %s — %.0fx %s base rate. This "
+                "is a failure mode with an identity, not a heavy tail to average over."
+                % ("%.0f%%" % (100 * cause["share"]), cause["axis"], levels,
+                   cause["lift"], "their" if cause["n_levels"] > 1 else "its"))
     return out
+
+
+def _reference_rows(by: dict) -> list:
+    """(dataset, head, k_eff, bottleneck, ratio-vs-reference) for every head with a ladder."""
+    rows = []
+    for ds, r in by.items():
+        ref = r.get("reference")
+        rdf = r.get("results_df")
+        if not isinstance(ref, dict) or not ref.get("ladder") or not isinstance(rdf, pd.DataFrame):
+            continue
+        bk = int(ref.get("bottleneck_k", 0))
+        col = "ref_interp%d_mse" % bk
+        denom = float(rdf[col].median()) if col in rdf.columns else float("nan")
+        for h, k_eff in (ref.get("k_eff_median") or {}).items():
+            mse_col = "%s_mse" % h
+            ratio = (float(rdf[mse_col].median()) / denom
+                     if mse_col in rdf.columns and np.isfinite(denom) and denom > 0
+                     else float("nan"))
+            rows.append((ds, h, float(k_eff), bk, ratio))
+    return rows
+
+
+def _tail_rows(by: dict) -> list:
+    """(dataset, head, share, frac) for every head whose tail concentration was measured."""
+    rows = []
+    for ds, r in by.items():
+        t = r.get("tail")
+        if not isinstance(t, dict):
+            continue
+        frac = float(t.get("frac", 0.05))
+        for h, c in (t.get("per_head") or {}).items():
+            share = c.get("share", float("nan"))
+            if np.isfinite(share):
+                rows.append((ds, h, float(share), frac))
+    return rows
+
+
+def _top_tail_cause(r: dict):
+    """The single most over-represented level in a dataset's tail, if it deserves naming."""
+    lift = r.get("tail_lift_df")
+    if not isinstance(lift, pd.DataFrame) or lift.empty:
+        return None
+    row = lift.iloc[0]
+    if not (np.isfinite(row["lift"]) and row["lift"] >= TAIL_LIFT_MIN
+            and row["tail_share"] >= TAIL_SHARE_MIN):
+        return None
+    # Levels of the same axis often split the tail between them ("comp 26 and comp 29"),
+    # and naming only the first would understate the finding by half.
+    same = lift[(lift["axis"] == row["axis"]) & (lift["lift"] >= TAIL_LIFT_MIN)]
+    return {"axis": row["axis"], "levels": [str(v) for v in same["bin_label"]][:4],
+            "lift": float(row["lift"]), "share": float(same["tail_share"].sum()),
+            "n_levels": int(len(same))}
 
 
 def next_steps(results: dict, config=None) -> list:
@@ -321,6 +451,10 @@ def next_steps(results: dict, config=None) -> list:
     # Heavy tails: the tail is a named subset, so go look at it.
     S = S.assign(tax=S["mse_mean"] / S["mse_median"].replace(0, np.nan))
     taxed = S[S["tax"] > OUTLIER_TAX]
+    # ... unless the failure-anatomy pass already named what that tail is made of, in which
+    # case asking for it again would follow the answer with the question.
+    named = {ds for ds, r in by.items() if _top_tail_cause(r)}
+    taxed = taxed[~taxed["dataset"].isin(named)]
     if not taxed.empty:
         ds = taxed.sort_values("tax", ascending=False).iloc[0]["dataset"]
         out.append(
@@ -397,6 +531,55 @@ def next_steps(results: dict, config=None) -> list:
                 "with a few hundred samples per bin and the tail poorly estimated. "
                 "`--eval_set_size all --recon_max_samples 0` covers whole splits."
                 % listed)
+
+    # ── What the fair reference implies ──────────────────────────────────────
+    refs = _reference_rows(by)
+    ratios = [(ds, h, r) for ds, h, _, _, r in refs if np.isfinite(r)]
+    if ratios and all(r > 1.0 for *_, r in ratios):
+        bk = refs[0][3]
+        out.append(
+            "**Close the gap to the matched-rate reference before tuning anything else.** "
+            "Every head has more error than interpolating the target through %d points, "
+            "which is the crudest thing that respects the same temporal rate. The "
+            "reference is an oracle at those points, so it is not a target to hit exactly "
+            "— but a decoder several times worse than it is not limited by the bottleneck, "
+            "and the things that would help (capacity, schedule, loss) are all on the "
+            "learning side. Effective resolution is the number to watch: it is in the "
+            "summary and moves with real progress, unlike MSE against a flat line."
+            % bk)
+    short = [(ds, h, k, b) for ds, h, k, b, _ in refs if k < REF_RESOLUTION_LIMIT * b]
+    if short and not (ratios and all(r > 1.0 for *_, r in ratios)):
+        ds, h, k, b = min(short, key=lambda t: t[2])
+        out.append(
+            "**Ask where the missing resolution goes.** The %s decoder on `%s` delivers "
+            "%.0f of the %d samples its input carries. Comparing its per-position error "
+            "profile against the reference's would say whether the loss is uniform or "
+            "sits at particular positions." % (_SHORT.get(h, h), ds, k, b))
+
+    # ── What the tail implies ────────────────────────────────────────────────
+    tails = _tail_rows(by)
+    if tails:
+        ds, h, share, frac = max(tails, key=lambda t: t[2])
+        cause = _top_tail_cause(by.get(ds, {}))
+        if cause and share >= CONCENTRATION_FACTOR * frac:
+            levels = " and ".join("`%s`" % v for v in cause["levels"])
+            many = cause["n_levels"] > 1
+            out.append(
+                "**Fix %s = %s rather than the model.** %.0f%% of the worst %.0f%% on `%s` "
+                "is %s, and that worst %.0f%% carries %.0f%% of the dataset's whole error "
+                "budget. Whether the answer is oversampling, weighting in the loss, or "
+                "excluding them as bad data, it is a targeted change with a measurable "
+                "outcome — this figure will show the curve flatten. `recon_tail_lift.csv` "
+                "has the full table and `recon_df.csv` the members."
+                % (cause["axis"], levels, 100 * cause["share"], 100 * frac, ds,
+                   "those levels" if many else "that level", 100 * frac, 100 * share))
+        elif share >= CONCENTRATION_FACTOR * frac:
+            out.append(
+                "**Name the tail on `%s` before averaging over it.** Its worst %.0f%% carry "
+                "%.0f%% of the error but no single component index or signal property "
+                "explains them, so the next step is to look at the members directly — "
+                "`recon_df.csv` has per-sample error alongside every descriptor."
+                % (ds, 100 * frac, 100 * share))
 
     # The standing open question this eval cannot answer on its own.
     out.append(

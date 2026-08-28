@@ -44,6 +44,14 @@ import torch
 import torch.nn.functional as F
 
 from ..model import FairseqConvFeatureExtractor, MirrorDecoder, TransformerMirrorDecoder
+from ..recon_analysis import (
+    DEFAULT_REF_LADDER,
+    FE_BOTTLENECK_K,
+    effective_resolution,
+    peak_fwhm,
+    reference_operators,
+    tail_analysis,
+)
 from ..signal_features import STRATIFIER_ORDER, compute_signal_features
 
 _FE_LAYERS = [(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]
@@ -459,6 +467,57 @@ class _StreamingProfiles:
         return prof
 
 
+class _WorstReservoir:
+    """
+    The worst `keep` samples per head, kept as raw signals while streaming.
+
+    The figure subsample (`_figure_subsample`) is drawn before any error is known, so on a
+    136k-sample split it holds essentially none of the worst 5% - and the tail is exactly
+    what the failure-anatomy panel has to draw. Keeping a small running worst-K per head
+    costs `keep x 245 x 2` floats and guarantees that panel shows the real tail instead of
+    the nearest thing that happened to be sampled.
+    """
+
+    def __init__(self, heads: list, keep: int):
+        self.keep = max(int(keep), 0)
+        self.heads = list(heads)
+        self._store = {k: None for k in self.heads}   # (idx, mse, target, pred)
+
+    def update(self, offset: int, target: np.ndarray, preds: dict, mses: dict) -> None:
+        if self.keep <= 0:
+            return
+        for k in self.heads:
+            if k not in preds:
+                continue
+            idx = offset + np.arange(len(target))
+            cand = (idx, np.asarray(mses[k], dtype=np.float64),
+                    np.asarray(target, dtype=np.float32),
+                    np.asarray(preds[k], dtype=np.float32))
+            have = self._store[k]
+            if have is not None:
+                cand = tuple(np.concatenate([h, c]) for h, c in zip(have, cand))
+            order = np.argsort(cand[1])[::-1][: self.keep]
+            self._store[k] = tuple(a[order] for a in cand)
+
+    def result(self, keep_index: dict = None) -> dict:
+        """
+        {head: {index, mse, target, pred}}. `keep_index` maps surviving original indices to
+        their new row numbers; entries dropped by the redundant-component filter are
+        removed rather than left pointing at rows that no longer exist.
+        """
+        out = {}
+        for k, store in self._store.items():
+            if store is None:
+                continue
+            idx, mse, tgt, prd = store
+            if keep_index is not None:
+                sel = np.array([j for j, i in enumerate(idx) if int(i) in keep_index], int)
+                idx, mse, tgt, prd = (a[sel] for a in (idx, mse, tgt, prd))
+                idx = np.array([keep_index[int(i)] for i in idx], dtype=int)
+            out[k] = {"index": idx, "mse": mse, "target": tgt, "pred": prd}
+        return out
+
+
 @torch.no_grad()
 def _3ae_reconstruct_all(backbone, heads: dict, source: torch.Tensor) -> dict:
     """
@@ -636,6 +695,10 @@ def _summary_table(rdf: pd.DataFrame, pathways: list) -> pd.DataFrame:
             "r2_mean":           float(finite_r2.mean()) if finite_r2.size else np.nan,
             "frac_r2_positive":  (float((finite_r2 > _R2_BEAT_TOL).mean())
                                   if finite_r2.size else np.nan),
+            # Effective resolution: the head's error read back onto the matched-rate
+            # reference ladder, in samples of signal. Absent when no ladder was built.
+            "k_eff_median":      (float(rdf[f"{k}_k_eff"].median())
+                                  if f"{k}_k_eff" in rdf.columns else np.nan),
             "pearson_median":    float(rdf[f"{k}_pearson"].median()),
             "amp_ratio_median":  float(rdf[f"{k}_amp_ratio"].median()),
             "peak_err_median":   float(rdf[f"{k}_peak_err"].median()),
@@ -767,6 +830,9 @@ def run(
     sample_meta: Optional[pd.DataFrame] = None,
     dataset_alias: str = "",
     dataset_subset: str = "",
+    ref_ladder=DEFAULT_REF_LADDER,
+    worst_keep: int = 64,
+    tail_frac: float = 0.05,
 ) -> dict:
     """
     Run true signal reconstruction on df ('data' column of raw signals).
@@ -790,12 +856,27 @@ def run(
     dataset_alias / dataset_subset: labels only, carried into the figures so a reader can
       see which data a panel describes (e.g. 'in_dist' / 'single_channel_10k').
 
+    ref_ladder: resolutions to build reference reconstructions at. Each rung reconstructs
+      the target from K evenly spaced samples of itself, giving a fair yardstick at a
+      matched information rate - see `recon_analysis`. Empty/None disables the reference.
+    worst_keep: how many worst-error raw signals to retain per head for the
+      failure-anatomy panel (0 disables).
+    tail_frac: what counts as "the tail" for the failure-anatomy tables (0.05 = worst 5%).
+
     Returns dict with:
       results_df    per-component (L1) metrics, one row per sample → recon_df.csv
       summary_df    per-head (L3) headline table, median-first
       spectrum_df   per-spectrum (L2) table — multi-component datasets only
       strat_df      median MSE per bin of each stratification axis
       profiles      per-position and per-frequency error arrays
+      reference     the matched-rate reference ladder: median MSE per rung for both
+                    reference families, each head's median effective resolution, and how
+                    narrow this data's peaks are relative to the reference spacing
+      _worst        the worst-error raw signals per head, for the failure-anatomy panel
+      tail          how concentrated the error is per head, and which head's tail is worth
+                    explaining
+      tail_lift_df  how over-represented each component / property level is in that tail
+      tail_effect_df  how far the tail sits from the rest on each signal descriptor
       panel         the 6-example overlay data (unchanged)
       recon_{k}_mse_mean / _median, recon_{k}_mae_mean / _median  (unchanged scalars)
     """
@@ -881,6 +962,16 @@ def run(
     fig_set = set(fig_idx.tolist())
     kept_target, kept_preds = [], {k: [] for k in pathway_names}
 
+    # Reference reconstructions at matched information rates - see recon_analysis. Built
+    # once as matrices and applied with one matmul per rung per batch. The interpolation
+    # rungs are kept per sample (they become results_df columns and each head's effective
+    # resolution is read off that sample's own curve); the low-pass rungs are reduced to a
+    # median curve, since nothing needs them per sample.
+    ref_ops = reference_operators(L, ref_ladder) if ref_ladder else {"interp": {}, "lowpass": {}}
+    ref_ks = sorted(ref_ops["interp"])
+    ref_interp, ref_lowpass = [], []
+    worst = _WorstReservoir(pathway_names, worst_keep)
+
     for i in range(0, len(target), batch_size):
         batch = target[i : i + batch_size]
         batch_np = batch.numpy()
@@ -888,13 +979,25 @@ def run(
                        _reconstruct_batch(batch.to(device)).items()}
         profiles.update(batch_np, batch_preds)
 
+        batch_mse = {}
         for k, pred_np in batch_preds.items():
             err = pred_np.astype(np.float64) - batch_np
             mse = (err ** 2).mean(axis=1)
+            batch_mse[k] = mse
             per_sample[k]["mse"].append(mse)
             per_sample[k]["mae"].append(np.abs(err).mean(axis=1))
             for name, values in _per_sample_metrics(batch_np, pred_np, mse).items():
                 per_sample[k][name].append(values)
+
+        if ref_ks:
+            b64 = batch_np.astype(np.float64)
+            ref_interp.append(np.stack(
+                [((b64 @ ref_ops["interp"][k].T - b64) ** 2).mean(axis=1) for k in ref_ks],
+                axis=1))
+            ref_lowpass.append(np.stack(
+                [((b64 @ ref_ops["lowpass"][k].T - b64) ** 2).mean(axis=1) for k in ref_ks],
+                axis=1))
+        worst.update(i, batch_np, batch_preds, batch_mse)
 
         local = [j for j in range(len(batch_np)) if (i + j) in fig_set]
         if local:
@@ -908,6 +1011,8 @@ def run(
                   for k, v in kept_preds.items()}
     per_sample = {k: {name: np.concatenate(v) for name, v in m.items()}
                   for k, m in per_sample.items()}
+    ref_interp = np.concatenate(ref_interp) if ref_interp else None
+    ref_lowpass = np.concatenate(ref_lowpass) if ref_lowpass else None
 
     # ── Metrics + results ─────────────────────────────────────────────────────
     rows = {"index": np.arange(len(target)), "filename": fnames}
@@ -949,6 +1054,13 @@ def run(
         for name in ("r2", "pearson", "amp_ratio", "peak_err"):
             rows[f"{k}_{name}"] = per_sample[k][name]
 
+    if ref_interp is not None:
+        for j, k in enumerate(ref_ks):
+            rows[f"ref_interp{k}_mse"] = ref_interp[:, j].astype(np.float32)
+        for k in pathway_names:
+            res = effective_resolution(per_sample[k]["mse"], ref_ks, ref_interp)
+            rows[f"{k}_k_eff"] = res["k_eff"].astype(np.float32)
+
     rdf = pd.DataFrame(rows)
 
     # ── Sample descriptors + component metadata → stratification axes ──────────
@@ -988,8 +1100,12 @@ def run(
     # profiles now cover a few rows that rdf excludes - a sub-percent effect on a mean
     # over thousands of samples, and the alternative is a second inference pass.
     keep_rows = rdf["index"].to_numpy()
+    keep_index = {int(gi): new for new, gi in enumerate(keep_rows)}
     if len(keep_rows) != len(target):
         surviving = set(int(i) for i in keep_rows)
+        if ref_lowpass is not None:
+            ref_lowpass = ref_lowpass[keep_rows]
+            ref_interp = ref_interp[keep_rows]
         sel = [j for j, gi in enumerate(fig_idx) if int(gi) in surviving]
         kept_target = kept_target[sel]
         kept_preds = {k: v[sel] for k, v in kept_preds.items()}
@@ -1014,6 +1130,49 @@ def run(
         out[f"recon_{k}_mse_median"] = float(rdf[f"{k}_mse"].median())
         out[f"recon_{k}_mae_mean"] = float(rdf[f"{k}_mae"].mean())
         out[f"recon_{k}_mae_median"] = float(rdf[f"{k}_mae"].median())
+
+    # ── Reference ladder: what this data costs at a matched information rate ──
+    if ref_interp is not None and len(rdf):
+        ref_cols = [f"ref_interp{k}_mse" for k in ref_ks]
+        k_eff = {}
+        for k in pathway_names:
+            col = f"{k}_k_eff"
+            if col in rdf.columns:
+                k_eff[k] = float(rdf[col].median())
+        # Interpolation is a strong reference for smooth signals and a weak one for
+        # structure narrower than its sample spacing, so state which case this data is.
+        # Measured on the kept subsample, where the per-peak loop is affordable.
+        spacing = L / float(FE_BOTTLENECK_K)
+        fwhm = peak_fwhm(kept_target) if len(kept_target) else np.array([])
+        narrow = (float(np.nanmean(fwhm < spacing)) if len(fwhm) and np.isfinite(fwhm).any()
+                  else float("nan"))
+        out["reference"] = {
+            "ladder": list(ref_ks),
+            "bottleneck_k": FE_BOTTLENECK_K,
+            "length": L,
+            "sample_spacing": spacing,
+            "interp_mse_median": rdf[ref_cols].median().to_numpy(dtype=float),
+            "lowpass_mse_median": (np.median(ref_lowpass, axis=0)
+                                   if ref_lowpass is not None else None),
+            "k_eff_median": k_eff,
+            "peak_fwhm_median": (float(np.nanmedian(fwhm)) if len(fwhm) else float("nan")),
+            "narrow_peak_share": narrow,
+            "narrow_peak_n": int(len(fwhm)),
+        }
+
+    # Worst-error raw signals, so the failure-anatomy panel draws the actual tail.
+    if worst_keep:
+        out["_worst"] = worst.result(keep_index)
+
+    # ── Tail anatomy: what the worst few per cent are made of ─────────────────
+    # Computed here rather than in the plotting code so the tables export as CSVs with
+    # everything else, and so the figures and the generated findings read one set of
+    # numbers instead of each deriving their own.
+    if len(rdf):
+        tail = tail_analysis(rdf, pathway_names, frac=tail_frac)
+        out["tail_lift_df"] = tail.pop("lift_df")
+        out["tail_effect_df"] = tail.pop("effect_df")
+        out["tail"] = tail
 
     # ── L3 summary, L2 per-spectrum, stratified medians, profiles ─────────────
     out["summary_df"] = _summary_table(rdf, pathway_names)
@@ -1050,7 +1209,11 @@ def run(
            f"n={out['n_samples']} (raw signals kept for figures: {n_kept})"]
     for k in pathway_names:
         s = out["summary_df"].set_index("head").loc[k]
-        msg.append(f"{k.upper()} MSE med={s['mse_median']:.4e} mean={s['mse_mean']:.4e} "
-                   f"R2med={s['r2_median']:.3f} ampRatio={s['amp_ratio_median']:.3f}")
+        line = (f"{k.upper()} MSE med={s['mse_median']:.4e} mean={s['mse_mean']:.4e} "
+                f"R2med={s['r2_median']:.3f} ampRatio={s['amp_ratio_median']:.3f}")
+        ref = out.get("reference")
+        if ref and k in ref["k_eff_median"]:
+            line += f" Keff={ref['k_eff_median'][k]:.1f}/{ref['bottleneck_k']}"
+        msg.append(line)
     print("  ".join(msg))
     return out
