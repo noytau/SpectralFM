@@ -59,6 +59,10 @@ _HEAD_HATCH = {"fe": "", "proj": "///", "tr": "xxx"}
 # the limited contrast range of an e-paper panel; nothing lighter than #b0b0b0 is used
 # for a line, since it disappears.
 _EINK_HEAD_COLOR = {"fe": "#000000", "proj": "#5a5a5a", "tr": "#9a9a9a"}
+# Only five greys are usable on e-paper, and the dataset palette reuses them, so two
+# datasets in one panel can land on the same shade. Where datasets are the lines rather
+# than the panels, they get a line style each as well.
+_EINK_DATASET_LS = ["-", "--", ":", "-.", (0, (3, 1, 1, 1))]
 _EINK_DATASET_COLOR = {"sanity": "#8a8a8a", "in_dist": "#000000",
                        "multi_ch": "#000000", "samples": "#8a8a8a",
                        "labeled": "#5a5a5a"}
@@ -1815,8 +1819,11 @@ def _plot_failure_anatomy(by_alias: dict, out_dir: str) -> list:
                 continue
             xs, ys = recon_analysis.lorenz_curve(rdf[f"{k}_mse"].to_numpy(dtype=float))
             share = _tail_of(by_alias[a])["per_head"].get(k, {}).get("share", np.nan)
-            ax.plot(xs, ys, color=_dataset_color(a, i),
-                    ls=_HEAD_LS[k] if _STYLE == "eink" else "-", lw=1.6,
+            # The head is the panel here, so the line style has to separate DATASETS -
+            # keying it on the head made every curve in a panel identical in greyscale.
+            ax.plot(xs, ys, color=_dataset_color(a, i), lw=1.6,
+                    ls=(_EINK_DATASET_LS[i % len(_EINK_DATASET_LS)]
+                        if _STYLE == "eink" else "-"),
                     label="%s — worst %.0f%% carry %.0f%%"
                           % (a, 100 * frac, 100 * share) if np.isfinite(share) else a)
         ax.axvline(frac, color=_accent(), lw=1.2, ls=":")
