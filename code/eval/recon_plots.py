@@ -533,6 +533,11 @@ _FIG_DOC = {
             "wrong summary and that there is a specific thing to fix."
         ),
         "caveats": (
+            "Concentration is close to independent of how GOOD the model is: measured "
+            "against an under-trained checkpoint of the same run, effective resolution "
+            "fell by up to 2.6x while the worst-5% share barely moved. This figure "
+            "describes the data's hard subpopulation, not the training state - the "
+            "reference-ladder figure is the one that tracks progress. "
             "The tail is defined per head, and the heads do not fail on the same samples, "
             "so each head has its own; the opened-up panels follow the most concentrated "
             "one, and every dataset's full table is exported to recon_tail_lift.csv "
