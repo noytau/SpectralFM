@@ -1,0 +1,174 @@
+# @package _group_
+#
+# Step 4 (TASKS.md T12 / project-brief.html): full joint fine-tune, seeded from
+# T9-T11's winners. Confirmed against docs/html/project-brief.html's own T8-T12
+# pipeline description: "All three components + all three decoders train
+# together" -- not a transformer-only run.
+#
+#   • FE:          TRAIN, init = Step 1 winner (step1_feProjJoint_lambdaFe0.5.pt)
+#   • Projection:  TRAIN, init = Step 2 winner (step2_projMlp768_lambdaProj0.5.pt)
+#   • Transformer: TRAIN, init = Step 3 winner (step3_transFinetune_lambdaTrans0.5.pt)
+#   • FE decoder / Projection decoder / Transformer decoder: all TRAIN, seeded
+#     from the same three checkpoints above (each carries its own decoder).
+#   • mask_emb / final_proj: unfrozen (unlike Steps 2-3, where the transformer
+#     was frozen and training these would have been wasted compute) -- the
+#     transformer is trainable here, so the masked-prediction mechanics that
+#     feed it are live again, matching Step 1's own regime.
+#
+# Per-experiment overrides (set at launch, not hardcoded here):
+#   dataset.batch_size, distributed_training.distributed_world_size,
+#   optimization.max_update, common.wandb_run_name
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 100
+  tensorboard_logdir: tb
+  user_dir: /storage/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm-t12-step4"
+  wandb_run_name: "step4_jointFinetune_${now:%Y%m%d_%H%M}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 2000
+  keep_interval_updates: 5
+  no_epoch_checkpoints: true
+
+task:
+  _name: audio_pretraining
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_all
+  max_sample_size: 500
+  min_sample_size: 1
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 768
+  train_subset: train
+  valid_subset: valid
+  disable_validation: true
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  required_batch_size_multiple: 1
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - recon_fe
+    - recon_proj
+    - recon_trans
+    - regression
+    - ema_decay
+    - target_var
+    - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
+
+optimization:
+  max_update: 30000
+  max_epoch: 0
+  # 1e-5, the "fine-tune" rate -- everything here is warm-started from a
+  # T9-T11 winner, not random init (unlike Step 1/2's from-scratch components,
+  # which correctly used 1e-4).
+  lr: [1.0e-5]
+  update_freq: [1]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 1500
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.05
+  # train_only_fe defaults to true (freezes everything except the feature
+  # extractor -- see CLAUDE.md's "Key constraints"). Step 4 is the full joint
+  # fine-tune: FE + projection + transformer all train together, so this must
+  # be explicit false or freeze_*_v2=false below is silently overridden and
+  # training becomes FE-only. Confirmed via smoke test (2026-08-28) that the
+  # original run of this file, missing this line, printed "[INFO] ONLY
+  # feature extractor is trainable" and the resulting step4_jointFinetune_30k.pt
+  # checkpoint has train_only_fe=True baked into its own saved cfg.
+  train_only_fe: false
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  # Must match step2_projMlp768_lambdaProj0.5.pt's architecture (the checkpoint
+  # init_proj_ckpt warm-starts from) or the shape-safe merge silently loads 0
+  # tensors and the projection is left at random init instead of warm-started.
+  post_extract_proj_type: mlp_gelu
+  post_extract_proj_mlp_hidden: 768
+  post_extract_proj_layernorm: true
+
+  # All three decoders — attached, trainable, warm-started below.
+  lambda_recon_fe: 0.5
+  lambda_recon_proj: 0.5
+  lambda_recon_trans: 0.5
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+  recon_decoder_type: mirror
+
+  # Per-component init/freeze — replaces the legacy full-checkpoint load.
+  model_path: null
+  skip_pretrained_weights: true
+
+  init_fe_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
+  init_ln_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
+  init_fe_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step1_feProjJoint_lambdaFe0.5.pt
+  init_proj_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step2_projMlp768_lambdaProj0.5.pt
+  init_proj_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step2_projMlp768_lambdaProj0.5.pt
+  init_transformer_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step3_transFinetune_lambdaTrans0.5.pt
+  init_trans_recon_decoder_ckpt: /storage/noy/SpectralFM/checkpoints/t8_step0_all_5ep/step3_transFinetune_lambdaTrans0.5.pt
+
+  freeze_fe_v2: false
+  freeze_ln: false
+  freeze_proj: false
+  freeze_transformer_v2: false
+  freeze_fe_recon_decoder: false
+  freeze_proj_recon_decoder: false
+  freeze_trans_recon_decoder: false
+  freeze_mask_emb: false
+  freeze_final_proj: false
+
+  tag_param_groups: false
+
+hydra:
+  run:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_t12_step4
+  sweep:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss
