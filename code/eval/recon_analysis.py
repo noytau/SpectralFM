@@ -410,6 +410,78 @@ def lift_table(rdf: pd.DataFrame, mask: np.ndarray, axes: list,
                 "n_bins": n_bins, "quantile_lift_ceiling": float(n_bins)}
 
 
+def component_error_table(rdf: pd.DataFrame, pathways: list,
+                          min_n: int = 5) -> pd.DataFrame:
+    """
+    Per component index: how many samples it contributes and how much of the dataset's
+    whole error budget it carries.
+
+    The share of ERROR is the number that matters, and it is not the median. A component
+    can sit at an unremarkable median and still dominate a dataset, or - as sampled_data's
+    comp 26 and 29 do - sit at a median 87x the dataset's and carry 84% of its total
+    squared error from 6.5% of its samples. `budget_lift` is that share divided by the
+    component's share of samples: 1.0 means it carries its own weight, 13 means it carries
+    thirteen times it.
+
+    Returns one row per component, plus the median of every signal descriptor present, so
+    a plot can put the offenders' error next to what makes them different.
+    """
+    if "comp" not in rdf.columns or not len(rdf):
+        return pd.DataFrame()
+    heads = [k for k in pathways if f"{k}_mse" in rdf.columns]
+    if not heads:
+        return pd.DataFrame()
+
+    feats = [c for c in FEATURE_LABELS if c in rdf.columns]
+    rows = []
+    n_total = len(rdf)
+    totals = {k: float(rdf[f"{k}_mse"].sum()) for k in heads}
+    for comp, g in rdf.groupby("comp"):
+        if len(g) < min_n:
+            continue
+        row = {"comp": comp, "n": int(len(g)), "sample_share": len(g) / n_total}
+        for k in heads:
+            v = g[f"{k}_mse"].to_numpy(dtype=float)
+            v = v[np.isfinite(v)]
+            if not v.size:
+                continue
+            row[f"{k}_mse_median"] = float(np.median(v))
+            row[f"{k}_mse_q25"] = float(np.percentile(v, 25))
+            row[f"{k}_mse_q75"] = float(np.percentile(v, 75))
+            share = float(v.sum() / totals[k]) if totals[k] > 0 else float("nan")
+            row[f"{k}_error_share"] = share
+            row[f"{k}_budget_lift"] = (share / row["sample_share"]
+                                       if row["sample_share"] > 0 else float("nan"))
+        for f in feats:
+            row[f] = float(g[f].median())
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    return df.sort_values("comp").reset_index(drop=True) if len(df) else df
+
+
+def component_focus(by_comp: dict, pathways: list) -> tuple:
+    """
+    (dataset, head) whose component error budget is most unevenly distributed.
+
+    `by_comp` is {dataset: component_error_table(...)}. A dataset whose worst component
+    carries a fair share has nothing to open up; the one with the highest budget lift is
+    the one worth spending panels on.
+    """
+    best, best_lift = (None, None), -1.0
+    for ds, df in by_comp.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        for k in pathways:
+            col = f"{k}_budget_lift"
+            if col not in df.columns:
+                continue
+            v = df[col].to_numpy(dtype=float)
+            v = v[np.isfinite(v)]
+            if v.size and v.max() > best_lift:
+                best, best_lift = (ds, k), float(v.max())
+    return best[0], best[1], best_lift
+
+
 def tail_analysis(rdf: pd.DataFrame, pathways: list, frac: float = 0.05,
                   feature_axes: list = None) -> dict:
     """

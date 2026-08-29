@@ -309,6 +309,14 @@ never sees, and the real bottleneck is 47 timesteps of 512 or 768 channels, not 
 is therefore not a bound on what a head could achieve. The useful direction is the negative
 one: a head below the reference at its own rate cannot blame the bottleneck.
 
+**Component error budget** — `recon_component_error.csv`. For multi-component datasets,
+per component index: sample count, median error with its IQR, and the share of the
+dataset's *total squared error* it carries. `budget_lift` is that share divided by the
+component's share of samples — 1.0 means it carries its own weight. The share of error is
+the number that matters and it is not the median: measured on `sampled_data`, components
+26 and 29 are 6.5% of the samples and 84% of the error, at a median 87× the dataset's own.
+Component index is a nominal label, never quantile-binned.
+
 **Tail anatomy** — `tail_lift_df.csv` per dataset, `recon_tail_lift.csv` across all of them.
 For each head: what share of a dataset's total squared error its worst `recon_tail_frac`
 (default 5%) of samples carry, plus, for the head whose tail is most concentrated, the *lift*
@@ -340,6 +348,7 @@ Dataset level, in `<model>/reconstruction_<dataset>/` and `<model>/reconstructio
 | `recon_spectral_fidelity` | do narrow spectral lines survive, or only the smooth envelope? |
 | `recon_reference_ladder` | is the head better than resampling the target at the rate its own bottleneck provides? Reports **effective resolution** in samples of signal |
 | `recon_failure_anatomy` | what the worst few per cent are made of — error concentration, lift per component/property, and the actual worst traces |
+| `recon_component_error` | multi-component data: error per component index, and what share of the dataset's whole error budget each one carries |
 | `recon_error_vs_signal_properties` | *which* spectra fail — per dataset, with component index and the per-spectrum view on multi-component data |
 
 Every figure carries its own explanation as a footnote drawn onto the PNG, so a figure read

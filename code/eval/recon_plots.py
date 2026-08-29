@@ -161,6 +161,11 @@ _GROUP_LABEL = {
 # Same distinction where a panel title has no room for the parenthetical.
 _GROUP_SHORT = {"single": "single-component", "multi": "multi-component"}
 
+# A component carrying this many times its share of the dataset's error is called out by
+# name on the component figure. 2x is well clear of sampling noise on a component with
+# tens of samples, and far below the 13x sampled_data's comp 26 and 29 actually post.
+_COMP_LIFT_MARK = 2.0
+
 _REF_COLOR = "#b0b0b0"
 
 
@@ -554,6 +559,50 @@ _FIG_DOC = {
             "forces it to 1 for every sample and what remains is float noise."
         ),
     },
+    "recon_component_error": {
+        "title": "Where the reconstruction error lives, by component",
+        "caption": (
+            "Error per component index, and what share of the dataset's whole error "
+            "budget each one carries. A component well above its share of the samples is "
+            "a named problem rather than a hard dataset."
+        ),
+        "what": (
+            "Multi-component data gives every wav a component index from its filename, "
+            "and a component behaves as a class of signal rather than a point on a scale. "
+            "The first panels plot median reconstruction MSE against that index, one per "
+            "dataset, with the dataset's own median drawn for scale. The rest open up the "
+            "dataset whose budget is most uneven: what share of the total squared error "
+            "each component carries against what share of the samples it contributes "
+            "(their ratio is the xN on each bar), whether a bad component is uniformly "
+            "bad or has its own tail, what a typical sample of it actually looks like, "
+            "and which signal property separates the bad components from the rest. "
+            "Heads are named in short here; what each one taps and decodes with is "
+            "spelled out in the error-distribution figure."
+        ),
+        "read": (
+            "a component sitting far above the dataset median line is reconstructing badly, "
+            "and in the budget panel a bar rising well above its sample-share dash is one "
+            "carrying more than its weight - xN says how much more, so x13 means thirteen "
+            "times the error its sample count would account for"
+        ),
+        "good": (
+            "A flat line near the dataset median and every budget bar level with its "
+            "sample-share dash - error that does not depend on which component a signal "
+            "came from. Two components holding most of a dataset's error is not a modelling "
+            "verdict on its own; it is a pointer at those components."
+        ),
+        "caveats": (
+            "The share of ERROR is the number that matters here and it is not the median: "
+            "a component can look unremarkable at the median and still dominate a dataset "
+            "through its tail. Components with fewer than five samples in the draw are "
+            "omitted, since a share estimated from a handful of samples is noise. "
+            "Component index is a label, not a difficulty scale - the x-axis is ordered by "
+            "index only so the same component sits in the same place across panels. The "
+            "example traces come from the bounded raw-signal subsample and show a sample "
+            "with that component's TYPICAL error, not its worst. Multi-component datasets "
+            "only; single-component ones carry no component field. " + CROSS_HEAD_CAVEAT
+        ),
+    },
 }
 
 
@@ -807,6 +856,37 @@ def _flow_axes(n: int, cell_w: float, cell_h: float,
     for ax in flat[n:]:
         ax.axis("off")
     return fig, flat[:n]
+
+
+def _comp_discriminator(cdf: pd.DataFrame, head: str) -> str:
+    """
+    The signal descriptor whose per-component median best tracks per-component error.
+
+    Rank correlation, over components rather than samples: the question is what the bad
+    COMPONENTS have in common, and a component is a class of signal, so its median
+    descriptor is the right summary. Returns None when nothing varies enough to rank.
+    """
+    col = f"{head}_mse_median"
+    if col not in cdf.columns or len(cdf) < 4:
+        return None
+    y = cdf[col].to_numpy(dtype=float)
+    best, best_rho = None, 0.0
+    for axis in FEATURE_LABELS:
+        if axis not in cdf.columns:
+            continue
+        x = cdf[axis].to_numpy(dtype=float)
+        ok = np.isfinite(x) & np.isfinite(y)
+        if ok.sum() < 4 or np.unique(x[ok]).size < 3:
+            continue
+        xr = pd.Series(x[ok]).rank().to_numpy()
+        yr = pd.Series(y[ok]).rank().to_numpy()
+        sx, sy = xr.std(), yr.std()
+        if sx <= 0 or sy <= 0:
+            continue
+        rho = float(np.mean((xr - xr.mean()) * (yr - yr.mean())) / (sx * sy))
+        if abs(rho) > abs(best_rho):
+            best, best_rho = axis, rho
+    return best
 
 
 def _heads_of(by_alias: dict) -> list:
@@ -2007,6 +2087,238 @@ def _plot_failure_anatomy(by_alias: dict, out_dir: str) -> list:
              _save_fig(fig, os.path.join(out_dir, "recon_failure_anatomy.png")))]
 
 
+# ── F9: where the error lives by component ───────────────────────────────────
+
+def _comp_tables(by_alias: dict) -> dict:
+    """{dataset: component_error_table} for every multi-component dataset with one."""
+    out = {}
+    for a, r in by_alias.items():
+        if r.get("component_group") != "multi":
+            continue
+        df = recon_analysis.component_error_table(r["results_df"], r.get("pathways") or [])
+        if isinstance(df, pd.DataFrame) and len(df):
+            out[a] = df
+    return out
+
+
+def _comp_ticks(ax, comps) -> None:
+    """Component indices as categorical ticks - they are labels, not a numeric scale."""
+    ax.set_xticks(np.arange(len(comps)))
+    ax.set_xticklabels([("%d" % c) if float(c).is_integer() else ("%g" % c) for c in comps],
+                       fontsize=6.5, rotation=90 if len(comps) > 14 else 0)
+
+
+def _plot_component_error(by_alias: dict, out_dir: str) -> list:
+    by_comp = _comp_tables(by_alias)
+    if not by_comp:
+        return []
+    heads = _heads_of(by_alias)
+    aliases = [a for a in _ordered_aliases(by_alias) if a in by_comp]
+    focus, focus_head, focus_lift = recon_analysis.component_focus(by_comp, heads)
+    if focus is None:
+        return []
+    fdf, focus_r = by_comp[focus], by_alias[focus]
+
+    fig, axes = _flow_axes(len(aliases) + 4, 4.8, 3.8,
+                           ncols_screen=max(2, min(len(aliases) + 1, 3)))
+
+    # ── Median error per component, one panel per dataset ────────────────────
+    for i, a in enumerate(aliases):
+        ax, df, r = axes[i], by_comp[a], by_alias[a]
+        comps = df["comp"].to_list()
+        x = np.arange(len(comps), dtype=float)
+        for k in heads:
+            col = f"{k}_mse_median"
+            if col not in df.columns:
+                continue
+            ax.plot(x, df[col], marker=_HEAD_MARKER[k], ms=4, lw=1.2, ls=_HEAD_LS[k],
+                    color=_HEAD_COLOR[k], label=PATHWAY_SHORT[k])
+        ref = k if (k := focus_head) in heads else heads[0]
+        if f"{ref}_mse_q25" in df.columns:
+            ax.fill_between(x, df[f"{ref}_mse_q25"], df[f"{ref}_mse_q75"],
+                            color=_HEAD_COLOR[ref], alpha=0.15, lw=0,
+                            label="%s interquartile range" % PATHWAY_SHORT[ref])
+        med = float(r["results_df"][f"{ref}_mse"].median())
+        ax.axhline(med, color=_accent(), lw=1.3, ls="-.",
+                   label="this dataset's median (%.3g)" % med)
+        # Name the components that stand out - the whole point of the panel is that they
+        # are identifiable, not that the line has a bump somewhere.
+        lift_col = f"{ref}_budget_lift"
+        if lift_col in df.columns:
+            # Offenders often come in adjacent pairs (sampled_data's comp 26 and 29), and
+            # two call-outs at the same height overprint each other into mush - stagger
+            # consecutive ones.
+            marked = 0
+            for xi, (c, lift, val) in enumerate(zip(comps, df[lift_col],
+                                                    df[f"{ref}_mse_median"])):
+                if not (np.isfinite(lift) and lift >= _COMP_LIFT_MARK):
+                    continue
+                dy = 12 + 20 * (marked % 2)
+                marked += 1
+                ax.annotate("comp %s\n%.0fx its share" % (
+                    ("%d" % c) if float(c).is_integer() else ("%g" % c), lift),
+                    (xi, val), textcoords="offset points", xytext=(0, dy),
+                    ha="center", fontsize=6.4, color=_accent(), fontweight="bold",
+                    arrowprops=dict(arrowstyle="-", color=_accent(), lw=0.6,
+                                    shrinkA=0, shrinkB=3))
+        ax.set_yscale("log")
+        _comp_ticks(ax, comps)
+        ax.set_xlabel("component index (a label, not a scale)", fontsize=8)
+        ax.set_ylabel("median MSE  (↓ better)", fontsize=8)
+        ax.set_title("%s\n%s" % (_ds_label(r), "%d components" % len(comps)), fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y", which="both")
+        # The call-outs sit 12pt above their marker and the legend takes the top-left, so
+        # a log axis needs real headroom or both get clipped.
+        lo, hi = ax.get_ylim()
+        ax.set_ylim(lo, hi * 25)
+        ax.legend(fontsize=6.2, loc="upper left", framealpha=0.9, ncol=2)
+
+    # ── Error budget: share of the dataset's error against share of its samples ──
+    ax = axes[len(aliases)]
+    share_col, lift_col = f"{focus_head}_error_share", f"{focus_head}_budget_lift"
+    top = fdf.sort_values(share_col, ascending=False).head(12)
+    x = np.arange(len(top), dtype=float)
+    ax.bar(x, 100 * top[share_col], 0.72, color=_HEAD_COLOR[focus_head], alpha=0.9,
+           hatch=_HEAD_HATCH[focus_head], edgecolor="white", linewidth=0.6,
+           label="share of the dataset's total error")
+    ax.plot(x, 100 * top["sample_share"], ls="none", marker="_", ms=16, mew=2.4,
+            color=_accent(), label="share of its samples")
+    for xi, (sh, lift) in enumerate(zip(top[share_col], top[lift_col])):
+        # Only components carrying their weight or more get a ratio: "0x" under every
+        # small bar was rounding noise pretending to be a measurement.
+        if np.isfinite(lift) and lift >= 1.0:
+            ax.text(xi, 100 * sh, "%.0fx" % lift if lift >= 10 else "%.1fx" % lift,
+                    ha="center", va="bottom", fontsize=6.6)
+    _comp_ticks(ax, top["comp"].to_list())
+    ax.set_xlabel("component index", fontsize=8)
+    ax.set_ylabel("% of the dataset  (↓ better for error)", fontsize=8)
+    ax.set_title("Where the error budget goes — dataset `%s`, %s head\n"
+                 "(bar above the dash = carrying more than its weight; xN is the ratio)"
+                 % (focus, PATHWAY_SHORT[focus_head]), fontsize=8.5)
+    ax.grid(True, alpha=0.3, axis="y")
+    ax.legend(fontsize=6.4, loc="upper right", framealpha=0.9)
+
+    # ── Spread inside each component, not just its median ────────────────────
+    ax = axes[len(aliases) + 1]
+    rdf = focus_r["results_df"]
+    order = fdf.sort_values(share_col, ascending=False)["comp"].to_list()
+    picked = order[:4] + order[len(order) // 2:len(order) // 2 + 2]
+    picked = list(dict.fromkeys(picked))
+    data, labels = [], []
+    for c in picked:
+        v = rdf.loc[rdf["comp"] == c, f"{focus_head}_mse"].to_numpy(dtype=float)
+        v = v[np.isfinite(v) & (v > 0)]
+        if v.size >= 5:
+            data.append(v)
+            labels.append(c)
+    if data:
+        bp = ax.boxplot(data, positions=np.arange(len(data)), widths=0.6, showfliers=False,
+                        patch_artist=True)
+        for j, box in enumerate(bp["boxes"]):
+            hot = np.isfinite(fdf.set_index("comp").loc[labels[j], lift_col]) and \
+                  fdf.set_index("comp").loc[labels[j], lift_col] >= _COMP_LIFT_MARK
+            box.set_facecolor(_accent() if hot else "#bbbbbb")
+            box.set_alpha(0.75)
+        for part in ("medians", "whiskers", "caps"):
+            for ln in bp[part]:
+                ln.set_color("#000000")
+        ax.set_yscale("log")
+        _comp_ticks(ax, labels)
+        ax.set_xlabel("component index (worst first, then typical ones)", fontsize=8)
+        ax.set_ylabel("per-sample MSE  (↓ better)", fontsize=8)
+        ax.set_title("Is the whole component bad, or a few of its samples?\n"
+                     "dataset `%s`, %s head" % (focus, PATHWAY_SHORT[focus_head]),
+                     fontsize=8.5)
+        ax.grid(True, alpha=0.3, axis="y", which="both")
+    else:
+        ax.axis("off")
+
+    # ── What those components look like ──────────────────────────────────────
+    ax = axes[len(aliases) + 2]
+    arrays = focus_r.get("_arrays") or {}
+    kept_idx = arrays.get("index")
+    drawn = False
+    if kept_idx is not None and len(kept_idx) and focus_head in (arrays.get("preds") or {}):
+        comp_of_kept = rdf["comp"].to_numpy()[np.asarray(kept_idx, dtype=int)]
+        mse_of_kept = rdf[f"{focus_head}_mse"].to_numpy()[np.asarray(kept_idx, dtype=int)]
+        show = (order[:2] + [order[len(order) // 2]])[:3]
+        step = None
+        for rank, c in enumerate(show):
+            where = np.flatnonzero(comp_of_kept == c)
+            if not where.size:
+                continue
+            # The sample whose error is typical FOR THAT COMPONENT - a worst-case trace
+            # would say what the tail looks like, and the tail figure already does that.
+            pick = where[np.argmin(np.abs(mse_of_kept[where]
+                                          - np.median(mse_of_kept[where])))]
+            tgt, prd = arrays["target"][pick], arrays["preds"][focus_head][pick]
+            if step is None:
+                step = 1.35 * float(np.ptp(np.concatenate([tgt, prd])) or 1.0)
+            off = rank * step
+            ax.plot(tgt + off, color="#000000", lw=1.0,
+                    label="target" if not drawn else None)
+            ax.plot(prd + off, color=_HEAD_COLOR[focus_head], ls=_HEAD_LS[focus_head],
+                    lw=1.3, label=PATHWAY_SHORT[focus_head] if not drawn else None)
+            ax.text(2, off + 0.44 * step, "comp %s — median MSE %.3g"
+                    % (("%d" % c) if float(c).is_integer() else ("%g" % c),
+                       float(np.median(mse_of_kept[where]))),
+                    fontsize=6.6, bbox=dict(fc="white", ec="none", alpha=0.75, pad=1.0))
+            drawn = True
+    if drawn:
+        if step:
+            ax.set_ylim(top=(len(show) - 1) * step + 0.95 * step)
+        ax.set_xlabel("signal bin", fontsize=8)
+        ax.set_ylabel("amplitude (traces offset)", fontsize=8)
+        ax.set_title("What the worst components look like — dataset `%s`\n"
+                     "(a typical sample of each, not its worst)" % focus, fontsize=8.5)
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=6.6, loc="upper right", framealpha=0.9)
+    else:
+        ax.axis("off")
+
+    # ── What separates them: error against a per-component signal property ───
+    ax = axes[len(aliases) + 3]
+    axis_name = _comp_discriminator(fdf, focus_head)
+    if axis_name:
+        lifts = fdf[lift_col].to_numpy(dtype=float)
+        hot = np.isfinite(lifts) & (lifts >= _COMP_LIFT_MARK)
+        ax.scatter(fdf.loc[~hot, axis_name], fdf.loc[~hot, f"{focus_head}_mse_median"],
+                   s=34, color="#999999", label="other components")
+        ax.scatter(fdf.loc[hot, axis_name], fdf.loc[hot, f"{focus_head}_mse_median"],
+                   s=64, color=_accent(), marker="D",
+                   label="carrying %gx their share or more" % _COMP_LIFT_MARK)
+        for _, row in fdf.iterrows():
+            ax.annotate(("%d" % row["comp"]) if float(row["comp"]).is_integer()
+                        else ("%g" % row["comp"]),
+                        (row[axis_name], row[f"{focus_head}_mse_median"]),
+                        textcoords="offset points", xytext=(4, 3), fontsize=6.2)
+        ax.set_yscale("log")
+        ax.set_xlabel(LIFT_AXIS_LABELS.get(axis_name, axis_name), fontsize=8)
+        ax.set_ylabel("component's median MSE  (↓ better)", fontsize=8)
+        ax.set_title("What makes the bad components different — dataset `%s`\n"
+                     "(one point per component)" % focus, fontsize=8.5)
+        ax.margins(0.16)
+        ax.grid(True, alpha=0.3, which="both")
+        # The bad components are the high-error ones, so the top of the panel is theirs.
+        ax.legend(fontsize=6.4, loc="lower right", framealpha=0.9)
+    else:
+        ax.axis("off")
+
+    note = (" Opened up below: dataset `%s`, %s head — the most uneven component budget "
+            "(worst component carries %.0fx its share of the samples)."
+            % (focus, PATHWAY_SHORT[focus_head], focus_lift))
+    _suptitle(fig, "recon_component_error", _run_note(by_alias) + note, width=150)
+    _tight(fig, reserve_in=0.7)
+    _footnote(fig, "recon_component_error")
+
+    frames = [df.assign(dataset=a) for a, df in by_comp.items()]
+    pd.concat(frames, ignore_index=True).to_csv(
+        os.path.join(out_dir, "recon_component_error.csv"), index=False)
+
+    return [(_caption("recon_component_error"),
+             _save_fig(fig, os.path.join(out_dir, "recon_component_error.png")))]
+
+
 _SUMMARY_FIGURES = [
     ("recon_error_distribution",     _plot_error_distribution),
     ("recon_summary_heatmap",        _plot_summary_heatmap),
@@ -2016,6 +2328,7 @@ _SUMMARY_FIGURES = [
     ("recon_spectral_fidelity",      _plot_spectral_fidelity),
     ("recon_reference_ladder",       _plot_reference_ladder),
     ("recon_failure_anatomy",        _plot_failure_anatomy),
+    ("recon_component_error",        _plot_component_error),
 ]
 
 DATASET_LEVEL_FIGURE_KEYS = ["recon_error_vs_signal_properties"]
@@ -2200,7 +2513,9 @@ def _synthetic_results(seed: int = 0) -> dict:
         if multi:
             r["spectrum_df"] = _spectrum_table(rdf, heads)
         r["profiles"] = _profiles(t, preds)
-        r["_arrays"] = {"target": t, "preds": preds}
+        # The fixture keeps every sample, so the figure subsample is the identity map.
+        r["_arrays"] = {"target": t, "preds": preds, "index": np.arange(n),
+                        "n_kept": n, "n_total": n}
         r["reference"] = {
             "ladder": list(ref_ks), "bottleneck_k": FE_BOTTLENECK_K, "length": L,
             "sample_spacing": L / float(FE_BOTTLENECK_K),
@@ -2290,6 +2605,26 @@ def _selftest(out_dir: str) -> int:
         ("an all-but-constant target std must count as collapsed",
          all(recon_analysis.contrast_is_collapsed(
              by_alias[a]["_arrays"]["target"].std(axis=1)) for a in by_alias)),
+    ]
+
+    # Component budget: the planted bad component must dominate its dataset's error, and
+    # the share of error must be what says so - its sample count never changes.
+    cdf = recon_analysis.component_error_table(
+        by_alias["multi_ch"]["results_df"], ["fe", "proj", "tr"])
+    worst = (cdf.sort_values("proj_error_share", ascending=False).iloc[0]
+             if len(cdf) else None)
+    flat = recon_analysis.component_error_table(
+        by_alias["in_dist"]["results_df"], ["fe", "proj", "tr"])
+    checks += [
+        ("the planted bad component must carry most of its dataset's error budget",
+         worst is not None and worst["comp"] == 3 and worst["proj_error_share"] > 0.5),
+        ("and must be flagged as carrying well over its share of the samples",
+         worst is not None and worst["proj_budget_lift"] > _COMP_LIFT_MARK),
+        ("the mean-predictor head must spread its error evenly across components",
+         worst is not None
+         and abs(float(cdf["tr_budget_lift"].max()) - 1.0) < 0.35),
+        ("single-component data has no component axis, so no table",
+         isinstance(flat, pd.DataFrame) and flat.empty),
     ]
     for msg, ok in checks:
         print("  %s  %s" % ("PASS" if ok else "FAIL", msg))

@@ -758,8 +758,16 @@ def _stratified_table(rdf: pd.DataFrame, pathways: list, axes: list) -> pd.DataF
         # Categorical only when the axis genuinely has few levels. peak_count is nominally
         # discrete but routinely takes 50+ distinct values on real spectra, which would
         # produce an unreadable 50-tick panel; quantile-bin those instead.
-        categorical = (axis in ("comp", "n_comps", "n_comps_in_split", "peak_count")
-                       and len(uniq) <= 12)
+        # Identity axes name a class; a count axis measures one. Quantile-binning an
+        # identity produces labels like "comp = 0-6", which invents an ordering this
+        # eval's own caveat says does not exist - and on sampled_data (28 components) it
+        # blurred away exactly the two components that carry 84% of the dataset's error.
+        # Above the readable cap they are omitted here instead, and the component figure
+        # covers them properly.
+        identity = axis in ("comp", "n_comps", "n_comps_in_split", "dataset_id")
+        categorical = (identity or axis == "peak_count") and len(uniq) <= 12
+        if identity and not categorical:
+            continue
         if categorical:
             bins = values.copy()
             if len(uniq) < 2:
@@ -1188,7 +1196,9 @@ def run(
     # Raw signals for the hexbin / calibration figures — a bounded subsample, see
     # _figure_subsample. Nothing serializes the results dict, and the CSV pass only
     # touches DataFrames.
-    out["_arrays"] = {"target": kept_target, "preds": kept_preds,
+    # `index` maps each kept signal back to its results_df row, so a figure can join the
+    # per-sample metadata (component index above all) onto the raw signals it draws.
+    out["_arrays"] = {"target": kept_target, "preds": kept_preds, "index": fig_idx,
                       "n_kept": len(kept_target), "n_total": len(target)}
 
     # Example panel for the overlay plot (deterministic pick)

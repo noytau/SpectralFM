@@ -33,6 +33,10 @@ CONCENTRATION_FACTOR = 3.0
 # rather than a coincidence.
 TAIL_LIFT_MIN = 3.0
 TAIL_SHARE_MIN = 0.5
+# A component carrying this many times its share of a dataset's error budget is worth
+# naming; together they need this share of the budget before the finding is worth making.
+COMP_LIFT_MIN = 2.0
+COMP_BUDGET_MIN = 0.25
 
 _SHORT = {"fe": "FE", "proj": "projection", "tr": "transformer"}
 
@@ -361,6 +365,31 @@ def observations(results: dict) -> list:
                 "is a failure mode with an identity, not a heavy tail to average over."
                 % ("%.0f%%" % (100 * cause["share"]), cause["axis"], levels,
                    cause["lift"], "their" if cause["n_levels"] > 1 else "its"))
+
+    # ── Which components own the error budget ────────────────────────────────
+    budgets = []
+    for ds, r in by.items():
+        for h in (r.get("pathways") or []):
+            b = _component_budget(r, h)
+            if b and b["share"] >= COMP_BUDGET_MIN:
+                budgets.append((ds, h, b))
+    if budgets:
+        ds, h, b = max(budgets, key=lambda t: t[2]["share"])
+        comps = " and ".join("`%s`" % c for c in b["comps"])
+        out.append(
+            "**%s of the error on `%s` comes from %d of its %d components** — %s, %.1f%% "
+            "of its samples carrying %.0f%% of its error (%s decoder). Their median error "
+            "is %.0fx the dataset's own. Everything else in that dataset reconstructs "
+            "normally; the average does not."
+            % ("%.0f%%" % (100 * b["share"]), ds, b["n_comps"], b["total"], comps,
+               100 * b["sample_share"], 100 * b["share"], _SHORT.get(h, h),
+               b["median_ratio"]))
+    elif any(_component_budget(r, h) is not None
+             for r in by.values() for h in (r.get("pathways") or [])):
+        out.append(
+            "**No component owns its dataset's error budget** — every component carries "
+            "roughly the share of the error its sample count accounts for, so failure is "
+            "a property of the signals rather than of a particular component class.")
     return out
 
 
@@ -412,6 +441,36 @@ def _tail_rows(by: dict) -> list:
             if np.isfinite(share):
                 rows.append((ds, h, float(share), frac))
     return rows
+
+
+def _component_budget(r: dict, head: str):
+    """
+    The components carrying more than their share of a dataset's error, and how much.
+
+    Uses the share of total squared error rather than a median: a component can sit at an
+    unremarkable median and still own a dataset through its tail, and the error budget is
+    what a training-side fix would actually move.
+    """
+    from .recon_analysis import component_error_table
+
+    rdf = r.get("results_df")
+    if not isinstance(rdf, pd.DataFrame) or "comp" not in rdf.columns:
+        return None
+    cdf = component_error_table(rdf, r.get("pathways") or [])
+    share_col, lift_col = f"{head}_error_share", f"{head}_budget_lift"
+    if not len(cdf) or share_col not in cdf.columns:
+        return None
+    hot = cdf[cdf[lift_col] >= COMP_LIFT_MIN].sort_values(share_col, ascending=False)
+    if hot.empty:
+        return None
+    return {"comps": [("%d" % c) if float(c).is_integer() else ("%g" % c)
+                      for c in hot["comp"].head(4)],
+            "n_comps": int(len(hot)), "total": int(len(cdf)),
+            "share": float(hot[share_col].sum()),
+            "sample_share": float(hot["sample_share"].sum()),
+            "lift": float(hot[lift_col].max()),
+            "median_ratio": (float(hot[f"{head}_mse_median"].max()
+                                   / max(rdf[f"{head}_mse"].median(), 1e-12)))}
 
 
 def _top_tail_cause(r: dict):
@@ -602,6 +661,27 @@ def next_steps(results: dict, config=None) -> list:
                 "explains them, so the next step is to look at the members directly — "
                 "`recon_df.csv` has per-sample error alongside every descriptor."
                 % (ds, 100 * frac, 100 * share))
+
+    # ── What the component budget implies ────────────────────────────────────
+    budgets = []
+    for ds, r in by.items():
+        for h in (r.get("pathways") or []):
+            b = _component_budget(r, h)
+            if b and b["share"] >= COMP_BUDGET_MIN:
+                budgets.append((ds, h, b))
+    if budgets:
+        ds, h, b = max(budgets, key=lambda t: t[2]["share"])
+        comps = " and ".join("`%s`" % c for c in b["comps"])
+        out.append(
+            "**Decide what components %s of `%s` are before anything else on that dataset.** "
+            "They are %.1f%% of its samples and %.0f%% of its error, so every aggregate "
+            "over `%s` is mostly a statement about them — including the depth ordering, "
+            "which is the one place this run disagrees with the others. Look at the traces "
+            "in the component figure and settle whether they are a real signal class the "
+            "model should learn or corrupt data that should be excluded; the answer picks "
+            "between reweighting and dropping, and `recon_component_error.csv` has the "
+            "per-component numbers either way."
+            % (comps, ds, 100 * b["sample_share"], 100 * b["share"], ds))
 
     # The standing open question this eval cannot answer on its own.
     out.append(
