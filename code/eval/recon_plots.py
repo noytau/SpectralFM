@@ -158,6 +158,8 @@ _GROUP_LABEL = {
     "single": "single-component (one wav = one sample)",
     "multi":  "multi-component (sample = all wavs sharing a spec index)",
 }
+# Same distinction where a panel title has no room for the parenthetical.
+_GROUP_SHORT = {"single": "single-component", "multi": "multi-component"}
 
 _REF_COLOR = "#b0b0b0"
 
@@ -1281,8 +1283,12 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             if c == 0:
                 ax.set_ylabel("%s\n\npredicted value at a bin" % _ds_label(r, short=True),
                               fontsize=8)
-            ax.set_title("%s — %s" % (PATHWAY_SHORT[k], group), fontsize=8.5,
-                         color=_head_text_color(k), fontweight="bold")
+            # Name the DATASET here, not just the component group: the grid has two
+            # single-component rows and two multi-component ones, so a group-only title
+            # repeats itself over different data and leaves the row unidentifiable.
+            ax.set_title("%s\n%s — %s" % (PATHWAY_SHORT[k], _ds_label(r, short=True),
+                                          _GROUP_SHORT[group]),
+                         fontsize=8.5, color=_head_text_color(k), fontweight="bold")
             ax.legend(fontsize=6, loc="upper left", framealpha=0.75)
             if _STYLE != "eink":
                 # The colourbars cost a quarter of the width and the density scale is not
