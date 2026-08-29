@@ -452,6 +452,15 @@ def component_error_table(rdf: pd.DataFrame, pathways: list,
             row[f"{k}_error_share"] = share
             row[f"{k}_budget_lift"] = (share / row["sample_share"]
                                        if row["sample_share"] > 0 else float("nan"))
+            # The failure SIGNATURE, not just its size. A component can be bad by hedging
+            # toward the mean (amplitude far below 1, correlation still high) or by
+            # emitting something large and unrelated (amplitude above 1, correlation at
+            # zero, R2 deeply negative) - opposite problems with opposite fixes, and MSE
+            # alone cannot tell them apart.
+            for extra in ("r2", "pearson", "amp_ratio"):
+                col = f"{k}_{extra}"
+                if col in g.columns:
+                    row[f"{k}_{extra}_median"] = float(g[col].median())
         for f in feats:
             row[f] = float(g[f].median())
         rows.append(row)

@@ -376,14 +376,28 @@ def observations(results: dict) -> list:
     if budgets:
         ds, h, b = max(budgets, key=lambda t: t[2]["share"])
         comps = " and ".join("`%s`" % c for c in b["comps"])
+        # Name the failure MODE too. "Large error" is compatible with two opposite
+        # behaviours, and the fix differs between them.
+        mode = ""
+        r2, pear, amp = b.get("r2"), b.get("pearson"), b.get("amp_ratio")
+        if all(v is not None and np.isfinite(v) for v in (r2, pear, amp)):
+            if amp > 1.2 and pear < 0.3:
+                mode = (" On those components the decoder is not hedging toward the mean, "
+                        "it is doing the opposite: amplitude %.1fx the target, correlation "
+                        "%.2f, R\u00b2 %.0f. The output is large and unrelated to the "
+                        "signal, and this is the only place in the run where R\u00b2 goes "
+                        "negative at all." % (amp, pear, r2))
+            elif amp < 0.6:
+                mode = (" On those components the decoder has collapsed toward a flat "
+                        "output: amplitude %.1fx the target, correlation %.2f." % (amp, pear))
         out.append(
             "**%s of the error on `%s` comes from %d of its %d components** — %s, %.1f%% "
             "of its samples carrying %.0f%% of its error (%s decoder). Their median error "
-            "is %.0fx the dataset's own. Everything else in that dataset reconstructs "
+            "is %.0fx the dataset's own.%s Everything else in that dataset reconstructs "
             "normally; the average does not."
             % ("%.0f%%" % (100 * b["share"]), ds, b["n_comps"], b["total"], comps,
                100 * b["sample_share"], 100 * b["share"], _SHORT.get(h, h),
-               b["median_ratio"]))
+               b["median_ratio"], mode))
     elif any(_component_budget(r, h) is not None
              for r in by.values() for h in (r.get("pathways") or [])):
         out.append(
@@ -463,14 +477,19 @@ def _component_budget(r: dict, head: str):
     hot = cdf[cdf[lift_col] >= COMP_LIFT_MIN].sort_values(share_col, ascending=False)
     if hot.empty:
         return None
-    return {"comps": [("%d" % c) if float(c).is_integer() else ("%g" % c)
-                      for c in hot["comp"].head(4)],
-            "n_comps": int(len(hot)), "total": int(len(cdf)),
-            "share": float(hot[share_col].sum()),
-            "sample_share": float(hot["sample_share"].sum()),
-            "lift": float(hot[lift_col].max()),
-            "median_ratio": (float(hot[f"{head}_mse_median"].max()
-                                   / max(rdf[f"{head}_mse"].median(), 1e-12)))}
+    out = {"comps": [("%d" % c) if float(c).is_integer() else ("%g" % c)
+                     for c in hot["comp"].head(4)],
+           "n_comps": int(len(hot)), "total": int(len(cdf)),
+           "share": float(hot[share_col].sum()),
+           "sample_share": float(hot["sample_share"].sum()),
+           "lift": float(hot[lift_col].max()),
+           "median_ratio": (float(hot[f"{head}_mse_median"].max()
+                                  / max(rdf[f"{head}_mse"].median(), 1e-12)))}
+    for extra in ("r2", "pearson", "amp_ratio"):
+        col = f"{head}_{extra}_median"
+        if col in hot.columns:
+            out[extra] = float(hot[col].median())
+    return out
 
 
 def _top_tail_cause(r: dict):

@@ -575,7 +575,12 @@ _FIG_DOC = {
             "each component carries against what share of the samples it contributes "
             "(their ratio is the xN on each bar), whether a bad component is uniformly "
             "bad or has its own tail, what a typical sample of it actually looks like, "
-            "and which signal property separates the bad components from the rest. "
+            "and which signal property separates the bad components from the rest. Each "
+            "example trace is labelled with that component's failure signature: R-squared "
+            "against the flat-line baseline, the amplitude ratio, and the correlation "
+            "with the target - an amplitude far below 1 with a high correlation is a "
+            "decoder hedging toward the mean, while an amplitude above 1 with a "
+            "correlation near zero is one emitting something large and unrelated. "
             "Heads are named in short here; what each one taps and decodes with is "
             "spelled out in the error-distribution figure."
         ),
@@ -2253,16 +2258,28 @@ def _plot_component_error(by_alias: dict, out_dir: str) -> list:
                                           - np.median(mse_of_kept[where])))]
             tgt, prd = arrays["target"][pick], arrays["preds"][focus_head][pick]
             if step is None:
-                step = 1.35 * float(np.ptp(np.concatenate([tgt, prd])) or 1.0)
+                step = 1.55 * float(np.ptp(np.concatenate([tgt, prd])) or 1.0)
             off = rank * step
             ax.plot(tgt + off, color="#000000", lw=1.0,
                     label="target" if not drawn else None)
             ax.plot(prd + off, color=_HEAD_COLOR[focus_head], ls=_HEAD_LS[focus_head],
                     lw=1.3, label=PATHWAY_SHORT[focus_head] if not drawn else None)
-            ax.text(2, off + 0.44 * step, "comp %s — median MSE %.3g"
+            row = fdf.loc[fdf["comp"] == c]
+            sig = ""
+            if len(row):
+                row = row.iloc[0]
+                bits = []
+                for col, fmt in ((f"{focus_head}_r2_median", "R\u00b2 %.1f"),
+                                 (f"{focus_head}_amp_ratio_median", "amplitude %.1fx"),
+                                 (f"{focus_head}_pearson_median", "r %.2f")):
+                    if col in row.index and np.isfinite(row[col]):
+                        bits.append(fmt % row[col])
+                if bits:
+                    sig = "\n" + ", ".join(bits)
+            ax.text(2, off + 0.40 * step, "comp %s — median MSE %.3g%s"
                     % (("%d" % c) if float(c).is_integer() else ("%g" % c),
-                       float(np.median(mse_of_kept[where]))),
-                    fontsize=6.6, bbox=dict(fc="white", ec="none", alpha=0.75, pad=1.0))
+                       float(np.median(mse_of_kept[where])), sig),
+                    fontsize=6.4, bbox=dict(fc="white", ec="none", alpha=0.78, pad=1.0))
             drawn = True
     if drawn:
         if step:
