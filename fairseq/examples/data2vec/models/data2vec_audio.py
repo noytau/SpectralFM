@@ -1604,7 +1604,13 @@ class Data2VecAudioModel(BaseFairseqModel):
         if self.post_extract_proj is not None:
             pe_in = features.detach().float()
             features = self.post_extract_proj(features)
-            proj_seq = features  # pre-mask projection output, for recon_proj
+            # clone() is load-bearing: dropout_input is a no-op at p=0 (returns the
+            # same tensor object) and apply_mask writes mask_emb in place via
+            # index_put, so a bare alias here gets 40% of its frames overwritten
+            # before the recon_proj loss reads it. Same hazard the EMA path guards
+            # against with pre_encoder_features.clone() below. Keep gradients
+            # flowing (no detach) — recon_proj must train the projection.
+            proj_seq = features.clone()  # pre-mask projection output, for recon_proj
             pe_out = features.detach().float()
             post_extract_stats = {
                 "post_extract_in_mean": pe_in.mean(),
