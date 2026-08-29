@@ -1302,9 +1302,16 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
         # scatter degenerates into a single vertical strip. The ratio std(pred)/std(target)
         # carries exactly the same information and stays readable, so plot its
         # distribution instead when that happens.
+        #
+        # The test has to be RELATIVE, not an absolute range. Measured target std spans
+        # 0.9837-0.99999 on sampled_data - every value is still 1.0 for plotting purposes,
+        # but the absolute spread (1.6e-2) clears an absolute 1e-4 threshold, so the old
+        # test took the scatter branch and drew exactly the vertical strip it existed to
+        # avoid. contrast_is_collapsed is the same robust p99/p1 predicate the skill and
+        # stratification figures already use for this, so all of them now agree.
         ax = axes[rowi][n_cols - 1]
         ts = t.std(axis=1)
-        degenerate = ts.size > 0 and (ts.max() - ts.min()) < 1e-4 * max(ts.max(), 1e-9)
+        degenerate = recon_analysis.contrast_is_collapsed(ts)
         range_modes.add("ratio-histogram" if degenerate else "std-vs-std scatter")
 
         if degenerate:
@@ -2124,7 +2131,13 @@ def _synthetic_results(seed: int = 0) -> dict:
         L = 245
         base = np.cumsum(rng.normal(0, 1, (n, L)), axis=1)
         base += 3.0 * np.exp(-0.5 * ((np.arange(L) - rng.integers(40, 200, (n, 1))) / 6.0) ** 2)
-        t = ((base - base.mean(1, keepdims=True)) / base.std(1, keepdims=True)).astype(np.float32)
+        t = (base - base.mean(1, keepdims=True)) / base.std(1, keepdims=True)
+        # Real layer-normed targets do NOT come back at std exactly 1: measured across the
+        # four datasets they span 0.9837-0.99999. Reproducing that here is what makes the
+        # figures' "has this axis collapsed?" tests face the case they actually meet - an
+        # exactly-constant fixture let an absolute-range test pass that a relative one had
+        # to catch.
+        t = (t * rng.uniform(0.984, 1.0, (n, 1))).astype(np.float32)
         # Multi-component data is harder here, mirroring the real generalization gap.
         noise = 0.22 if multi else 0.10
         # fe is built FROM a reference rung, so its effective resolution is known before
@@ -2271,6 +2284,12 @@ def _selftest(out_dir: str) -> int:
          abs(by_alias["multi_ch"]["tail"]["per_head"]["tr"]["share"] - 0.05) < 0.03),
         ("contrast must be dropped as degenerate when targets are layer-normed",
          "contrast" in (by_alias["in_dist"]["tail"].get("dropped_axes") or [])),
+        # Target std spans ~1.6% here, as it does on real data. That is not usable as a
+        # scatter axis, and an absolute-range test called it usable - which is how the
+        # amplitude figure came to draw a vertical strip on a real run.
+        ("an all-but-constant target std must count as collapsed",
+         all(recon_analysis.contrast_is_collapsed(
+             by_alias[a]["_arrays"]["target"].std(axis=1)) for a in by_alias)),
     ]
     for msg, ok in checks:
         print("  %s  %s" % ("PASS" if ok else "FAIL", msg))
