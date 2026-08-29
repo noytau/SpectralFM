@@ -223,12 +223,31 @@ def observations(results: dict) -> list:
                top["mse_mean"], top["mse_median"], extra))
 
     # 5. Amplitude, and 6. high-frequency fidelity — both invisible in MSE.
+    #
+    # The dataset-level verdict is a median, and a component can contradict it outright:
+    # sampled_data's amplitude ratio is 0.96 overall while two of its components sit at
+    # 3.9. Saying "everywhere" without checking would be issuing a claim this same section
+    # goes on to refute two bullets later.
+    amp_comp = None
+    for ds_, r_ in by.items():
+        for h_ in (r_.get("pathways") or []):
+            b_ = _component_budget(r_, h_)
+            a_ = (b_ or {}).get("amp_ratio")
+            if a_ is not None and np.isfinite(a_) and abs(a_ - 1.0) > AMP_TOLERANCE:
+                if amp_comp is None or abs(a_ - 1.0) > abs(amp_comp[2] - 1.0):
+                    amp_comp = (ds_, " and ".join("`%s`" % c for c in b_["comps"]), a_)
+
     amp_off = S[(S["amp_ratio_median"] - 1).abs() > AMP_TOLERANCE]
     if amp_off.empty:
+        qualifier = ""
+        if amp_comp:
+            qualifier = (" That is a per-dataset median, though: on `%s`, components %s "
+                         "run at %.1fx the target's amplitude — see the component figure."
+                         % (amp_comp[0], amp_comp[1], amp_comp[2]))
         out.append(
-            "**Dynamic range survives everywhere** — amplitude ratio stays within %.0f%% "
-            "of 1 for every head and dataset, so no head is hedging toward a flat output."
-            % (100 * AMP_TOLERANCE))
+            "**Dynamic range survives at the dataset level** — amplitude ratio stays "
+            "within %.0f%% of 1 for every head and dataset, so no head is hedging toward "
+            "a flat output overall.%s" % (100 * AMP_TOLERANCE, qualifier))
     else:
         row = amp_off.loc[(amp_off["amp_ratio_median"] - 1).abs().idxmax()]
         out.append(
@@ -656,12 +675,24 @@ def next_steps(results: dict, config=None) -> list:
             "profile against the reference's would say whether the loss is uniform or "
             "sits at particular positions." % (_SHORT.get(h, h), ds, k, b))
 
+    # Which components own each dataset's error budget - needed by the tail block below,
+    # which stands down when this has already named the same components.
+    budgets = []
+    for ds_, r_ in by.items():
+        for h_ in (r_.get("pathways") or []):
+            b_ = _component_budget(r_, h_)
+            if b_ and b_["share"] >= COMP_BUDGET_MIN:
+                budgets.append((ds_, h_, b_))
+
     # ── What the tail implies ────────────────────────────────────────────────
     tails = _tail_rows(by)
     if tails:
         ds, h, share, frac = max(tails, key=lambda t: t[2])
         cause = _top_tail_cause(by.get(ds, {}))
-        if cause and share >= CONCENTRATION_FACTOR * frac:
+        # If the component-budget step below already names the same components on the same
+        # dataset, this would be the same instruction twice in one list.
+        named_by_budget = any(d == ds for d, _, _ in budgets) if budgets else False
+        if cause and share >= CONCENTRATION_FACTOR * frac and not named_by_budget:
             levels = " and ".join("`%s`" % v for v in cause["levels"])
             many = cause["n_levels"] > 1
             out.append(
@@ -682,12 +713,6 @@ def next_steps(results: dict, config=None) -> list:
                 % (ds, 100 * frac, 100 * share))
 
     # ── What the component budget implies ────────────────────────────────────
-    budgets = []
-    for ds, r in by.items():
-        for h in (r.get("pathways") or []):
-            b = _component_budget(r, h)
-            if b and b["share"] >= COMP_BUDGET_MIN:
-                budgets.append((ds, h, b))
     if budgets:
         ds, h, b = max(budgets, key=lambda t: t[2]["share"])
         comps = " and ".join("`%s`" % c for c in b["comps"])

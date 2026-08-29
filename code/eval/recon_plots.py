@@ -2160,10 +2160,16 @@ def _plot_component_error(by_alias: dict, out_dir: str) -> list:
                     continue
                 dy = 12 + 20 * (marked % 2)
                 marked += 1
+                # Centred text on the first or last component runs off the panel, and the
+                # offenders are often exactly there.
+                near_end = xi / max(len(comps) - 1, 1)
+                ha = "left" if near_end < 0.12 else ("right" if near_end > 0.88
+                                                     else "center")
+                dx = {"left": -6, "right": 6, "center": 0}[ha]
                 ax.annotate("comp %s\n%.0fx its share" % (
                     ("%d" % c) if float(c).is_integer() else ("%g" % c), lift),
-                    (xi, val), textcoords="offset points", xytext=(0, dy),
-                    ha="center", fontsize=6.4, color=_accent(), fontweight="bold",
+                    (xi, val), textcoords="offset points", xytext=(dx, dy),
+                    ha=ha, fontsize=6.4, color=_accent(), fontweight="bold",
                     arrowprops=dict(arrowstyle="-", color=_accent(), lw=0.6,
                                     shrinkA=0, shrinkB=3))
         ax.set_yscale("log")
