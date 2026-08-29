@@ -373,8 +373,8 @@ _FIG_DOC = {
             "scale. The rightmost column plots each sample's prediction standard deviation "
             "against its target standard deviation, with y = x and y = 0.5x guides - or, "
             "when normalize=True has made every target's standard deviation 1, the "
-            "distribution of the ratio std(prediction)/std(target) with a line at 1. The "
-            "panel title says which."
+            "distribution of the ratio std(prediction)/std(target) with a line at 1. Its "
+            "column header says which."
         ),
         "read": (
             "a tight cloud along y = x is faithful reproduction; a cloud FLATTER than y = x, "
@@ -1365,15 +1365,20 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             ax.set_xlim(lim_lo, lim_hi)
             ax.set_ylim(lim_lo, lim_hi)
             ax.set_xlabel("target value at a bin", fontsize=8)
+            # This is a datasets x heads grid, so naming both in every panel repeats one
+            # of them four times and the other three times - and the repeated half is the
+            # bold one, which is what made four different datasets look alike. The head
+            # is the column and gets a header on the top row; the dataset is the row and
+            # gets a label down the left.
             if c == 0:
-                ax.set_ylabel("%s\n\npredicted value at a bin" % _ds_label(r, short=True),
-                              fontsize=8)
-            # Name the DATASET here, not just the component group: the grid has two
-            # single-component rows and two multi-component ones, so a group-only title
-            # repeats itself over different data and leaves the row unidentifiable.
-            ax.set_title("%s\n%s — %s" % (PATHWAY_SHORT[k], _ds_label(r, short=True),
-                                          _GROUP_SHORT[group]),
-                         fontsize=8.5, color=_head_text_color(k), fontweight="bold")
+                ax.set_ylabel("%s\n%s\n\npredicted value at a bin"
+                              % (_ds_label(r, short=True), _GROUP_SHORT[group]),
+                              fontsize=8.5, fontweight="bold")
+            else:
+                ax.set_ylabel("predicted value at a bin", fontsize=8)
+            if rowi == 0:
+                ax.set_title(PATHWAY_SHORT[k], fontsize=10,
+                             color=_head_text_color(k), fontweight="bold", pad=8)
             ax.legend(fontsize=6, loc="upper left", framealpha=0.75)
             if _STYLE != "eink":
                 # The colourbars cost a quarter of the width and the density scale is not
@@ -1416,9 +1421,10 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                        label="ratio = 0.5 (half the range lost)")
             ax.set_xlabel("amplitude ratio = std(prediction) / std(target)", fontsize=8)
             ax.set_ylabel("number of samples", fontsize=8)
-            ax.set_title("Per-sample dynamic range — %s\n(target std is 1 for every "
-                         "sample under normalize=True,\nso the ratio is plotted directly)"
-                         % _ds_label(r, short=True), fontsize=8)
+            if rowi == 0:
+                ax.set_title("Per-sample dynamic range\n(target std is 1 under "
+                             "normalize=True, so the ratio\nis plotted directly)",
+                             fontsize=9, fontweight="bold", pad=8)
         else:
             hi = float(ts.max() * 1.15) if ts.size else 1.0
             for k in heads:
@@ -1434,8 +1440,9 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             ax.set_ylim(0, hi)
             ax.set_xlabel("target std. dev. of this sample", fontsize=8)
             ax.set_ylabel("prediction std. dev.", fontsize=8)
-            ax.set_title("Per-sample dynamic range — %s" % _ds_label(r, short=True),
-                         fontsize=8.5)
+            if rowi == 0:
+                ax.set_title("Per-sample dynamic range", fontsize=9, fontweight="bold",
+                             pad=8)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=6, loc="upper left")
 
