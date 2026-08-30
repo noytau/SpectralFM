@@ -153,11 +153,9 @@ class EvalConfig:
     recon_proj_ckpt: Optional[str] = None    # native ckpt carrying a proj_recon_decoder
     recon_tr_ckpt: Optional[str] = None      # TR recon ckpt: transformer_mirror/backbone_ckpt keys
     recon_normalize: Optional[bool] = None   # None → use flag recorded in ckpt
-    # 1000, not 200: the dataset-level figures are distributions, stratified medians and
-    # per-spectrum aggregates, and 200 samples spread over five quantile bins (and, on
-    # multi-component data, over component indices) leaves bins too thin to quote.
-    # 0 means no cap: evaluate every sample loaded. Metrics and profiles are streamed,
-    # so memory is bounded by the loaded signals rather than by N x heads x 245.
+    # 1000, not 200: the dataset-level figures are distributions and per-component
+    # aggregates, which 200 samples leave too thin to quote. 0 means no cap — metrics and
+    # profiles are streamed, so memory is bounded by the loaded signals.
     recon_max_samples: int = 1000
     # Raw signals kept for the figures that plot individual points (hexbin, dynamic
     # range). Everything else covers all N; a few thousand points already saturate a

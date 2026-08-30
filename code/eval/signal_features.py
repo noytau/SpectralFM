@@ -1,16 +1,11 @@
 """
-Per-sample signal descriptors used as stratification axes for reconstruction plots.
-No fairseq dependency (numpy + scipy only).
+Per-sample signal descriptors used to group and explain reconstruction error.
+numpy + scipy only — `code/eval/` must stay importable without fairseq, so the maths is
+copied from `code/eval_metrics.py:compute_signal_processing_features` rather than
+imported across the package boundary.
 
-Ported from `code/eval_metrics.py:compute_signal_processing_features` ('peaks',
-'centroid' and 'moments' modes), reshaped from "feature matrix for a probe" into
-"named scalar per sample for grouping". The original lives outside the `code/eval/`
-package, which must stay independently importable, so the relevant maths is copied
-here rather than imported across the package boundary.
-
-Every descriptor is computed on the *target* signal — the same tensor the decoder was
-asked to reproduce (post per-sample layer_norm when the checkpoint recorded
-`normalize`), so error-vs-property plots relate like to like.
+Every descriptor is computed on the target the decoder was asked to reproduce (post
+layer_norm when the checkpoint recorded `normalize`).
 """
 from __future__ import annotations
 
@@ -30,14 +25,6 @@ FEATURE_LABELS = {
 }
 
 # Axes offered as stratifiers, in the order they should be plotted.
-# `bandwidth` and `baseline` were computed from the start but left out of this list, so
-# they never reached a figure. The tail analysis then found them to be two of the three
-# strongest separators of the worst-reconstructed samples on `sampled_data` (tail median
-# bandwidth 84 against 64 for the rest), which is reason enough to stratify on them.
-STRATIFIER_ORDER = ["contrast", "peak_count", "peak_prominence", "centroid",
-                    "peak_position", "bandwidth", "baseline"]
-
-
 def compute_signal_features(signals: np.ndarray) -> pd.DataFrame:
     """
     Describe each signal with the scalars used to stratify reconstruction error.
@@ -97,10 +84,8 @@ def quantile_bins(values: np.ndarray, n_bins: int = 5) -> tuple:
     if ok.sum() < n_bins:
         return out, []
 
-    # An effectively-constant axis must be dropped, not split into bins that all carry
-    # the same label. This is not hypothetical: `normalize=True` layer-norms every target
-    # to unit variance, so `contrast` is 1.0 for every sample up to float32 noise, and
-    # naive quantiles would still produce five distinct-but-identical-looking edges.
+    # An effectively-constant axis is dropped, not split into identically-labelled bins.
+    # `contrast` is exactly that whenever normalize=True layer-norms every target.
     span = float(v[ok].max() - v[ok].min())
     if span <= 1e-6 * max(abs(float(np.median(v[ok]))), 1.0):
         return out, []

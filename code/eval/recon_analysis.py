@@ -1,33 +1,14 @@
 """
-Analysis helpers shared by the reconstruction figures and the generated findings.
+Analysis shared by the reconstruction figures and the generated findings, so both
+compute the same numbers. numpy/pandas/scipy only — no matplotlib, no fairseq.
 
-Pure numpy/pandas/scipy — no matplotlib, no fairseq. It exists so `recon_plots.py`
-(figures) and `findings.py` (prose) compute the same numbers from the same code instead
-of one importing the other, and so `evaluations/signal_reconstruction.py` can build the
-reference operators without pulling in a plotting stack.
+Reference reconstructions rebuild a target from K evenly spaced samples of itself, giving
+a baseline at a known information rate; the feature extractor delivers 47 timesteps, so
+K = 47 is the rate each head decodes from. Reading a head's error onto that curve gives
+its effective resolution. The reference is an oracle at its sample points, so it bounds
+what temporal downsampling costs, not what a model could achieve.
 
-Two families of helper live here:
-
-**Reference reconstructions** (`resample_operator`, `lowpass_operator`,
-`effective_resolution`). R² = 0 — a flat line at each sample's own mean — is a very weak
-baseline, and every head clears it comfortably, which makes "the head is doing real work"
-an easy and uninformative conclusion. A fair reference is one that discards the same
-amount of information the model's bottleneck does: the conv feature extractor compresses
-245 bins to 47 timesteps, so linear interpolation through 47 evenly spaced points of the
-target is a reconstruction at the same temporal rate. Comparing a head against a ladder of
-such references converts its MSE into an *effective resolution* — the number of
-independent samples of the signal it actually delivers.
-
-The interpolant is an ORACLE at those points: it reads true target values the model never
-sees, and the real bottleneck is 47 timesteps x 512/768 channels rather than 47 scalars.
-So this is a bound on what temporal downsampling alone costs, not on what the model could
-achieve. Its use is the negative direction: a head below the reference at its own rate
-cannot blame the bottleneck.
-
-**Tail anatomy** (`concentration`, `lorenz_curve`, `lift_table`, `robust_effect`,
-`tail_analysis`). Distribution figures stop at "there is a tail". These name it: how much
-of the total error the worst few per cent carry, and which component index, source dataset
-or signal property that tail is made of.
+Tail anatomy names what the worst few per cent of samples are made of.
 """
 from __future__ import annotations
 
@@ -38,16 +19,11 @@ from .signal_features import FEATURE_LABELS, quantile_bins
 
 # ── Reference ladder ─────────────────────────────────────────────────────────
 
-# Resolutions to build reference reconstructions at. Spans "much coarser than the
-# bottleneck" to "much finer", with 47 included exactly because that is the rate the FE
-# conv stack actually delivers. The very coarse rungs are not decoration: multi_channel
-# components are close to smooth ramps, so interpolation through nine points already has
-# less error than any head, and without rungs below that every head would clamp to the
-# floor and the figure would report a bound instead of a measurement.
+# Coarse rungs matter: multi_channel components are near-smooth ramps, so interpolation
+# through nine points already beats every head and without lower rungs they all clamp.
 DEFAULT_REF_LADDER = (3, 5, 7, 9, 13, 17, 25, 31, 37, 47, 61, 81, 121)
 
-# The conv feature extractor maps 245 input bins to 47 timesteps, so 47 is the temporal
-# rate every head decodes from. Not a tunable — it is a property of the architecture.
+# The conv feature extractor maps 245 bins to 47 timesteps. Architecture, not a tunable.
 FE_BOTTLENECK_K = 47
 
 _TINY = 1e-30
@@ -55,9 +31,8 @@ _TINY = 1e-30
 
 def interp_matrix(src, dst) -> np.ndarray:
     """
-    Linear-interpolation weights as a matrix: `A @ v` interpolates values `v` given at
-    positions `src` onto positions `dst`. Reproduces np.interp (including its constant
-    clamping outside the source range) but applies to a whole batch in one matmul.
+    Linear-interpolation weights as a matrix: `A @ v` maps values at `src` onto `dst`.
+    Matches np.interp, including its clamping outside the source range.
     """
     src = np.asarray(src, dtype=np.float64)
     dst = np.asarray(dst, dtype=np.float64)
@@ -78,10 +53,8 @@ def interp_matrix(src, dst) -> np.ndarray:
 
 def resample_operator(length: int, k: int) -> np.ndarray:
     """
-    [length, length] operator: keep k evenly spaced samples of the signal, then linearly
-    interpolate back to full length. Downsample-then-upsample is linear, so it collapses
-    to one matrix applied as `signals @ M.T` — a single matmul per batch instead of a
-    per-row np.interp call, which matters at 136k samples x 9 rungs.
+    [length, length] operator: keep k evenly spaced samples, interpolate back to full
+    length. Linear, so it is one matmul per batch rather than a per-row np.interp.
     """
     full = np.arange(length, dtype=np.float64)
     grid = np.linspace(0.0, length - 1.0, int(k))
@@ -90,14 +63,9 @@ def resample_operator(length: int, k: int) -> np.ndarray:
 
 def lowpass_operator(length: int, k: int) -> np.ndarray:
     """
-    [length, length] operator: keep only the rFFT bins a k-point sampling could carry
-    (0 .. k//2) and zero the rest. The information-theoretic sibling of
-    `resample_operator` — an ideal band-limit rather than a piecewise-linear fit.
-
-    Neither dominates: band-limiting wins on signals that really are band-limited, while
-    interpolation wins on ones with sharp ends, which is why the multi_channel ramps come
-    out better under interpolation at fine rates. Drawing both brackets what the rate can
-    express rather than resting the comparison on one arbitrary reconstruction rule.
+    [length, length] operator: keep only the rFFT bins a k-point sampling could carry.
+    An ideal band-limit rather than a piecewise-linear fit; neither dominates, so the
+    figure draws both to bracket what the rate can express.
     """
     keep = int(k) // 2 + 1
     spec = np.fft.rfft(np.eye(length), axis=1)
@@ -116,19 +84,13 @@ def reference_operators(length: int, ladder=DEFAULT_REF_LADDER) -> dict:
 
 def effective_resolution(mse: np.ndarray, ladder, ref_mse: np.ndarray) -> dict:
     """
-    Convert a head's per-sample MSE into an effective resolution in signal samples.
+    A head's per-sample MSE read onto the reference ladder, in signal samples.
 
-    mse      [N]        the head's per-sample MSE
-    ladder   [m]        the resolutions the references were computed at
-    ref_mse  [N, m]     that sample's own reference MSE at each rung
+    ref_mse is [N, len(ladder)]: each sample is placed on its own reference curve, since
+    reference difficulty varies between samples. Interpolated in (log k, log MSE).
 
-    Each sample is placed on its OWN reference curve — reference difficulty varies a lot
-    between samples, so a shared curve would misplace them. Interpolation is in
-    (log k, log MSE), where the curve is close to straight.
-
-    Returns {'k_eff': [N], 'below': [N] bool, 'above': [N] bool} where `below` marks
-    samples worse than the coarsest rung and `above` samples better than the finest —
-    both clamped in `k_eff`, and reported so a plot can say the value is a bound.
+    Returns k_eff plus `below`/`above` flags marking samples off either end of the
+    ladder, whose k_eff is clamped and is therefore a bound.
     """
     ks = np.asarray([float(k) for k in ladder], dtype=np.float64)
     r = np.asarray(ref_mse, dtype=np.float64)
@@ -159,13 +121,9 @@ def effective_resolution(mse: np.ndarray, ladder, ref_mse: np.ndarray) -> dict:
 
 def peak_fwhm(signals: np.ndarray) -> np.ndarray:
     """
-    Full width at half maximum of each signal's tallest peak, in bins, measured from the
-    sample's own median as the floor. Used only to report what share of the population has
-    structure narrower than the reference's sample spacing — interpolation flatters smooth
-    signals, and a reader needs to know whether that applies here.
-
-    Loops in Python (the contiguous run containing the argmax does not vectorise
-    cleanly), so call it on a bounded subsample, not on a whole split.
+    FWHM of each signal's tallest peak in bins, floored at the sample median. Reports
+    whether the data has structure finer than the reference spacing. Loops, so call it
+    on a bounded subsample.
     """
     out = np.full(len(signals), np.nan)
     for i, row in enumerate(np.asarray(signals, dtype=np.float64)):
@@ -187,22 +145,13 @@ def peak_fwhm(signals: np.ndarray) -> np.ndarray:
 
 # ── Tail anatomy ─────────────────────────────────────────────────────────────
 
-# Categorical levels the lift chart will rank. Higher than the stratified-median figure's
-# cap of 12: that figure draws every bin as an x-position and needs to stay readable,
-# while this one ranks levels and shows only the top few, so it can afford `comp` on
-# `sampled_data` (28 distinct values) as real categories instead of quantile-blurring the
-# very levels the tail is made of.
 LIFT_MAX_LEVELS = 40
 
-# Identity-like axes: always categorical, because the level IS the finding ("the tail is
-# comp 26 and 29"). Quantile-binning them would blur away the very levels being named.
+# Identity axes stay categorical: the level is the finding, and binning would blur it.
 _CATEGORICAL_AXES = ("comp", "n_comps", "n_comps_in_split", "dataset_id", "worst_comp")
 
-# Count-like axes: categorical only while the cardinality stays chartable, else quantile
-# bins. `peak_count` has 33 distinct values on sampled_data, and treating those as levels
-# scattered the whole tail across levels too small to pass the support threshold - it hid
-# the single strongest discriminator on that dataset (tail median 73 local maxima against
-# 8 for the rest). Same cap the stratified-median table uses.
+# Count axes: categorical only while chartable, else quantile bins. peak_count reaches
+# 33 levels on sampled_data, too fine to pass the support threshold as categories.
 _COUNT_AXES = ("peak_count",)
 _COUNT_MAX_LEVELS = 12
 
@@ -221,12 +170,9 @@ def contrast_is_collapsed(values: np.ndarray, tol: float = 2.0) -> bool:
     """
     True when per-sample target variance carries no usable spread.
 
-    `normalize=True` layer-norms every target, forcing var(target) - and therefore the
-    `contrast` descriptor - to 1 for every sample. What survives is float noise, and
-    because that noise has a very tight IQR it can post a huge standardised effect size
-    (measured: -6.6 IQRs on `sampled_data`) while meaning nothing at all. Any axis or
-    x-axis built on target variance has to be dropped when this returns True, not
-    rescaled. Same robust p99/p1 test the skill and calibration figures already use.
+    normalize=True layer-norms every target, so var(target) is 1 for every sample and
+    what survives is float noise with a tight IQR — enough to post a huge standardised
+    effect while meaning nothing. Axes built on it must be dropped, not rescaled.
     """
     v = np.asarray(values, dtype=np.float64)
     v = v[np.isfinite(v) & (v > 0)]
@@ -248,9 +194,8 @@ def tail_mask(values: np.ndarray, frac: float) -> np.ndarray:
 
 def gini(values: np.ndarray) -> float:
     """
-    Gini coefficient of the error distribution: 0 = every sample contributes equally,
-    approaching 1 = one sample carries everything. Reported alongside the worst-x% share
-    because the share alone depends on where you cut.
+    Gini coefficient: 0 = every sample contributes equally, 1 = one carries everything.
+    Reported with the worst-x% share, which alone depends on where you cut.
     """
     v = np.sort(np.asarray(values, dtype=np.float64)[np.isfinite(values)])
     if len(v) == 0 or v.sum() <= 0:
@@ -262,8 +207,7 @@ def gini(values: np.ndarray) -> float:
 
 def concentration(values: np.ndarray, frac: float) -> dict:
     """
-    How concentrated the error is. `values` are per-sample MSE; total error is their sum,
-    so this is the share of the dataset's whole error budget carried by its worst `frac`.
+    Share of the dataset's total error carried by its worst `frac` of samples.
     """
     v = np.asarray(values, dtype=np.float64)
     v = v[np.isfinite(v)]
@@ -277,9 +221,8 @@ def concentration(values: np.ndarray, frac: float) -> dict:
 
 def lorenz_curve(values: np.ndarray, n_points: int = 300) -> tuple:
     """
-    (x, y) for the cumulative-error curve: x = share of samples ranked worst-first,
-    y = share of total error they carry. The diagonal is a perfectly even distribution.
-    Downsampled to `n_points` so a 136k-sample curve stays a small figure.
+    (x, y) cumulative-error curve: x = share of samples ranked worst-first, y = share of
+    total error. The diagonal is an even distribution. Downsampled to `n_points`.
     """
     v = np.sort(np.asarray(values, dtype=np.float64)[np.isfinite(values)])[::-1]
     if len(v) == 0 or v.sum() <= 0:
@@ -297,11 +240,9 @@ def robust_effect(tail: np.ndarray, rest: np.ndarray) -> dict:
     """
     Separation between the tail and the rest on one axis.
 
-    `effect` is the median difference in units of the whole population's IQR — NOT a
-    ratio of medians. A ratio is meaningless for any axis that crosses zero, and the
-    `baseline` descriptor does exactly that (tail median +0.31 against the rest's -0.26),
-    which produced a nonsense 3e11 "ratio" the first time this was measured by hand.
-    `ks` is the two-sample Kolmogorov-Smirnov statistic, a scale-free companion.
+    `effect` is the median difference in units of the population IQR, not a ratio of
+    medians — several descriptors cross zero, where a ratio is meaningless. `ks` is the
+    two-sample Kolmogorov-Smirnov statistic.
     """
     t = np.asarray(tail, dtype=np.float64)
     r = np.asarray(rest, dtype=np.float64)
@@ -343,9 +284,7 @@ def _levels(rdf: pd.DataFrame, axis: str, n_bins: int = 5):
         vals = sorted(col.dropna().unique(), key=lambda v: (str(type(v)), v))
         lookup = {v: i for i, v in enumerate(vals)}
         idx = col.map(lookup).to_numpy(dtype=float)
-        # Component and dataset ids arrive as floats from a merge with missing rows, and
-        # "comp = 26.0" is noise on a chart. Fall back to str() for anything non-numeric
-        # rather than letting a string level raise.
+        # Ids arrive as floats from a merge with missing rows; "comp = 26.0" is noise.
         def fmt(v):
             try:
                 f = float(v)
@@ -361,10 +300,9 @@ def lift_table(rdf: pd.DataFrame, mask: np.ndarray, axes: list,
     """
     How over-represented each level is in the tail: lift = P(level | tail) / P(level).
 
-    A level needs `min_tail` tail rows and `min_pop` population rows to get a row here —
-    otherwise a single sample in a rare category posts an enormous, meaningless lift. What
-    the thresholds exclude is returned as `pooled`, not dropped silently: a chart that
-    quietly hides half the tail reads as though it explained all of it.
+    A level needs `min_tail` tail and `min_pop` population rows, or a single sample in a
+    rare category posts a meaningless lift. What that excludes is returned as `pooled`
+    rather than dropped, so a chart cannot hide half the tail.
     """
     mask = np.asarray(mask, dtype=bool)
     rows, pooled_levels = [], 0
@@ -384,8 +322,7 @@ def lift_table(rdf: pd.DataFrame, mask: np.ndarray, axes: list,
                     pooled_by_axis[axis] = pooled_by_axis.get(axis, 0) + n_tail
                 continue
             base = n_pop / len(rdf)
-            # A level that IS the dataset carries no information: its lift is 1.0 by
-            # construction and it only crowds out the levels that mean something.
+            # A level that IS the dataset has lift 1.0 by construction; it says nothing.
             if base > 0.98:
                 continue
             share = n_tail / max(n_tail_total, 1)
@@ -400,9 +337,8 @@ def lift_table(rdf: pd.DataFrame, mask: np.ndarray, axes: list,
     df = pd.DataFrame(rows)
     if len(df):
         df = df.sort_values("lift", ascending=False).reset_index(drop=True)
-    # Each axis partitions the tail on its own, so excluded counts are reported per axis
-    # and summarised by the worst single axis. Summing across axes would have been
-    # nonsense - it can exceed the tail size, which is exactly what it first did.
+    # Each axis partitions the tail on its own, so excluded counts are per axis; summing
+    # across axes can exceed the tail size.
     worst = max(pooled_by_axis.items(), key=lambda kv: kv[1], default=(None, 0))
     return df, {"levels": pooled_levels, "n_tail_total": n_tail_total,
                 "by_axis": pooled_by_axis,
@@ -413,18 +349,14 @@ def lift_table(rdf: pd.DataFrame, mask: np.ndarray, axes: list,
 def component_error_table(rdf: pd.DataFrame, pathways: list,
                           min_n: int = 5) -> pd.DataFrame:
     """
-    Per component index: how many samples it contributes and how much of the dataset's
-    whole error budget it carries.
+    Per component index: sample count, error, and share of the dataset's error budget.
 
-    The share of ERROR is the number that matters, and it is not the median. A component
-    can sit at an unremarkable median and still dominate a dataset, or - as sampled_data's
-    comp 26 and 29 do - sit at a median 87x the dataset's and carry 84% of its total
-    squared error from 6.5% of its samples. `budget_lift` is that share divided by the
-    component's share of samples: 1.0 means it carries its own weight, 13 means it carries
-    thirteen times it.
-
-    Returns one row per component, plus the median of every signal descriptor present, so
-    a plot can put the offenders' error next to what makes them different.
+    The share of error is the number that matters, not the median — a component can look
+    unremarkable at the median and still dominate a dataset through its tail.
+    `budget_lift` is that share over the component's share of samples, so 1.0 means it
+    carries its own weight. Also returns per-component medians of every signal descriptor
+    and of r2/pearson/amp_ratio, which distinguish hedging toward the mean from emitting
+    something large and unrelated.
     """
     if "comp" not in rdf.columns or not len(rdf):
         return pd.DataFrame()
@@ -452,11 +384,6 @@ def component_error_table(rdf: pd.DataFrame, pathways: list,
             row[f"{k}_error_share"] = share
             row[f"{k}_budget_lift"] = (share / row["sample_share"]
                                        if row["sample_share"] > 0 else float("nan"))
-            # The failure SIGNATURE, not just its size. A component can be bad by hedging
-            # toward the mean (amplitude far below 1, correlation still high) or by
-            # emitting something large and unrelated (amplitude above 1, correlation at
-            # zero, R2 deeply negative) - opposite problems with opposite fixes, and MSE
-            # alone cannot tell them apart.
             for extra in ("r2", "pearson", "amp_ratio"):
                 col = f"{k}_{extra}"
                 if col in g.columns:
@@ -470,11 +397,8 @@ def component_error_table(rdf: pd.DataFrame, pathways: list,
 
 def component_focus(by_comp: dict, pathways: list) -> tuple:
     """
-    (dataset, head) whose component error budget is most unevenly distributed.
-
-    `by_comp` is {dataset: component_error_table(...)}. A dataset whose worst component
-    carries a fair share has nothing to open up; the one with the highest budget lift is
-    the one worth spending panels on.
+    (dataset, head, lift) whose component error budget is most uneven — the one worth
+    opening up. `by_comp` is {dataset: component_error_table(...)}.
     """
     best, best_lift = (None, None), -1.0
     for ds, df in by_comp.items():
@@ -494,12 +418,11 @@ def component_focus(by_comp: dict, pathways: list) -> tuple:
 def tail_analysis(rdf: pd.DataFrame, pathways: list, frac: float = 0.05,
                   feature_axes: list = None) -> dict:
     """
-    Everything the failure-anatomy figure and the findings section need about the tail.
+    Everything the failure-anatomy figure and the findings need about the tail.
 
-    The tail is defined PER HEAD — the heads do not fail on the same samples — so
-    concentration is reported for each, and the lift/effect tables are built for the head
-    whose tail is most concentrated (named in `reference_head`), which is the one worth
-    explaining. `spectrum_df` is optional and only adds the `worst_comp` axis.
+    The tail is per head — the heads do not fail on the same samples — so concentration
+    is reported for each, and the lift/effect tables are built for the most concentrated
+    one, named in `reference_head`.
     """
     feat = [c for c in (feature_axes or list(FEATURE_LABELS)) if c in rdf.columns]
     meta = [c for c in ("comp", "dataset_id", "n_comps") if c in rdf.columns]

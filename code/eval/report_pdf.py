@@ -1,23 +1,14 @@
 """
 PDF build of the reconstruction report, laid out for an e-ink reader.
 
-An e-paper panel is not a monitor: there is no colour to lean on, contrast is limited,
-refresh is slow enough that pinch-zooming is unpleasant, and the page does not reflow.
-So this build differs from the HTML in four ways:
+Differs from the HTML build in four ways, none of them cosmetic on e-paper: greyscale
+figures with heads separated by line style, marker and hatch as well as grey value
+(`recon_plots.set_style("eink")`); explanations set as real type rather than baked into
+the bitmap; a page sized to the panel; one figure per page.
 
-  * greyscale figures, with each decoder head carrying a line style, marker and hatch as
-    well as a grey value, so nothing depends on hue (`recon_plots.set_style("eink")`)
-  * the explanation is real type, set by TeX at a readable size, instead of 6.5pt
-    monospace baked into the bitmap
-  * a small page. A 6x8in page shown on a 7.8in or 10.3in panel gives roughly the text
-    size of a paperback with no zooming; a large page would need it
-  * one figure per page, scaled to fit, so nothing is ever half off-screen
-
-Needs pdflatex, and uses only what the eval host actually has: geometry, graphicx,
-longtable, array. The TeX install there is partial - booktabs, xcolor, caption and
-microtype are absent, and hyperref and fontenc both fail on missing dependencies
-(pdftexcmds, infwarerr) - so none of them are used. Every non-ASCII character is mapped
-to a TeX macro instead, which is why fontenc is not needed.
+Needs pdflatex and uses only geometry, graphicx, longtable and array — the eval host's
+TeX install lacks booktabs, xcolor, caption and microtype, and hyperref and fontenc both
+fail there on missing dependencies. Non-ASCII is mapped to TeX macros instead.
 """
 from __future__ import annotations
 
@@ -26,11 +17,8 @@ import re
 import shutil
 import subprocess
 
-# Page size is the one setting that matters most on e-paper, and the rule is simple: a
-# PDF page the same physical size as the panel renders 1:1, so 11pt type is really 11pt.
-# A smaller page is scaled up - larger text, less content per screen; a larger page is
-# scaled down, and text can end up smaller than intended. So the presets are the panels'
-# actual physical dimensions, not their diagonals.
+# A PDF page the same physical size as the panel renders 1:1, so the presets are the
+# panels' actual dimensions, not their diagonals.
 #
 #   Onyx BOOX 10.3in (Note Air, Tab Ultra): 1404x1872 px @ 226 ppi = 6.2 x 8.3 in
 #   Onyx BOOX 13.3in (Tab X, Max Lumi):     1650x2200 px @ 207 ppi = 8.0 x 10.6 in
@@ -46,19 +34,15 @@ PAGE_W_IN = 8.0
 PAGE_H_IN = 10.6
 MARGIN_IN = 0.42
 
-# Above this page height the figure and its explanation fit on one page together, which
-# is worth a lot on a device where a page turn costs a full-screen refresh. Below it the
-# figure has to have the page to itself or it gets squeezed to nothing.
+# Above this height a figure and its explanation share a page; below it the figure needs
+# the page to itself.
 COMBINE_MIN_H_IN = 9.5
 
 
 def parse_pages(spec: str) -> list:
     """
-    Parse a page spec into [(label, w_in, h_in), ...].
-
-    Accepts preset names and explicit WxH, comma-separated: "onyx13,onyx10" or "8x10.6".
-    A run can emit several sizes for the cost of one pdflatex pass each, since they all
-    reuse the same figures.
+    Parse a page spec into [(label, w_in, h_in), ...]. Accepts preset names and explicit
+    WxH, comma-separated: "onyx13,onyx10" or "8x10.6".
     """
     out = []
     for token in (t.strip() for t in spec.split(",") if t.strip()):
@@ -85,8 +69,7 @@ def available() -> bool:
 _TEX_ESCAPES = [
     ("\\", r"\textbackslash{}"), ("&", r"\&"), ("%", r"\%"), ("$", r"\$"),
     ("#", r"\#"), ("_", r"\_"), ("{", r"\{"), ("}", r"\}"),
-    # Every ~ in this report means "approximately" ("~3.7M params"); \textasciitilde
-    # renders in OT1 as a raised macron, which reads as a typo.
+    # ~ always means "approximately" here; \textasciitilde renders as a raised macron.
     ("~", r"$\sim$"), ("^", r"\textasciicircum{}"),
 ]
 
@@ -116,19 +99,16 @@ def _warn_unmapped(chars) -> None:
 
 def tex_escape(text: str) -> str:
     """
-    Plain text to TeX. Applied before any markup is re-introduced.
+    Plain text to TeX, before any markup is re-introduced.
 
-    Order matters: escape the TeX specials first, then map the unicode. The unicode
-    replacements are themselves TeX macros, so mapping first gets them escaped into
-    literal characters. None of the mapped codepoints are TeX specials, so this is safe.
+    Specials are escaped before the unicode is mapped: the replacements are themselves
+    TeX macros, so mapping first would get them escaped into literals.
     """
     for ch, rep in _TEX_ESCAPES:
         text = text.replace(ch, rep)
     for uni, rep in _UNICODE_MAP.items():
         text = text.replace(uni, rep)
-    # Without fontenc the document is OT1, so anything non-ASCII that slipped through the
-    # map would be set as garbage or abort the run. Drop it and say so once, rather than
-    # losing the whole PDF to one stray character.
+    # OT1 without fontenc: anything unmapped would abort the run, so drop it and warn.
     if not text.isascii():
         leftover = sorted({c for c in text if not c.isascii()})
         _warn_unmapped(leftover)
@@ -138,23 +118,15 @@ def tex_escape(text: str) -> str:
 
 def _breakable_code(s: str) -> str:
     """
-    Let a long identifier break across a line inside \texttt.
-
-    A narrow page cannot fit `TransformerMirrorDecoder` in a wrapping column, and TeX
-    will not hyphenate typewriter text, so it overflows into the margin. Offer explicit
-    zero-width break points at the seams a reader already sees - camelCase humps and
-    underscores - plus a fallback every 14 characters for anything still unbroken.
-    \allowbreak breaks without inserting a hyphen, which would be misread as part of
-    the identifier.
+    Let a long identifier break inside \texttt. TeX will not hyphenate typewriter text,
+    so offer zero-width breaks at camelCase humps and underscores, plus a fallback every
+    14 atoms. \allowbreak avoids a hyphen, which would read as part of the identifier.
     """
     s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", r"\\allowbreak{}", s)
     s = s.replace(r"\_", r"\_\allowbreak{}")
 
-    # The length fallback has to count TeX atoms, not characters. Chunking by character
-    # can cut between the backslash and the letter of an escape - splitting \_ leaves a
-    # bare backslash that merges with the inserted \allowbreak into \\, and an
-    # unescaped _ that TeX reads as a subscript. That aborted the build on a real run,
-    # where config paths are long enough to reach the fallback.
+    # Count TeX atoms, not characters: chunking mid-escape leaves a bare backslash and
+    # an unescaped _, which aborts the build.
     atoms = re.findall(r"\\[a-zA-Z]+(?:\{\})?|\\.|.", s, flags=re.S)
     out, run = [], 0
     for atom in atoms:
@@ -174,10 +146,8 @@ def tex_inline(text: str) -> str:
     """
     Escape, then turn the report's `code`, **bold** and *italic* markup back into TeX.
 
-    Code spans are pulled out before the emphasis patterns run. They have to be: the
-    report contains `single_channel_*`, whose lone asterisk would otherwise pair with the
-    next one in the paragraph and italicise everything between them, swallowing both
-    markers.
+    Code spans are stashed before the emphasis patterns run: `single_channel_*` has a
+    lone asterisk that would otherwise pair with the next one in the paragraph.
     """
     out = tex_escape(text)
 
@@ -367,15 +337,12 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
     """
     Assemble the TeX source.
 
-    Content comes from the same helpers the HTML and markdown reports use, so the three
-    formats cannot drift apart: the same preamble prose, the same per-head summary
-    tables, the same captions and explanations, in the same sample -> dataset -> across
-    datasets order. Only the layout differs.
+    Built from the same helpers as the HTML and markdown reports so the three cannot
+    drift apart; only the layout differs.
     """
     from .report import (_RECON_INTRO, _RECON_TABLE_LEGEND, _explain_lines,
                          _recon_combined_table, _recon_dataset_heading, _recon_keys,
-                         _recon_summary_table, _is_dataset_level_fig, _split_eval_key,
-                         _recon_fig_caption)
+                         _recon_summary_table, _split_eval_key, _recon_fig_caption)
 
     keys = _recon_keys(results)
     if not keys:
@@ -395,57 +362,29 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
     doc.append(_prose(_RECON_INTRO))
     doc.append(r"\clearpage")
 
-    # 1 — sample level.
-    doc.append(r"\section*{1. One sample at a time}")
-    doc.append(tex_inline(
-        "Individual reconstructions, target in black against each head's output. These "
-        "say what the model is doing; they cannot say how often it does it - that is "
-        "section 2."))
-    for key in keys:
-        r = results[key]
-        alias = _split_eval_key(key)[1]
-        heading = _recon_dataset_heading(r, alias)
-        if r.get("skipped"):
-            doc.append(r"\subsubsection*{%s}" % tex_inline(heading))
-            doc.append(tex_inline("Skipped - %s." % r.get("error", "n/a")))
-            continue
-        for f in figures_by_eval.get(key, []):
-            if _is_dataset_level_fig(f[1]):
-                continue
-            title, explain = _explain_lines(f[1])
-            doc.append(_figure_page(f[1], _recon_fig_caption(f[1]), explain,
-                                    "%s — %s" % (heading, title)))
-
-    # 2 — dataset level.
-    doc.append(r"\section*{2. The whole dataset}")
-    doc.append(tex_inline(
-        "The same reconstructions aggregated over every sample drawn: the headline "
-        "numbers per head, then which kinds of spectra fail."))
+    # 1 — per dataset.
+    doc.append(r"\section*{1. Per dataset}")
+    doc.append(tex_inline("Headline numbers per head, over every sample drawn."))
     doc.append(r"{\small %s\par}" % tex_inline(_RECON_TABLE_LEGEND))
     for key in keys:
         r = results[key]
-        if r.get("skipped"):
-            continue
         alias = _split_eval_key(key)[1]
         heading = _recon_dataset_heading(r, alias)
         doc.append(r"\subsection*{%s}" % tex_inline(heading))
+        if r.get("skipped"):
+            doc.append(tex_inline("Skipped - %s." % r.get("error", "n/a")))
+            continue
         doc.append(_table(_recon_summary_table(r)))
         spec = r.get("spectrum_df")
         if spec is not None and len(spec):
             doc.append(tex_inline(
                 "Per-spectrum view: %d spectra, aggregating the components of each "
                 "(dataset, spec) key." % len(spec)))
-        doc.append(r"\clearpage")
-        for f in figures_by_eval.get(key, []):
-            if not _is_dataset_level_fig(f[1]):
-                continue
-            title, explain = _explain_lines(f[1])
-            doc.append(_figure_page(f[1], _recon_fig_caption(f[1]), explain,
-                                    "%s — %s" % (heading, title)))
+    doc.append(r"\clearpage")
 
     # 3 — across datasets.
     if summary_figs:
-        doc.append(r"\section*{3. Across datasets}")
+        doc.append(r"\section*{2. Across datasets}")
         doc.append(tex_inline(
             "Every dataset in one view, with single-component and multi-component blocks "
             "kept visually separate."))

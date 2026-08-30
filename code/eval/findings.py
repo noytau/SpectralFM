@@ -74,30 +74,6 @@ def _rolloff(r: dict, head: str) -> float:
     return float(np.sum(pred[hi]) / denom) if denom > 0 else float("nan")
 
 
-def _strongest_axis(r: dict, head: str) -> tuple:
-    """
-    The signal property whose bins spread median error the most, and by what factor.
-
-    Answers "what kind of spectrum does this fail on" with the one axis that matters most
-    rather than making the reader scan six panels.
-    """
-    strat = r.get("strat_df")
-    col = f"{head}_mse_median"
-    if not isinstance(strat, pd.DataFrame) or strat.empty or col not in strat.columns:
-        return None, float("nan"), None
-    best = (None, 0.0, None)
-    for axis, sub in strat.groupby("axis"):
-        v = sub[col].to_numpy(dtype=float)
-        v = v[np.isfinite(v) & (v > 0)]
-        if len(v) < 2:
-            continue
-        factor = float(v.max() / v.min())
-        if factor > best[1]:
-            worst_bin = sub.loc[sub[col].idxmax(), "bin_label"]
-            best = (axis, factor, worst_bin)
-    return best
-
-
 def _spectrum_concentration(r: dict, head: str) -> tuple:
     """
     Median (worst component - mean) / mean within a spectrum, and how many spectra it
@@ -224,10 +200,8 @@ def observations(results: dict) -> list:
 
     # 5. Amplitude, and 6. high-frequency fidelity — both invisible in MSE.
     #
-    # The dataset-level verdict is a median, and a component can contradict it outright:
-    # sampled_data's amplitude ratio is 0.96 overall while two of its components sit at
-    # 3.9. Saying "everywhere" without checking would be issuing a claim this same section
-    # goes on to refute two bullets later.
+    # The dataset-level verdict is a median and a component can contradict it, so find
+    # that before claiming "everywhere".
     amp_comp = None
     for ds_, r_ in by.items():
         for h_ in (r_.get("pathways") or []):
@@ -275,21 +249,7 @@ def observations(results: dict) -> list:
                 "of the target's magnitude in the top frequency quartile, so narrow "
                 "features are surviving, not just the envelope." % (100 * min(rolls.values())))
 
-    # 7. What kind of spectrum fails, and 8. whether failure is component-specific.
-    axes = []
-    for ds, r in by.items():
-        for h in (r.get("pathways") or []):
-            axis, factor, worst_bin = _strongest_axis(r, h)
-            if axis and np.isfinite(factor) and factor > 1.5:
-                axes.append((factor, ds, h, axis, worst_bin))
-    if axes:
-        factor, ds, h, axis, worst_bin = max(axes)
-        out.append(
-            "**Error depends most on `%s`**: on `%s` the %s decoder's median MSE varies "
-            "%.1fx across its bins, worst at %s. That is the sample property to condition "
-            "on — it predicts failure better than the dataset label does."
-            % (axis, ds, _SHORT.get(h, h), factor, worst_bin))
-
+    # 7. Whether failure is component-specific within a spectrum.
     concs = {(ds, h): _spectrum_concentration(by[ds], h)
              for ds in by for h in (by[ds].get("pathways") or [])}
     concs = {k: (v, cnt) for k, (v, cnt) in concs.items() if np.isfinite(v) and cnt >= 30}
@@ -583,23 +543,6 @@ def next_steps(results: dict, config=None) -> list:
             "whether those samples share a component index, a peak count, or a source "
             "`dataset_id` — if they do, this is one failure mode with a name, not a tail."
             % ds)
-
-    # Stratifier: an axis that predicts error is a candidate for conditioning or reweighting.
-    axes = []
-    for ds, r in by.items():
-        for h in (r.get("pathways") or []):
-            axis, factor, worst_bin = _strongest_axis(r, h)
-            if axis and np.isfinite(factor):
-                axes.append((factor, ds, axis))
-    if axes:
-        factor, ds, axis = max(axes)
-        if factor > 1.5:
-            out.append(
-                "**Try weighting training by `%s`.** It spreads error %.1fx across its "
-                "bins on `%s`, which makes it the most promising thing to either "
-                "oversample or add to the loss. If error flattens against it, the model "
-                "was simply seeing too few hard spectra."
-                % (axis, factor, ds))
 
     # High-frequency loss: only worth suggesting if the rolloff is actually there.
     rolls = [(_rolloff(by[ds], h), ds, h) for ds in by for h in (by[ds].get("pathways") or [])]

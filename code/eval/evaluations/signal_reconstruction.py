@@ -52,7 +52,7 @@ from ..recon_analysis import (
     reference_operators,
     tail_analysis,
 )
-from ..signal_features import STRATIFIER_ORDER, compute_signal_features
+from ..signal_features import compute_signal_features
 
 _FE_LAYERS = [(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]
 
@@ -587,22 +587,15 @@ def _proj_reconstruct(backbone, head, source: torch.Tensor) -> torch.Tensor:
 
 # ── Dataset-level metrics (L1 per-component, L2 per-spectrum, L3 group summary) ─
 #
-# The sample-level view (a handful of overlay traces plus a mean MSE) cannot tell a
-# working reconstruction from a degenerate one: a decoder that emits each sample's own
-# mean value scores a respectable MSE while carrying no information at all. The metrics
-# below are chosen so that failure mode, and the ones adjacent to it, are visible.
-#
-# All of them are computed against the SAME target the head was trained on — i.e. after
-# the per-sample F.layer_norm when the checkpoint recorded `normalize` — so R² divides by
-# the variance of that target, not of the raw wav.
+# All computed against the same target the head was trained on — after the per-sample
+# F.layer_norm when the checkpoint recorded `normalize` — so R² divides by the variance
+# of that target, not of the raw wav.
 
-# Head key → full legend text. Plots must use these strings, never the bare keys:
-# a reader outside the project cannot be expected to know what 'proj' taps.
+# Head key → legend text. Plots use these, never the bare keys.
 PATHWAY_SHORT = {"fe": "FE decoder", "proj": "Projection decoder", "tr": "Transformer decoder"}
 
-# What each head reads and decodes with. Kept separate from PATHWAY_SHORT rather than
-# packed into one string: the text itself contains dashes, so splitting a combined label
-# back apart silently returned the whole thing.
+# Kept separate from PATHWAY_SHORT: the text contains dashes, so a combined label cannot
+# be split back apart.
 PATHWAY_DETAIL = {
     "fe":   "from the post-LayerNorm conv feature-extractor output [47×512], "
             "MirrorDecoder (~3.7M params)",
@@ -662,9 +655,8 @@ def _per_sample_metrics(target: np.ndarray, pred: np.ndarray, mse: np.ndarray) -
     return {"r2": r2, "pearson": pearson, "amp_ratio": amp_ratio, "peak_err": peak_err}
 
 
-# "Beating the baseline" needs a tolerance, not a bare `> 0`. A model that reproduces
-# the baseline exactly (predicting each sample's mean) lands at R2 = 0 up to float32
-# rounding, which a bare `> 0` would score as beating it on about half the samples.
+# A model reproducing the baseline exactly lands at R2 = 0 up to float32 rounding, which
+# a bare `> 0` would score as beating it on half its samples.
 _R2_BEAT_TOL = 1e-6
 
 
@@ -695,8 +687,7 @@ def _summary_table(rdf: pd.DataFrame, pathways: list) -> pd.DataFrame:
             "r2_mean":           float(finite_r2.mean()) if finite_r2.size else np.nan,
             "frac_r2_positive":  (float((finite_r2 > _R2_BEAT_TOL).mean())
                                   if finite_r2.size else np.nan),
-            # Effective resolution: the head's error read back onto the matched-rate
-            # reference ladder, in samples of signal. Absent when no ladder was built.
+            # Error read onto the reference ladder; absent when no ladder was built.
             "k_eff_median":      (float(rdf[f"{k}_k_eff"].median())
                                   if f"{k}_k_eff" in rdf.columns else np.nan),
             "pearson_median":    float(rdf[f"{k}_pearson"].median()),
@@ -735,63 +726,6 @@ def _spectrum_table(rdf: pd.DataFrame, pathways: list) -> pd.DataFrame:
                      ["dataset_id", "spec", "comp"]]
                 .rename(columns={"comp": "worst_comp"}))
     return out.merge(worst, on=["dataset_id", "spec"], how="left")
-
-
-def _stratified_table(rdf: pd.DataFrame, pathways: list, axes: list) -> pd.DataFrame:
-    """
-    Median MSE (with quartiles and n) per bin of each stratification axis.
-
-    Continuous axes are cut into quintiles; `comp` and `n_comps` are used as-is because
-    they are categorical — component index is effectively an amplitude/shape class label
-    (within one labeled_data spectrum, per-component std spans 0.027 to 0.33).
-    Axes that cannot be binned (constant within this dataset) are skipped, and the caller
-    is expected to say so on the figure rather than show an empty panel.
-    """
-    from ..signal_features import quantile_bins
-
-    frames = []
-    for axis in axes:
-        if axis not in rdf.columns or rdf[axis].isna().all():
-            continue
-        values = rdf[axis].to_numpy(dtype=np.float64)
-        uniq = np.unique(values[np.isfinite(values)])
-        # Categorical only when the axis genuinely has few levels. peak_count is nominally
-        # discrete but routinely takes 50+ distinct values on real spectra, which would
-        # produce an unreadable 50-tick panel; quantile-bin those instead.
-        # Identity axes name a class; a count axis measures one. Quantile-binning an
-        # identity produces labels like "comp = 0-6", which invents an ordering this
-        # eval's own caveat says does not exist - and on sampled_data (28 components) it
-        # blurred away exactly the two components that carry 84% of the dataset's error.
-        # Above the readable cap they are omitted here instead, and the component figure
-        # covers them properly.
-        identity = axis in ("comp", "n_comps", "n_comps_in_split", "dataset_id")
-        categorical = (identity or axis == "peak_count") and len(uniq) <= 12
-        if identity and not categorical:
-            continue
-        if categorical:
-            bins = values.copy()
-            if len(uniq) < 2:
-                continue
-            labels = {float(u): f"{int(u)}" for u in uniq}
-        else:
-            idx, edges = quantile_bins(values, n_bins=5)
-            if not edges:
-                continue
-            bins = np.where(idx >= 0, idx, np.nan).astype(float)
-            labels = {float(i): edges[i] for i in range(len(edges))}
-
-        for b in sorted(labels):
-            sel = bins == b
-            if sel.sum() < 3:                 # too few to quote a median
-                continue
-            row = {"axis": axis, "bin": b, "bin_label": labels[b], "n": int(sel.sum())}
-            for k in pathways:
-                v = rdf.loc[sel, f"{k}_mse"].to_numpy()
-                row[f"{k}_mse_median"] = float(np.median(v))
-                row[f"{k}_mse_q25"] = float(np.percentile(v, 25))
-                row[f"{k}_mse_q75"] = float(np.percentile(v, 75))
-            frames.append(row)
-    return pd.DataFrame(frames)
 
 
 def _profiles(target: np.ndarray, preds: dict) -> dict:
@@ -857,35 +791,24 @@ def run(
 
     normalize: None → use the flag recorded in the checkpoint(s); True/False overrides.
 
-    sample_meta: optional per-file component metadata from
-      `data_loader.parse_component_metadata` (filename / dataset_id / comp / spec /
-      n_comps). Its presence is what marks this dataset as multi-component and unlocks
-      the per-spectrum (L2) table and the component-index stratifiers.
-    dataset_alias / dataset_subset: labels only, carried into the figures so a reader can
-      see which data a panel describes (e.g. 'in_dist' / 'single_channel_10k').
-
-    ref_ladder: resolutions to build reference reconstructions at. Each rung reconstructs
-      the target from K evenly spaced samples of itself, giving a fair yardstick at a
-      matched information rate - see `recon_analysis`. Empty/None disables the reference.
-    worst_keep: how many worst-error raw signals to retain per head for the
-      failure-anatomy panel (0 disables).
-    tail_frac: what counts as "the tail" for the failure-anatomy tables (0.05 = worst 5%).
+    sample_meta: per-file component metadata from
+      `data_loader.parse_component_metadata`. Its presence marks the dataset as
+      multi-component and unlocks the per-spectrum (L2) and per-component views.
+    dataset_alias / dataset_subset: labels carried into the figures.
+    ref_ladder: resolutions for the matched-rate reference reconstructions (see
+      `recon_analysis`); empty disables them.
+    worst_keep: worst-error raw signals kept per head for the failure-anatomy panel.
+    tail_frac: what counts as the tail, 0.05 = worst 5%.
 
     Returns dict with:
-      results_df    per-component (L1) metrics, one row per sample → recon_df.csv
-      summary_df    per-head (L3) headline table, median-first
-      spectrum_df   per-spectrum (L2) table — multi-component datasets only
-      strat_df      median MSE per bin of each stratification axis
-      profiles      per-position and per-frequency error arrays
-      reference     the matched-rate reference ladder: median MSE per rung for both
-                    reference families, each head's median effective resolution, and how
-                    narrow this data's peaks are relative to the reference spacing
-      _worst        the worst-error raw signals per head, for the failure-anatomy panel
-      tail          how concentrated the error is per head, and which head's tail is worth
-                    explaining
-      tail_lift_df  how over-represented each component / property level is in that tail
-      tail_effect_df  how far the tail sits from the rest on each signal descriptor
-      panel         the 6-example overlay data (unchanged)
+      results_df      per-sample (L1) metrics → recon_df.csv
+      summary_df      per-head (L3) headline table, median-first
+      spectrum_df     per-spectrum (L2) table — multi-component only
+      profiles        per-position and per-frequency error arrays
+      reference       reference ladder medians and each head's effective resolution
+      tail / tail_lift_df / tail_effect_df   what the worst `tail_frac` is made of
+      _worst          worst-error raw signals per head
+      panel           the overlay-plot data (unchanged)
       recon_{k}_mse_mean / _median, recon_{k}_mae_mean / _median  (unchanged scalars)
     """
     if not fe_ckpt and not tr_ckpt and not proj_ckpt and not recon_ckpt:
@@ -958,10 +881,8 @@ def run(
             got["proj"] = _proj_reconstruct(backbone, head, batch)[..., :L]
         return got
 
-    # Stream the predictions: per-sample metrics and the position/frequency profiles are
-    # accumulated batch by batch, and only a bounded subsample of raw signals is kept for
-    # the figures that plot individual points. Holding every prediction would cost
-    # N x heads x 245 floats, which is what limited a run to a sample of a split.
+    # Streamed: metrics and profiles accumulate batch by batch, and only a bounded
+    # subsample of raw signals is kept. Holding every prediction costs N x heads x 245.
     profiles = _StreamingProfiles(L, pathway_names)
     per_sample = {k: {name: [] for name in ("mse", "mae", "r2", "pearson",
                                             "amp_ratio", "peak_err")}
@@ -970,11 +891,9 @@ def run(
     fig_set = set(fig_idx.tolist())
     kept_target, kept_preds = [], {k: [] for k in pathway_names}
 
-    # Reference reconstructions at matched information rates - see recon_analysis. Built
-    # once as matrices and applied with one matmul per rung per batch. The interpolation
-    # rungs are kept per sample (they become results_df columns and each head's effective
-    # resolution is read off that sample's own curve); the low-pass rungs are reduced to a
-    # median curve, since nothing needs them per sample.
+    # Reference reconstructions at matched information rates — see recon_analysis. The
+    # interpolation rungs are kept per sample (effective resolution is read off each
+    # sample's own curve); the low-pass rungs only ever need their median.
     ref_ops = reference_operators(L, ref_ladder) if ref_ladder else {"interp": {}, "lowpass": {}}
     ref_ks = sorted(ref_ops["interp"])
     ref_interp, ref_lowpass = [], []
@@ -1050,11 +969,8 @@ def run(
         rows[f"{k}_mae"] = mae
         out[f"recon_{k}_mse_mean"] = float(mse.mean())
         out[f"recon_{k}_mse_median"] = float(np.median(mse))
-        # MAE alongside MSE: `data2vec_audio.py`'s recon_loss_type defaults to L1, not
-        # L2/MSE, so a pathway trained under that default can show a large MSE (driven
-        # by a few outlier errors L1 doesn't penalize as harshly) while still being a
-        # genuinely improving, well-behaved fit by the metric it was actually trained
-        # on. Report both rather than letting MSE alone look falsely catastrophic.
+        # MAE alongside MSE: recon_loss_type defaults to L1, so a head trained under it
+        # can post a large MSE while fitting well by the metric it was trained on.
         out[f"recon_{k}_mae_mean"] = float(mae.mean())
         out[f"recon_{k}_mae_median"] = float(np.median(mae))
 
@@ -1071,7 +987,7 @@ def run(
 
     rdf = pd.DataFrame(rows)
 
-    # ── Sample descriptors + component metadata → stratification axes ──────────
+    # ── Sample descriptors + component metadata ───────────────────────────────
     rdf = pd.concat([rdf, compute_signal_features(target_np)], axis=1)
 
     is_multi = False
@@ -1089,9 +1005,7 @@ def run(
             rdf = rdf.drop(columns=[c for c in meta_cols if c in rdf.columns])
         else:
             # Unmatched rows are the redundant components the metadata scan removed
-            # (comp20 duplicates comp14, comp21 duplicates comp15). They have to be
-            # dropped here too, not relabelled: leaving them in would double-count their
-            # twins in every L1 statistic, which is the whole point of the dedup.
+            # (comp20/21 duplicate comp14/15); dropping them is the point of the dedup.
             dropped = len(rdf) - matched
             rdf = rdf[rdf["comp"].notna()].reset_index(drop=True)
             is_multi = True
@@ -1130,9 +1044,8 @@ def run(
     out["dataset_alias"] = dataset_alias
     out["dataset_subset"] = dataset_subset
 
-    # Recompute the long-standing scalars from the final row set. They were computed
-    # above over every drawn sample; if redundant-component rows were dropped they would
-    # otherwise disagree with summary_df, which is the same statistic over the same data.
+    # Recompute from the final row set, or dropped rows leave these disagreeing with
+    # summary_df over the same data.
     for k in pathway_names:
         out[f"recon_{k}_mse_mean"] = float(rdf[f"{k}_mse"].mean())
         out[f"recon_{k}_mse_median"] = float(rdf[f"{k}_mse"].median())
@@ -1147,9 +1060,8 @@ def run(
             col = f"{k}_k_eff"
             if col in rdf.columns:
                 k_eff[k] = float(rdf[col].median())
-        # Interpolation is a strong reference for smooth signals and a weak one for
-        # structure narrower than its sample spacing, so state which case this data is.
-        # Measured on the kept subsample, where the per-peak loop is affordable.
+        # Interpolation flatters smooth signals, so report how fine this data's
+        # structure is. Measured on the kept subsample, where the loop is affordable.
         spacing = L / float(FE_BOTTLENECK_K)
         fwhm = peak_fwhm(kept_target) if len(kept_target) else np.array([])
         narrow = (float(np.nanmean(fwhm < spacing)) if len(fwhm) and np.isfinite(fwhm).any()
@@ -1172,37 +1084,29 @@ def run(
     if worst_keep:
         out["_worst"] = worst.result(keep_index)
 
-    # ── Tail anatomy: what the worst few per cent are made of ─────────────────
-    # Computed here rather than in the plotting code so the tables export as CSVs with
-    # everything else, and so the figures and the generated findings read one set of
-    # numbers instead of each deriving their own.
+    # ── Tail anatomy ──────────────────────────────────────────────────────────
+    # Here rather than in the plotting code, so the tables export as CSVs and the figures
+    # and findings read one set of numbers.
     if len(rdf):
         tail = tail_analysis(rdf, pathway_names, frac=tail_frac)
         out["tail_lift_df"] = tail.pop("lift_df")
         out["tail_effect_df"] = tail.pop("effect_df")
         out["tail"] = tail
 
-    # ── L3 summary, L2 per-spectrum, stratified medians, profiles ─────────────
+    # ── L3 summary, L2 per-spectrum, profiles ─────────────────────────────────
     out["summary_df"] = _summary_table(rdf, pathway_names)
 
-    strat_axes = list(STRATIFIER_ORDER)
     if is_multi:
         out["spectrum_df"] = _spectrum_table(rdf, pathway_names)
-        strat_axes += ["comp", "n_comps"]
-    out["strat_df"] = _stratified_table(rdf, pathway_names, strat_axes)
 
     out["profiles"] = profiles.result()
 
-    # Raw signals for the hexbin / calibration figures — a bounded subsample, see
-    # _figure_subsample. Nothing serializes the results dict, and the CSV pass only
-    # touches DataFrames.
-    # `index` maps each kept signal back to its results_df row, so a figure can join the
-    # per-sample metadata (component index above all) onto the raw signals it draws.
+    # Raw signals for the figures that plot individual points — a bounded subsample.
+    # `index` maps each kept signal back to its results_df row so metadata can be joined.
     out["_arrays"] = {"target": kept_target, "preds": kept_preds, "index": fig_idx,
                       "n_kept": len(kept_target), "n_total": len(target)}
 
-    # Example panel for the overlay plot (deterministic pick)
-    # The overlay panel draws real signals, so it can only use samples that were kept.
+    # Overlay panel: a deterministic pick from the kept samples.
     n_kept = len(kept_target)
     n_ex = min(n_examples, n_kept)
     local = np.linspace(0, n_kept - 1, n_ex, dtype=int) if n_ex else np.array([], int)

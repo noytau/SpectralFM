@@ -48,30 +48,20 @@ _PATHWAY_STYLE = [
 _HEAD_COLOR = {k: c for k, _, c in _PATHWAY_STYLE}
 _HEAD_ORDER = [k for k, _, _ in _PATHWAY_STYLE]
 
-# Heads are also distinguished by line style, marker and hatch, not only by hue. That
-# keeps every figure readable in greyscale - on an e-ink reader, or printed - and for a
-# reader who cannot separate the three hues.
+# Heads carry a line style, marker and hatch as well as a hue, so nothing depends on
+# colour alone.
 _HEAD_LS = {"fe": "-", "proj": "--", "tr": ":"}
 _HEAD_MARKER = {"fe": "o", "proj": "s", "tr": "^"}
 _HEAD_HATCH = {"fe": "", "proj": "///", "tr": "xxx"}
 
-# Greyscale palettes for the e-ink style. Values are spaced far enough apart to survive
-# the limited contrast range of an e-paper panel; nothing lighter than #b0b0b0 is used
-# for a line, since it disappears.
+# Greyscale palettes for e-ink; nothing lighter than #b0b0b0 survives on the panel.
 _EINK_HEAD_COLOR = {"fe": "#000000", "proj": "#5a5a5a", "tr": "#9a9a9a"}
-# Only five greys are usable on e-paper, and the dataset palette reuses them, so two
-# datasets in one panel can land on the same shade. Where datasets are the lines rather
-# than the panels, they get a line style each as well.
+# The greyscale dataset palette repeats shades, so where datasets are the lines they
+# get a line style each as well.
 _EINK_DATASET_LS = ["-", "--", ":", "-.", (0, (3, 1, 1, 1))]
 _EINK_DATASET_COLOR = {"sanity": "#8a8a8a", "in_dist": "#000000",
                        "multi_ch": "#000000", "samples": "#8a8a8a",
                        "labeled": "#5a5a5a"}
-
-# A summary-heatmap column has to vary by this fraction of its own magnitude before it is
-# shaded at full strength. Half means a column whose best and worst differ by half the
-# column's typical value is coloured hard, while one differing by a per cent or two is
-# barely tinted - the honest reading of a small difference.
-_FULL_SATURATION_AT = 0.5
 
 _STYLE = "screen"
 
@@ -119,21 +109,6 @@ def _head_text_color(k: str) -> str:
     return "#000000" if _STYLE == "eink" else _HEAD_COLOR[k]
 
 
-def _rank_cmap():
-    """
-    Colormap for the rank-shaded summary heatmap.
-
-    RdYlGn is the wrong choice on e-paper twice over: there is no colour, and red and
-    green sit at almost the same luminance, so the two ends of the scale become the same
-    grey. The e-ink version runs white (better) to mid grey (worse) instead - a single
-    luminance ramp, and light enough throughout that the black cell values stay readable.
-    """
-    if _STYLE != "eink":
-        return "RdYlGn"
-    from matplotlib.colors import LinearSegmentedColormap
-    return LinearSegmentedColormap.from_list("eink_rank", ["#9a9a9a", "#ffffff"])
-
-
 def _density_cmap():
     """Sequential map for the hexbin density; viridis is not luminance-ordered in grey."""
     return "Greys" if _STYLE == "eink" else "viridis"
@@ -161,9 +136,7 @@ _GROUP_LABEL = {
 # Same distinction where a panel title has no room for the parenthetical.
 _GROUP_SHORT = {"single": "single-component", "multi": "multi-component"}
 
-# A component carrying this many times its share of the dataset's error is called out by
-# name on the component figure. 2x is well clear of sampling noise on a component with
-# tens of samples, and far below the 13x sampled_data's comp 26 and 29 actually post.
+# A component carrying this many times its share of the error is called out by name.
 _COMP_LIFT_MARK = 2.0
 
 _REF_COLOR = "#b0b0b0"
@@ -257,41 +230,6 @@ _FIG_DOC = {
             "Medians, not means, are the headline statistic here: on the multi-component "
             "sets a handful of outliers pull the mean far above the typical sample. "
             + CROSS_HEAD_CAVEAT
-        ),
-    },
-    "recon_summary_heatmap": {
-        "title": "Reconstruction metric summary - datasets x metrics",
-        "caption": (
-            "Every dataset scored on every metric, one block per decoder head. Shading "
-            "marks rank within a column, better end lighter in greyscale and green in "
-            "colour; read down a column, not across."
-        ),
-        "what": (
-            "One block per decoder head. Rows are datasets (single-component block first, "
-            "then multi-component); columns are the summary metrics. Cell text is the "
-            "actual value; cell shading is that value's rank within its own column, so "
-            "shading compares datasets on one metric and means nothing across columns. "
-            "Shading strength tracks how much the column actually varies - a column whose "
-            "values differ by half their own magnitude or more is shaded at full strength, "
-            "one varying by a per cent or two is left almost neutral - so a difference in "
-            "the fourth decimal cannot look like a real gap."
-        ),
-        "read": (
-            "read down a column to rank datasets on one metric; the shading marks rank "
-            "within that column, with the direction already accounted for (lower MSE is "
-            "better, higher R-squared is better) - in colour green is the better end and "
-            "red the worse, in greyscale lighter is better and darker worse; a pale or "
-            "neutral column is one whose values are all close together"
-        ),
-        "good": (
-            "mse_median small, r2_median near 1, frac_r2_positive at 1.0, pearson_median "
-            "near 1, amp_ratio_median near 1. Watch for mse_mean sitting far above "
-            "mse_median: that ratio is the outlier tax on this dataset. A column left "
-            "unshaded is one whose values are all equal - see the caveats."
-        ),
-        "caveats": (
-            "amp_ratio_median below 1 means the reconstruction is systematically flatter "
-            "than the target - see the amplitude-calibration figure. " + CROSS_HEAD_CAVEAT
         ),
     },
     "recon_skill_vs_baseline": {
@@ -431,41 +369,6 @@ _FIG_DOC = {
             "averaged over samples, so a ratio near 1 does not guarantee the lines are in "
             "the right PLACE - read this with the position-profile figure. "
             + CROSS_HEAD_CAVEAT
-        ),
-    },
-    "recon_error_vs_signal_properties": {
-        "title": "Reconstruction error against signal properties",
-        "caption": (
-            "Which kinds of spectra reconstruct badly. A flat line means the model is "
-            "indifferent to that property; an upward slope names a weakness."
-        ),
-        "what": (
-            "Median reconstruction MSE (line) with the interquartile range (shaded) against "
-            "binned properties of the target signal: contrast, number of local maxima, peak "
-            "prominence, spectral centroid and peak position. Continuous properties are cut "
-            "into quintiles; component index and components-per-spectrum are used as-is. "
-            "For multi-component datasets a further row shows the per-spectrum view, where "
-            "each spectrum's components are collapsed into their mean, worst and spread of "
-            "error. One figure per dataset, because the available property axes differ "
-            "between single- and multi-component data and are not forced into one grid."
-        ),
-        "read": (
-            "a flat line means the model is indifferent to that property; an upward slope "
-            "names the kind of spectrum it reconstructs badly; in the per-spectrum row a "
-            "large gap between the mean and the worst curve means failure is concentrated "
-            "in particular components rather than spread across whole spectra"
-        ),
-        "good": (
-            "Flat, low lines with narrow interquartile bands across every axis - error that "
-            "does not depend on what the spectrum looks like."
-        ),
-        "caveats": (
-            "Bins with fewer than three samples are dropped, and axes that are constant "
-            "within a dataset are omitted entirely rather than drawn flat - sampled_data, "
-            "for instance, supplies all 28 components for every spectrum, so "
-            "components-per-spectrum has no within-dataset variation there. Component index "
-            "is not an ordinal difficulty scale; it behaves as an amplitude/shape class "
-            "label. " + CROSS_HEAD_CAVEAT
         ),
     },
     "recon_reference_ladder": {
@@ -621,8 +524,7 @@ _REQUIRED_DOC_KEYS = ("title", "caption", "what", "read", "good", "caveats")
 def doc_for_figure(path: str) -> dict:
     """
     The doc entry for a figure file, matched on its basename, or None if unregistered.
-    Longest key first so `recon_error_vs_signal_properties` is not matched by a shorter
-    key that happens to be a prefix.
+    Longest key first, so a compound name is not matched by a shorter prefix.
     """
     base = os.path.splitext(os.path.basename(path))[0]
     for key in sorted(_FIG_DOC, key=len, reverse=True):
@@ -785,9 +687,7 @@ def _group_divider(ax, aliases: list, by_alias: dict, positions) -> None:
     cut = groups.index("multi")
     x = (positions[cut - 1] + positions[cut]) / 2.0
     ax.axvline(x, color="#444444", lw=1.2, ls=":", zorder=0)
-    # Above the axes, so these never fight with bars, annotations or violins. The panel
-    # title lives there too, so push it up by one label line first - callers set the
-    # title before calling this, and without the extra pad the two overlap.
+    # Above the axes, clear of bars and annotations; the title needs a pad to match.
     title = ax.get_title()
     if title:
         ax.set_title(title, fontsize=ax.title.get_fontsize(),
@@ -1000,124 +900,6 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
     return [(_caption("recon_error_distribution"), path)]
 
 
-# ── F1b: cross-dataset summary heatmap ────────────────────────────────────────
-
-# (metric column, display label, higher_is_better)
-_SUMMARY_METRICS = [
-    ("mse_median",       "MSE\nmedian",        False),
-    ("mse_mean",         "MSE\nmean",          False),
-    ("mse_p90",          "MSE\np90",           False),
-    ("mae_median",       "MAE\nmedian",        False),
-    ("r2_median",        "R²\nmedian",     True),
-    ("frac_r2_positive", "frac beating\nbaseline", True),
-    ("pearson_median",   "Pearson r\nmedian",  True),
-    ("amp_ratio_median", "amplitude ratio\nmedian (1 = ideal)", 1.0),
-    ("peak_err_median",  "peak error\nmedian (0 = ideal)", 0.0),
-    ("k_eff_median",     "effective\nresolution", True),
-]
-
-
-def _plot_summary_heatmap(by_alias: dict, out_dir: str) -> list:
-    aliases = _ordered_aliases(by_alias)
-    heads = _heads_of(by_alias)
-    if not aliases or not heads:
-        return []
-
-    # One block per head, stacked VERTICALLY. Side by side, 8 metric columns times three
-    # heads makes a 30-inch-wide figure in which the cell values are unreadably small;
-    # stacking keeps the width at one block and gives every cell room.
-    fig, axes = plt.subplots(len(heads), 1,
-                             figsize=(1.15 * len(_SUMMARY_METRICS) + 2.0,
-                                      (0.52 * len(aliases) + 1.5) * len(heads)),
-                             squeeze=False)
-    for c, k in enumerate(heads):
-        ax = axes[c][0]
-        rows, row_labels = [], []
-        for a in aliases:
-            sdf = by_alias[a].get("summary_df")
-            if not isinstance(sdf, pd.DataFrame) or k not in set(sdf["head"]):
-                continue
-            s = sdf.set_index("head").loc[k]
-            rows.append([float(s[m]) for m, _, _ in _SUMMARY_METRICS])
-            row_labels.append("%s  [%s]" % (a, by_alias[a].get("component_group", "single")))
-        if not rows:
-            ax.axis("off")
-            continue
-        M = np.array(rows, dtype=float)
-
-        # Color by within-column rank so wildly different scales stay comparable; the
-        # cell TEXT carries the real value.
-        shade = np.full_like(M, 0.5)
-        for j, (_, _, higher_better) in enumerate(_SUMMARY_METRICS):
-            col = M[:, j]
-            ok = np.isfinite(col)
-            if ok.sum() < 2:
-                continue
-            spread = float(np.ptp(col[ok]))
-            scale = max(abs(float(np.nanmedian(col[ok]))), 1e-12)
-
-            # Rank alone is the wrong thing to colour. Normalising a column to its own
-            # min and max spans the full ramp however small the spread is, so two values
-            # differing in the fourth decimal come out fully red and fully green - the
-            # figure then asserts a difference that is not there. Colour SATURATION is
-            # therefore scaled by the spread relative to the column's own magnitude: a
-            # column varying by _FULL_SATURATION_AT or more is shaded at full strength,
-            # anything tighter stays near neutral, and a column that is effectively
-            # constant is left alone entirely.
-            saturation = min(1.0, (spread / scale) / _FULL_SATURATION_AT)
-            if saturation < 0.02:
-                continue
-
-            norm = (col - np.nanmin(col[ok])) / spread
-            # A float in place of the direction flag names an ideal VALUE rather than a
-            # direction - amplitude ratio is best at 1, peak error best at 0 - and the
-            # shading then ranks by distance from it. isinstance(True, int) is True, so
-            # the bool check has to come first.
-            if not isinstance(higher_better, bool) and isinstance(higher_better, (int, float)):
-                tgt = float(higher_better)
-                norm = 1.0 - (np.abs(col - tgt)
-                              / max(np.nanmax(np.abs(col[ok] - tgt)), 1e-9))
-            elif not higher_better:
-                norm = 1.0 - norm
-            shade[:, j] = 0.5 + (norm - 0.5) * saturation
-        ax.imshow(shade, cmap=_rank_cmap(), vmin=0, vmax=1, aspect="auto")
-
-        for i in range(M.shape[0]):
-            for j in range(M.shape[1]):
-                v = M[i, j]
-                if not np.isfinite(v):
-                    txt = "-"
-                elif abs(v) < 1e-9:
-                    txt = "0"                      # not "-2.22e-16"
-                elif 1e-3 <= abs(v) < 1e4:
-                    txt = "%.3f" % v
-                else:
-                    txt = "%.2e" % v
-                ax.text(j, i, txt, ha="center", va="center", fontsize=9)
-        ax.set_xticks(range(len(_SUMMARY_METRICS)))
-        # Only the bottom block needs metric labels; repeating them three times just
-        # eats vertical space between the blocks.
-        if c == len(heads) - 1:
-            ax.set_xticklabels([lbl for _, lbl, _ in _SUMMARY_METRICS], fontsize=8)
-        else:
-            ax.set_xticklabels([])
-        ax.set_yticks(range(len(row_labels)))
-        ax.set_yticklabels(row_labels, fontsize=9)
-        ax.set_title(_head_title(k, width=70), fontsize=9, color=_head_text_color(k),
-                     fontweight="bold")
-        # Divider between the single- and multi-component row blocks.
-        groups = [by_alias[a].get("component_group", "single") for a in aliases
-                  if isinstance(by_alias[a].get("summary_df"), pd.DataFrame)]
-        if "single" in groups and "multi" in groups:
-            ax.axhline(groups.index("multi") - 0.5, color="#222222", lw=2.0)
-
-    _suptitle(fig, "recon_summary_heatmap", _run_note(by_alias), y=1.02)
-    _tight(fig, reserve_in=1.0)
-    _footnote(fig, "recon_summary_heatmap")
-    path = _save_fig(fig, os.path.join(out_dir, "recon_summary_heatmap.png"))
-    return [(_caption("recon_summary_heatmap"), path)]
-
-
 # ── F2: skill against the mean-predictor baseline ─────────────────────────────
 
 def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
@@ -1185,13 +967,9 @@ def _plot_skill_vs_baseline(by_alias: dict, out_dir: str) -> list:
 
     # ── Right: every sample, model error against the baseline it must beat ────
     #
-    # The natural x-axis is the baseline's own MSE, which for the mean predictor IS the
-    # target's variance. But when the checkpoint was trained with normalize=True the
-    # target is per-sample layer-normed, so var(target) == 1 for EVERY sample and that
-    # axis collapses to a single vertical line. In that case the baseline becomes one
-    # horizontal threshold and the x-axis is better spent on a signal property that
-    # actually varies, so the panel still answers "which samples does the model beat,
-    # and are they the simple ones?".
+    # The natural x-axis is the baseline's MSE = var(target), but normalize=True forces
+    # that to 1 for every sample. Then the baseline becomes one horizontal threshold and
+    # the x-axis is spent on a signal property that does vary.
     ax = axes[1]
     base_all = np.concatenate(
         [by_alias[a]["results_df"]["contrast"].to_numpy(dtype=float) ** 2
@@ -1348,10 +1126,8 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
         t = r["_arrays"]["target"]
         preds = r["_arrays"]["preds"]
         group = r.get("component_group", "single")
-        # Unlike every other figure here, this one draws raw signals, so it can only use
-        # the bounded subsample - 2000 of multi_channel's 136,828. Labelling the row with
-        # the dataset's full n and leaving it there would credit the cloud to samples that
-        # were never plotted.
+        # This figure draws raw signals, so it sees only the bounded subsample; the row
+        # label has to say so rather than credit the cloud to the whole split.
         n_kept = int(r["_arrays"].get("n_kept", len(t)) or len(t))
         n_total = int(r["_arrays"].get("n_total", n_kept) or n_kept)
         row_label = "%s\n%s\nn=%s" % (a, _GROUP_SHORT[group], f"{n_total:,}")
@@ -1379,11 +1155,8 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
             ax.set_ylim(lim_lo, lim_hi)
             ax.set_xlabel("target amplitude\n(one point per sample-and-bin pair)",
                           fontsize=8)
-            # This is a datasets x heads grid, so naming both in every panel repeats one
-            # of them four times and the other three times - and the repeated half is the
-            # bold one, which is what made four different datasets look alike. The head
-            # is the column and gets a header on the top row; the dataset is the row and
-            # gets a label down the left.
+            # A datasets x heads grid: name each axis once, as a column header and a row
+            # label, rather than repeating both in every panel.
             if c == 0:
                 ax.set_ylabel("%s\n\npredicted amplitude,\nsame sample and bin"
                               % row_label, fontsize=8.5, fontweight="bold")
@@ -1394,24 +1167,14 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                              color=_head_text_color(k), fontweight="bold", pad=8)
             ax.legend(fontsize=6, loc="upper left", framealpha=0.75)
             if _STYLE != "eink":
-                # The colourbars cost a quarter of the width and the density scale is not
-                # what the figure is for; on a page that width is worth more.
+                # Colourbars cost a quarter of the width; on an e-ink page that is dear.
                 fig.colorbar(hb, ax=ax, label="point density (log)", fraction=0.046)
 
-        # Rightmost column: per-sample dynamic range.
-        #
-        # Normally a prediction-std vs target-std scatter. But normalize=True layer-norms
-        # every target to unit variance, so target std is 1 for every sample and the
-        # scatter degenerates into a single vertical strip. The ratio std(pred)/std(target)
-        # carries exactly the same information and stays readable, so plot its
-        # distribution instead when that happens.
-        #
-        # The test has to be RELATIVE, not an absolute range. Measured target std spans
-        # 0.9837-0.99999 on sampled_data - every value is still 1.0 for plotting purposes,
-        # but the absolute spread (1.6e-2) clears an absolute 1e-4 threshold, so the old
-        # test took the scatter branch and drew exactly the vertical strip it existed to
-        # avoid. contrast_is_collapsed is the same robust p99/p1 predicate the skill and
-        # stratification figures already use for this, so all of them now agree.
+        # Rightmost column: per-sample dynamic range. Normally a prediction-std vs
+        # target-std scatter, but normalize=True pins target std to 1 and the scatter
+        # collapses to a vertical strip, so the ratio is plotted instead. The test must
+        # be relative - measured target std spans 0.984-1.0, which clears an absolute
+        # threshold while being unusable as an axis.
         ax = axes[rowi][n_cols - 1]
         ts = t.std(axis=1)
         degenerate = recon_analysis.contrast_is_collapsed(ts)
@@ -1559,135 +1322,6 @@ def _plot_spectral_fidelity(by_alias: dict, out_dir: str) -> list:
     return [(_caption("recon_spectral_fidelity"), path)]
 
 
-# ── F5: error vs signal properties (one figure per dataset) ───────────────────
-
-_AXIS_LABELS = dict(FEATURE_LABELS)
-_AXIS_LABELS.update({
-    "comp": "Component index within the spectrum "
-            "(an amplitude/shape class label, not an ordinal difficulty scale)",
-    "n_comps": "Components per spectrum (whole dataset, after removing "
-               "the duplicate comp20≡comp14 / comp21≡comp15)",
-    "n_comps_in_split": "Components of this spectrum present in the eval subset",
-})
-
-
-def _plot_error_vs_properties(r: dict, out_dir: str) -> list:
-    strat = r.get("strat_df")
-    if not isinstance(strat, pd.DataFrame) or strat.empty:
-        return []
-    heads = [k for k in _HEAD_ORDER if k in (r.get("pathways") or [])]
-    if not heads:
-        return []
-
-    axes_present = [ax for ax in strat["axis"].unique()]
-    spec_df = r.get("spectrum_df")
-    has_spec = isinstance(spec_df, pd.DataFrame) and not spec_df.empty
-    group = r.get("component_group", "single")
-
-    n_cols = min(2 if _STYLE == "eink" else 4, max(1, len(axes_present)))
-    n_rows = int(np.ceil(len(axes_present) / n_cols)) + (1 if has_spec else 0)
-    cell_h = 2.75 if _STYLE == "eink" else 3.5
-    fig, grid = plt.subplots(n_rows, n_cols, figsize=(4.6 * n_cols, cell_h * n_rows),
-                             squeeze=False)
-
-    for i, axis in enumerate(axes_present):
-        ax = grid[i // n_cols][i % n_cols]
-        sub = strat[strat["axis"] == axis].sort_values("bin")
-        x = np.arange(len(sub))
-        for k in heads:
-            col = f"{k}_mse_median"
-            if col not in sub.columns:
-                continue
-            ax.plot(x, sub[col], marker=_HEAD_MARKER[k], ms=4, lw=1.5,
-                    ls=_HEAD_LS[k], color=_HEAD_COLOR[k], label=PATHWAY_SHORT[k])
-            ax.fill_between(x, sub[f"{k}_mse_q25"], sub[f"{k}_mse_q75"],
-                            color=_HEAD_COLOR[k], alpha=0.16)
-        ax.set_xticks(x)
-        ax.set_xticklabels(sub["bin_label"], fontsize=6.5, rotation=25, ha="right")
-        ax.set_xlabel(_AXIS_LABELS.get(axis, axis), fontsize=7.5, wrap=True)
-        ax.set_ylabel("median MSE  (shaded = IQR, ↓ better)", fontsize=7.5)
-        ax.set_yscale("log")
-        ax.grid(True, alpha=0.3, which="both")
-        ns = ", ".join("n=%d" % n for n in sub["n"])
-        ax.set_title("%s\n(%s)" % (axis, ns), fontsize=8, color="#444444")
-        if i == 0:
-            ax.legend(fontsize=6.5)
-
-    # Blank out unused cells in the stratifier block.
-    for j in range(len(axes_present), n_cols * (n_rows - (1 if has_spec else 0))):
-        grid[j // n_cols][j % n_cols].axis("off")
-
-    # Per-spectrum row (multi-component only): mean vs worst vs spread by n_comps.
-    if has_spec:
-        row = n_rows - 1
-        views = [("mse_mean", "mean over the spectrum's components", "-", "o"),
-                 ("mse_max", "worst single component", "--", "s"),
-                 ("mse_spread", "spread (worst − best)", ":", "^")]
-        for ci in range(n_cols):
-            grid[row][ci].axis("off")
-
-        ax = grid[row][0]
-        ax.axis("on")
-        by_n = spec_df.groupby("n_comps_present")
-        xs = sorted(by_n.groups)
-        # Mean vs worst component, per head. The spread has its own panel to the right;
-        # plotting it here too would stretch the log axis to a scale where neither reads.
-        for k in heads:
-            for suffix, label, ls, marker in views[:2]:
-                col = f"{k}_{suffix}"
-                if col not in spec_df.columns:
-                    continue
-                ax.plot(xs, [by_n.get_group(n)[col].median() for n in xs],
-                        ls=ls, marker=marker, ms=4, lw=1.4, color=_HEAD_COLOR[k],
-                        label="%s — %s" % (PATHWAY_SHORT[k], label))
-        ax.set_xlabel("components of the spectrum present in this eval subset", fontsize=7.5)
-        ax.set_ylabel("median per-spectrum MSE  (↓ better)", fontsize=7.5)
-        ax.set_yscale("log")
-        ax.set_xticks(xs)
-        ax.grid(True, alpha=0.3, which="both")
-        ax.set_title("Per-spectrum view (L2): is failure spectrum-wide or "
-                     "component-specific?\n%d spectra  (solid = mean over the spectrum's "
-                     "components, dashed = worst single component)" % len(spec_df),
-                     fontsize=8)
-        ax.legend(fontsize=5.5, ncol=1)
-
-        if n_cols > 1:
-            ax = grid[row][1]
-            ax.axis("on")
-            for k in heads:
-                col = f"{k}_mse_spread"
-                if col not in spec_df.columns:
-                    continue
-                v = spec_df[col].to_numpy()
-                v = v[np.isfinite(v) & (v > 0)]
-                if len(v) < 5:
-                    continue
-                sv = np.sort(v)
-                ax.plot(sv, np.arange(1, len(sv) + 1) / len(sv),
-                        color=_HEAD_COLOR[k], lw=1.5, ls=_HEAD_LS[k],
-                        label=PATHWAY_SHORT[k])
-            ax.set_xscale("log")
-            ax.set_xlabel("within-spectrum MSE spread (worst − best component)", fontsize=7.5)
-            ax.set_ylabel("fraction of spectra at or below", fontsize=7.5)
-            ax.grid(True, alpha=0.3, which="both")
-            ax.set_title("How unevenly error is distributed inside one spectrum\n"
-                         "(curve far left = all components reconstruct alike)", fontsize=8)
-            ax.legend(fontsize=6.5)
-
-    d = _doc("recon_error_vs_signal_properties")
-    extra = ("%s, %s. Axes shown: %s.%s"
-             % (_ds_label(r), _GROUP_LABEL[group], ", ".join(axes_present),
-                "" if has_spec else
-                " No per-spectrum row: this is single-component data."))
-    fig.suptitle("%s\n%s — checkpoint=%s, normalize=%s"
-                 % (d["title"], _ds_label(r), _ckpt_tag(r), r.get("normalize")),
-                 fontsize=10.5, fontweight="bold", y=1.0)
-    _tight(fig, reserve_in=1.0)
-    _footnote(fig, "recon_error_vs_signal_properties", extra=extra)
-    path = _save_fig(fig, os.path.join(out_dir, "recon_error_vs_signal_properties.png"))
-    return [(_caption("recon_error_vs_signal_properties"), path)]
-
-
 # ── Public entry points ───────────────────────────────────────────────────────
 
 # Cross-dataset figures, in the order a reader should meet them: how big is the error,
@@ -1736,9 +1370,8 @@ def _plot_reference_ladder(by_alias: dict, out_dir: str) -> list:
             mse = float(rdf[f"{k}_mse"].median())
             k_eff = float(rdf[f"{k}_k_eff"].median())
             ax.axhline(mse, color=_HEAD_COLOR[k], ls=_HEAD_LS[k], lw=1.1, alpha=0.75)
-            # A head with more error than the coarsest rung has no place on the ladder.
-            # Its marker is pinned to the left edge, so the label has to say the number
-            # is a bound rather than let it read as a measurement.
+            # A head worse than the coarsest rung is pinned to the left edge, so its
+            # label has to mark the number as a bound.
             placed.append((k, mse, k_eff, mse > coarsest))
 
         ax.set_xscale("log")
@@ -2063,9 +1696,7 @@ def _plot_failure_anatomy(by_alias: dict, out_dir: str) -> list:
     worst = (focus_r.get("_worst") or {}).get(focus_head)
     if worst is not None and len(worst.get("mse", [])):
         order = np.argsort(worst["mse"])[::-1][:3]
-        # A fixed offset works only if the traces happen to be unit-scale; the worst
-        # reconstructions are exactly the ones that are not, and they overlapped into an
-        # unreadable band. Space them by the range actually being drawn.
+        # Space by the range actually drawn: the worst traces are not unit-scale.
         drawn = np.concatenate([worst["target"][order], worst["pred"][order]])
         step = 1.25 * float(np.ptp(drawn)) if np.ptp(drawn) > 0 else 1.0
         for rank, idx in enumerate(order):
@@ -2170,9 +1801,7 @@ def _plot_component_error(by_alias: dict, out_dir: str) -> list:
         # are identifiable, not that the line has a bump somewhere.
         lift_col = f"{ref}_budget_lift"
         if lift_col in df.columns:
-            # Offenders often come in adjacent pairs (sampled_data's comp 26 and 29), and
-            # two call-outs at the same height overprint each other into mush - stagger
-            # consecutive ones.
+            # Offenders come in adjacent pairs, so stagger consecutive call-outs.
             marked = 0
             for xi, (c, lift, val) in enumerate(zip(comps, df[lift_col],
                                                     df[f"{ref}_mse_median"])):
@@ -2364,34 +1993,16 @@ def _plot_component_error(by_alias: dict, out_dir: str) -> list:
 
 _SUMMARY_FIGURES = [
     ("recon_error_distribution",     _plot_error_distribution),
-    ("recon_summary_heatmap",        _plot_summary_heatmap),
     ("recon_skill_vs_baseline",      _plot_skill_vs_baseline),
+    ("recon_reference_ladder",       _plot_reference_ladder),
     ("recon_position_profile",       _plot_position_profile),
     ("recon_amplitude_calibration",  _plot_amplitude_calibration),
     ("recon_spectral_fidelity",      _plot_spectral_fidelity),
-    ("recon_reference_ladder",       _plot_reference_ladder),
     ("recon_failure_anatomy",        _plot_failure_anatomy),
     ("recon_component_error",        _plot_component_error),
 ]
 
-DATASET_LEVEL_FIGURE_KEYS = ["recon_error_vs_signal_properties"]
 SUMMARY_FIGURE_KEYS = [k for k, _ in _SUMMARY_FIGURES]
-
-
-def plot_recon_dataset_level(r: dict, out_dir: str) -> list:
-    """
-    Per-dataset dataset-level figures, appended after the existing sample-level ones.
-
-    Called once per `signal_reconstruction_<alias>` result. Currently the stratification
-    figure, whose shape depends on whether the dataset is single- or multi-component —
-    which is why it is per-dataset rather than pooled.
-    """
-    if not isinstance(r, dict) or r.get("skipped"):
-        return []
-    # No FIGURES.md here: these figures are written flat and then relocated by the
-    # report, so a doc file written now would be stranded at the run root. The summary
-    # pass writes one covering every figure instead.
-    return _plot_error_vs_properties(r, out_dir)
 
 
 def plot_recon_across_datasets(by_alias: dict, out_dir: str) -> list:
@@ -2419,8 +2030,7 @@ def plot_recon_across_datasets(by_alias: dict, out_dir: str) -> list:
 
     if keys:
         # Document the per-dataset figures here too - they have no doc file of their own.
-        write_figure_docs(keys + DATASET_LEVEL_FIGURE_KEYS, out_dir,
-                          header=_run_note(usable))
+        write_figure_docs(keys, out_dir, header=_run_note(usable))
     return figures
 
 
@@ -2465,12 +2075,11 @@ def _synthetic_results(seed: int = 0) -> dict:
     component and nothing else, at a lift equal to the number of components.
     """
     from .evaluations.signal_reconstruction import (
-        _per_sample_metrics, _profiles, _spectrum_table, _stratified_table,
-        _summary_table)
+        _per_sample_metrics, _profiles, _spectrum_table, _summary_table)
     from .recon_analysis import (DEFAULT_REF_LADDER, FE_BOTTLENECK_K,
                                  effective_resolution, reference_operators,
                                  tail_analysis)
-    from .signal_features import STRATIFIER_ORDER, compute_signal_features
+    from .signal_features import compute_signal_features
 
     rng = np.random.default_rng(seed)
     ref_ops = reference_operators(245, DEFAULT_REF_LADDER)
@@ -2496,10 +2105,8 @@ def _synthetic_results(seed: int = 0) -> dict:
         t = (t * rng.uniform(0.984, 1.0, (n, 1))).astype(np.float32)
         # Multi-component data is harder here, mirroring the real generalization gap.
         noise = 0.22 if multi else 0.10
-        # fe is built FROM a reference rung, so its effective resolution is known before
-        # the figure computes it: the added noise pushes it a little below 37, and the
-        # heavier multi-component noise pushes it further, which is the ordering the
-        # reference-ladder figure has to reproduce.
+        # fe is built from a reference rung, so its effective resolution is known in
+        # advance: noise pushes it below 37, more so on the multi-component sets.
         fe_base = (t.astype(np.float64) @ ref_ops["interp"][37].T)
         preds = {
             "fe":   (fe_base + rng.normal(0, noise, t.shape)).astype(np.float32),
@@ -2549,10 +2156,8 @@ def _synthetic_results(seed: int = 0) -> dict:
         else:
             rdf["component_group"] = "single"
 
-        axes = list(STRATIFIER_ORDER) + (["comp", "n_comps"] if multi else [])
         r["results_df"] = rdf
         r["summary_df"] = _summary_table(rdf, heads)
-        r["strat_df"] = _stratified_table(rdf, heads, axes)
         if multi:
             r["spectrum_df"] = _spectrum_table(rdf, heads)
         r["profiles"] = _profiles(t, preds)
@@ -2642,9 +2247,8 @@ def _selftest(out_dir: str) -> int:
          abs(by_alias["multi_ch"]["tail"]["per_head"]["tr"]["share"] - 0.05) < 0.03),
         ("contrast must be dropped as degenerate when targets are layer-normed",
          "contrast" in (by_alias["in_dist"]["tail"].get("dropped_axes") or [])),
-        # Target std spans ~1.6% here, as it does on real data. That is not usable as a
-        # scatter axis, and an absolute-range test called it usable - which is how the
-        # amplitude figure came to draw a vertical strip on a real run.
+        # Target std spans ~1.6% here as on real data: not usable as a scatter axis,
+        # though an absolute-range test would call it usable.
         ("an all-but-constant target std must count as collapsed",
          all(recon_analysis.contrast_is_collapsed(
              by_alias[a]["_arrays"]["target"].std(axis=1)) for a in by_alias)),
@@ -2675,12 +2279,8 @@ def _selftest(out_dir: str) -> int:
             failures.append(msg)
 
     figs = plot_recon_across_datasets(by_alias, out_dir)
-    for alias, r in by_alias.items():
-        d = os.path.join(out_dir, "per_dataset_%s" % alias)
-        os.makedirs(d, exist_ok=True)
-        figs += plot_recon_dataset_level(r, d)
 
-    expected = len(SUMMARY_FIGURE_KEYS) + len(by_alias) * len(DATASET_LEVEL_FIGURE_KEYS)
+    expected = len(SUMMARY_FIGURE_KEYS)
     print("\n  rendered %d/%d figures into %s" % (len(figs), expected, out_dir))
     for caption, path in figs:
         size = os.path.getsize(path) if os.path.isfile(path) else 0

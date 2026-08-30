@@ -360,11 +360,9 @@ def split_partial_stack(df: pd.DataFrame, holdout_ratio: float = 0.3) -> pd.Data
 
 _COMP_PATTERN = re.compile(r"dataset(\d+)_comp(\d+)_spec_(\d+)\.wav")
 
-# Verified duplicates: in both multi_channel and labeled_data, comp20 is byte-identical
-# to comp14 and comp21 to comp15 (np.allclose on the raw wavs; per-component std matches
-# exactly at 0.0779 and 0.0546). sampled_data has no identical pairs. Left in place, they
-# double-count ~2/12 (multi_channel) and ~2/14 (labeled_data) of the mass and inflate
-# every components-per-spectrum count by 2.
+# Verified byte-identical: comp20 == comp14 and comp21 == comp15 in multi_channel and
+# labeled_data, so leaving them in double-counts two components in every per-file
+# aggregate. sampled_data has no identical pairs.
 _DUPLICATE_COMPS = {
     "multi_channel": {20: 14, 21: 15},
     "labeled_data":  {20: 14, 21: 15},
