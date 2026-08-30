@@ -1,0 +1,144 @@
+# @package _group_
+#
+# T9 — Step 1: FE + projection jointly from random init, FE decoder attached,
+# recon_fe on top of d2v. Based on spectralfm_step0_fe_pretrain.yaml (same
+# model, same single-GPU Adam+cosine optimizer, same per-component init/freeze
+# mechanism) with the FE decoder switched on:
+#
+#   • FE:          TRAIN, random init
+#   • Projection:  TRAIN, random init
+#   • Transformer: FROZEN, init = base_libri
+#   • FE decoder:  TRAIN, random init, newly attached (mirror decoder,
+#                  ConvTranspose1d, sample-aligned — same type as basemerge)
+#   • Loss: d2v (regression, always-on weight 1 — lambda_d2v field doesn't
+#     exist yet, see TASKS.md Correction 3) + lambda_recon_fe * recon_fe
+#
+# Per-experiment overrides (set at launch, not hardcoded here):
+#   dataset.batch_size, optimization.max_update, common.wandb_run_name
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 50
+  tensorboard_logdir: tb
+  user_dir: /storage/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm-t9-step1"
+  wandb_run_name: "experiment1_feProjJoint_lambdaFe${model.lambda_recon_fe}_${now:%Y%m%d_%H%M}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 2000
+  keep_interval_updates: 5
+  no_epoch_checkpoints: true
+
+task:
+  _name: audio_pretraining
+  data: /storage/noy/SpectralFM/fairseq/data/nova_data/single_channel_all
+  max_sample_size: 500
+  min_sample_size: 1
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 128
+  train_subset: train
+  valid_subset: valid
+  disable_validation: true
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  required_batch_size_multiple: 1
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - recon_fe
+    - regression
+    - ema_decay
+    - target_var
+    - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
+
+optimization:
+  max_update: 30000
+  max_epoch: 0
+  lr: [1.0e-4]
+  update_freq: [1]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 1500
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.05
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  # FE decoder — attached, trainable, random init.
+  lambda_recon_fe: 0.1
+  recon_output_dim: 245
+  recon_decoder_hidden: "512"
+  recon_decoder_type: mirror
+
+  # Per-component init/freeze — replaces the legacy full-checkpoint load.
+  model_path: null
+  skip_pretrained_weights: true
+
+  init_transformer_ckpt: /storage/noy/SpectralFM/fairseq/base_libri_official.pt
+  # FE and projection both stay random (no init_fe_ckpt / init_proj_ckpt set).
+
+  freeze_fe_v2: false
+  freeze_ln: false
+  freeze_proj: false
+  freeze_transformer_v2: true
+  freeze_mask_emb: true
+  freeze_final_proj: true
+  freeze_fe_recon_decoder: false
+
+  tag_param_groups: false
+
+hydra:
+  run:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_t9_step1
+  sweep:
+    dir: /storage/noy/SpectralFM/fairseq/outputs/recon_loss

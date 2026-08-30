@@ -40,14 +40,19 @@ USAGE MODES
      --data_source .../single_channel_10k/wav \\
      --evals signal_reconstruction \\
      --recon_fe_ckpt /path/to/ckpt_lr..._pretrained_base_libri.pt \\
+     --recon_proj_ckpt /path/to/step2_projMlp2048_....pt \\
      --recon_tr_ckpt /path/to/ckpt_tr_lr....pt
 
-   --recon_fe_ckpt : FE autoencoder ckpt (keys: encoder/layer_norm/decoder).
+   --recon_fe_ckpt : FE autoencoder ckpt (keys: encoder/layer_norm/decoder), or a
+                     native fairseq checkpoint carrying an fe_recon_decoder.
                      Pathway: input → FE → LN → MirrorDecoder → signal.
+   --recon_proj_ckpt : native fairseq checkpoint carrying a proj_recon_decoder.
+                     Pathway: input → FE → LN → proj → mirror head → signal
+                     (stops before the transformer encoder).
    --recon_tr_ckpt : transformer-recon ckpt (keys: transformer_mirror/backbone_ckpt).
                      Pathway: input → FE → LN → proj → transformer → mirror head → signal.
                      The backbone is loaded from the ckpt's recorded backbone_ckpt path.
-   Either or both may be given. Per-sample layer_norm normalization is applied when
+   Any combination may be given. Per-sample layer_norm normalization is applied when
    recorded in the checkpoint (--recon_normalize true/false overrides).
    signal_reconstruction can be combined with checkpoint_comparison in one run.
 
@@ -132,6 +137,16 @@ class EvalConfig:
     run_label_regression_in_comparison: bool = True
     label_reg_max_samples: int = 1000
 
+    # Label regression side-by-side sweeps (run once across all checkpoints,
+    # in addition to the per-checkpoint RidgeCV probe above): a single LBFGS
+    # linear probe at fixed train/eval sizes, laid out as
+    # [train size 100/1000/2000] x [Raw input + one column per checkpoint], and
+    # [1-comp/2-comp/3-comp] x [Raw input + one column per checkpoint].
+    run_label_reg_sweeps_in_comparison: bool = True
+    label_reg_train_sizes: List[int] = field(default_factory=lambda: [100, 1000, 2000])
+    label_reg_sweep_comps: tuple = (0, 1)
+    label_reg_sweep_train_size: int = 1000
+
     # Multi-dataset evaluation (E4). Aliases resolve under nova_data_dir; sizes
     # overridable via eval_set_sizes ("sanity=100,in_dist=500,...") or the global
     # eval_set_size shortcut. multi_dataset=False falls back to the single
@@ -143,6 +158,7 @@ class EvalConfig:
     # Signal reconstruction (per-component checkpoints, independent of checkpoint_mode)
     recon_ckpt: Optional[str] = None         # single 3AE ckpt: all pathways (fe/proj/transformer)
     recon_fe_ckpt: Optional[str] = None      # FE AE ckpt: encoder/layer_norm/decoder keys
+    recon_proj_ckpt: Optional[str] = None    # native ckpt carrying a proj_recon_decoder
     recon_tr_ckpt: Optional[str] = None      # TR recon ckpt: transformer_mirror/backbone_ckpt keys
     recon_normalize: Optional[bool] = None   # None → use flag recorded in ckpt
     recon_max_samples: int = 200
@@ -245,7 +261,7 @@ class EvalRunner:
                 needed |= set(EVAL_DATASET_MATRIX.get(e, []))
         for e in cfg.evals:
             needed |= set(EVAL_DATASET_MATRIX.get(e, []))
-        if cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt:
+        if cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_proj_ckpt or cfg.recon_tr_ckpt:
             needed |= set(EVAL_DATASET_MATRIX["signal_reconstruction"])
         return needed
 
@@ -287,7 +303,7 @@ class EvalRunner:
         }}
 
         recon_requested = ("signal_reconstruction" in cfg.evals
-                           or cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt)
+                           or cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_proj_ckpt or cfg.recon_tr_ckpt)
 
         # ── checkpoint_comparison ─────────────────────────────────────────────
         if "checkpoint_comparison" in cfg.evals:
@@ -308,13 +324,17 @@ class EvalRunner:
                     nova_data_dir=cfg.nova_data_dir,
                     labeled_data_dir=cfg.labeled_data_dir,
                     label_reg_max_samples=cfg.label_reg_max_samples,
+                    run_label_reg_sweeps=cfg.run_label_reg_sweeps_in_comparison,
+                    label_reg_train_sizes=cfg.label_reg_train_sizes,
+                    label_reg_sweep_comps=cfg.label_reg_sweep_comps,
+                    label_reg_sweep_train_size=cfg.label_reg_sweep_train_size,
                 )
 
         # ── signal reconstruction: one result per matrix dataset ──────────────
         if recon_requested:
             # Reconstruction results are filed under the recon model's own name;
             # when it matches a compared checkpoint, they land inside its directory.
-            recon_src = cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt
+            recon_src = cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_proj_ckpt or cfg.recon_tr_ckpt
             recon_model_name = os.path.splitext(os.path.basename(recon_src))[0] if recon_src else ""
             for alias in EVAL_DATASET_MATRIX["signal_reconstruction"]:
                 if alias not in datasets:
@@ -325,6 +345,7 @@ class EvalRunner:
                         df=datasets[alias]["df_raw"],
                         recon_ckpt=cfg.recon_ckpt,
                         fe_ckpt=cfg.recon_fe_ckpt,
+                        proj_ckpt=cfg.recon_proj_ckpt,
                         tr_ckpt=cfg.recon_tr_ckpt,
                         device=cfg.device, arch=cfg.arch,
                         normalize=cfg.recon_normalize,
@@ -430,16 +451,21 @@ class EvalRunner:
                     nova_data_dir=cfg.nova_data_dir,
                     labeled_data_dir=cfg.labeled_data_dir,
                     label_reg_max_samples=cfg.label_reg_max_samples,
+                    run_label_reg_sweeps=cfg.run_label_reg_sweeps_in_comparison,
+                    label_reg_train_sizes=cfg.label_reg_train_sizes,
+                    label_reg_sweep_comps=cfg.label_reg_sweep_comps,
+                    label_reg_sweep_train_size=cfg.label_reg_sweep_train_size,
                 )
 
         if ("signal_reconstruction" in cfg.evals
-                or cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_tr_ckpt):
+                or cfg.recon_ckpt or cfg.recon_fe_ckpt or cfg.recon_proj_ckpt or cfg.recon_tr_ckpt):
             print("\n[EvalRunner] Running: signal_reconstruction")
             try:
                 all_results["signal_reconstruction"] = SignalReconstructionEval.run(
                     df=df_raw,
                     recon_ckpt=cfg.recon_ckpt,
                     fe_ckpt=cfg.recon_fe_ckpt,
+                    proj_ckpt=cfg.recon_proj_ckpt,
                     tr_ckpt=cfg.recon_tr_ckpt,
                     device=cfg.device, arch=cfg.arch,
                     normalize=cfg.recon_normalize,
@@ -574,7 +600,12 @@ def main():
                              "FE, projection, transformer. Overrides --recon_fe_ckpt/--recon_tr_ckpt.")
     parser.add_argument("--recon_fe_ckpt", default=None,
                         help="Signal reconstruction: FE autoencoder checkpoint "
-                             "(keys: encoder/layer_norm/decoder). Pathway: FE→LN→MirrorDecoder.")
+                             "(keys: encoder/layer_norm/decoder), or a native fairseq "
+                             "checkpoint carrying an fe_recon_decoder. Pathway: FE→LN→MirrorDecoder.")
+    parser.add_argument("--recon_proj_ckpt", default=None,
+                        help="Signal reconstruction: native fairseq checkpoint carrying a "
+                             "proj_recon_decoder (e.g. a Step 2-style run). Pathway: "
+                             "FE→LN→proj→TransformerMirrorDecoder (stops before the transformer).")
     parser.add_argument("--recon_tr_ckpt", default=None,
                         help="Signal reconstruction: transformer-recon checkpoint "
                              "(keys: transformer_mirror/backbone_ckpt). Pathway: full "
@@ -584,6 +615,12 @@ def main():
                         help="Override per-sample layer_norm normalization for reconstruction "
                              "(default: use the flag recorded in the checkpoint).")
     parser.add_argument("--recon_max_samples", type=int, default=200)
+    parser.add_argument("--label_reg_max_samples", type=int, default=1000)
+    parser.add_argument("--label_reg_train_sizes", type=int, nargs="+", default=None,
+                        help="Train sizes for the checkpoint-comparison train-size sweep "
+                             "(default: 100 1000 2000; fixed 2-comp, eval=1000).")
+    parser.add_argument("--label_reg_sweep_train_size", type=int, default=1000,
+                        help="Fixed train size for the 1/2/3-component sweep (default: 1000).")
 
     args = parser.parse_args()
     if args.recon_normalize is not None:

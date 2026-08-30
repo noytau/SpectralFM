@@ -1,0 +1,154 @@
+# @package _group_
+#
+# T8 — Step 0: FE pretrain via d2v self-distillation loss only, no decoder.
+# Based on spectralfm_base.yaml (same model, same fairseq_cli.hydra_train
+# entrypoint, same architecture fields) with two kinds of changes:
+#
+#   1. Geoffrey-local single-GPU settings (spectralfm_base.yaml is sized for
+#      an 8-GPU cluster: batch_size=320, distributed_world_size=8, lr=1e-3).
+#      This file runs on one Geoffrey 2080Ti (11GB): batch_size=128,
+#      distributed_world_size=1, lr=1e-4 — validated overnight on
+#      single_channel_one, healthy loss decrease, no OOM.
+#   2. Per-component init/freeze, so BASE_LIBRI-frozen blocks and
+#      randomly-initialized training blocks can be mixed. This is the ONLY
+#      thing that actually needs to differ between the two Step 0 variants —
+#      everything else below is shared, override just these three at launch:
+#        model.init_proj_ckpt   (base_libri path, or null for random)
+#        model.freeze_proj      (true, or false)
+#        common.wandb_run_name  (cosmetic)
+#
+# freeze_* flags are applied AFTER train_only_fe's blanket freeze and always
+# win (freeze_proj=false unfreezes even if train_only_fe froze it first) —
+# so train_only_fe is irrelevant once freeze_* is set explicitly, and is
+# omitted here rather than set to a value that wouldn't matter.
+#
+# Also fixes a latent bug in spectralfm_base.yaml: user_dir there points at
+# .../fairseq/examples/data2vec (inside the plugin package) instead of
+# .../fairseq/examples/ (the package's parent, which --user-dir actually
+# wants — confirmed by fairseq/examples/data2vec/__init__.py existing one
+# level up from that path).
+
+common:
+  fp16: false
+  log_format: json
+  log_interval: 50
+  tensorboard_logdir: tb
+  user_dir: /mnt5/noy/SpectralFM/fairseq/examples/
+  wandb_project: "spectralfm-t8-step0"
+  wandb_run_name: "t8_step0_lr${optimization.lr[0]}_${now:%Y%m%d_%H%M}"
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 1000
+  keep_interval_updates: 5
+  no_epoch_checkpoints: true
+
+task:
+  _name: audio_pretraining
+  data: /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_one
+  max_sample_size: 500
+  min_sample_size: 200
+  normalize: true
+
+dataset:
+  num_workers: 4
+  batch_size: 128
+  # single_channel_one's committed train.tsv roots at /storage (RunAI
+  # convention) — train_mnt5.tsv is the /mnt5-rooted sibling for local runs.
+  train_subset: train_mnt5
+  valid_subset: train_mnt5
+  disable_validation: true
+  validate_interval_updates: 500
+  skip_invalid_size_inputs_valid_test: true
+  validate_interval: 1
+  required_batch_size_multiple: 1
+
+distributed_training:
+  distributed_world_size: 1
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: model
+  log_keys:
+    - ema_decay
+    - target_var
+    - pred_var
+    - post_extract_in_mean
+    - post_extract_in_std
+    - post_extract_out_mean
+    - post_extract_out_std
+
+optimization:
+  max_update: 30000
+  max_epoch: 0
+  lr: [1.0e-4]
+  update_freq: [1]
+  clip_norm: 1.0
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-06
+  weight_decay: 0.01
+
+lr_scheduler:
+  _name: cosine
+  warmup_updates: 1500
+
+model:
+  _name: data2vec_audio
+  extractor_mode: layer_norm
+  encoder_layerdrop: 0.05
+  dropout_input: 0.0
+  dropout_features: 0.0
+  feature_grad_mult: 1.0
+  encoder_embed_dim: 768
+
+  conv_feature_layers: '[(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]'
+  mask_prob: 0.4
+  mask_length: 10
+
+  loss_beta: 0
+  loss_scale: null
+
+  instance_norm_target_layer: true
+  average_top_k_layers: 8
+
+  pos_conv_depth: 5
+  conv_pos: 95
+
+  ema_decay: 0.999
+  ema_end_decay: 0.9999
+  ema_anneal_end_step: 30000
+  ema_transformer_only: true
+  ema_layers_only: true
+
+  post_extract_proj_type: linear
+  post_extract_proj_mlp_hidden: 1536
+
+  # No decoders — pure d2v (lambda_recon_fe/trans default to 0.0, omitted).
+
+  # Per-component init/freeze — replaces the legacy full-checkpoint load.
+  model_path: null
+  skip_pretrained_weights: true
+
+  init_transformer_ckpt: /mnt5/noy/SpectralFM/fairseq/base_libri_official.pt
+  # Variant switch — override at launch:
+  #   A (proj frozen):  model.init_proj_ckpt=<base_libri path> model.freeze_proj=true
+  #   B (proj trains):  model.init_proj_ckpt=null               model.freeze_proj=false
+  init_proj_ckpt: /mnt5/noy/SpectralFM/fairseq/base_libri_official.pt
+
+  freeze_fe_v2: false
+  freeze_ln: false
+  freeze_proj: true
+  freeze_transformer_v2: true
+  freeze_mask_emb: true
+  freeze_final_proj: true
+
+  tag_param_groups: false
+
+hydra:
+  run:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/${now:%Y-%m-%d_%H-%M-%S}_t8_step0
+  sweep:
+    dir: /mnt5/noy/SpectralFM/fairseq/outputs/recon_loss
