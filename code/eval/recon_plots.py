@@ -367,10 +367,14 @@ _FIG_DOC = {
             "flattened cloud means the output is collapsing toward the mean."
         ),
         "what": (
-            "Hexbin density of predicted value against target value over every "
-            "(sample, bin) pair, one row per dataset and one column per head, with the "
-            "y = x line of perfect calibration drawn. Color is point density on a log "
-            "scale. The rightmost column plots each sample's prediction standard deviation "
+            "Hexbin density of predicted amplitude against target amplitude, one row per "
+            "dataset (labelled down the left) and one column per head (labelled across "
+            "the top), with the y = x line of perfect calibration drawn. No particular "
+            "bin is singled out: every one of the 245 bins of every plotted sample "
+            "contributes a point, so one hexagon counts sample-and-bin pairs and the "
+            "colour is that count on a log scale. This is the only figure here that draws "
+            "raw signals, so it uses the bounded figure subsample rather than the whole "
+            "split - the row label gives both counts whenever they differ. The rightmost column plots each sample's prediction standard deviation "
             "against its target standard deviation, with y = x and y = 0.5x guides - or, "
             "when normalize=True has made every target's standard deviation 1, the "
             "distribution of the ratio std(prediction)/std(target) with a line at 1. Its "
@@ -1344,6 +1348,15 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
         t = r["_arrays"]["target"]
         preds = r["_arrays"]["preds"]
         group = r.get("component_group", "single")
+        # Unlike every other figure here, this one draws raw signals, so it can only use
+        # the bounded subsample - 2000 of multi_channel's 136,828. Labelling the row with
+        # the dataset's full n and leaving it there would credit the cloud to samples that
+        # were never plotted.
+        n_kept = int(r["_arrays"].get("n_kept", len(t)) or len(t))
+        n_total = int(r["_arrays"].get("n_total", n_kept) or n_kept)
+        row_label = "%s\n%s\nn=%s" % (a, _GROUP_SHORT[group], f"{n_total:,}")
+        if n_kept < n_total:
+            row_label += " (%s plotted)" % f"{n_kept:,}"
 
         for c, k in enumerate(heads):
             ax = axes[rowi][c]
@@ -1364,18 +1377,18 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                     color="#ffffff", lw=1.2, label="best-fit slope = %.2f" % slope)
             ax.set_xlim(lim_lo, lim_hi)
             ax.set_ylim(lim_lo, lim_hi)
-            ax.set_xlabel("target value at a bin", fontsize=8)
+            ax.set_xlabel("target amplitude\n(one point per sample-and-bin pair)",
+                          fontsize=8)
             # This is a datasets x heads grid, so naming both in every panel repeats one
             # of them four times and the other three times - and the repeated half is the
             # bold one, which is what made four different datasets look alike. The head
             # is the column and gets a header on the top row; the dataset is the row and
             # gets a label down the left.
             if c == 0:
-                ax.set_ylabel("%s\n%s\n\npredicted value at a bin"
-                              % (_ds_label(r, short=True), _GROUP_SHORT[group]),
-                              fontsize=8.5, fontweight="bold")
+                ax.set_ylabel("%s\n\npredicted amplitude,\nsame sample and bin"
+                              % row_label, fontsize=8.5, fontweight="bold")
             else:
-                ax.set_ylabel("predicted value at a bin", fontsize=8)
+                ax.set_ylabel("predicted amplitude,\nsame sample and bin", fontsize=8)
             if rowi == 0:
                 ax.set_title(PATHWAY_SHORT[k], fontsize=10,
                              color=_head_text_color(k), fontweight="bold", pad=8)
