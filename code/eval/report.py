@@ -172,36 +172,21 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     return figures
 
 
-def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
+_RECON_PATHWAY_STYLE = [
+    ("fe",   "FE recon",          "#1f77b4"),
+    ("proj", "Projection recon",  "#2ca02c"),
+    ("tr",   "Transformer recon", "#d62728"),
+]
+
+
+def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
+                         title, subtitle, filename, output_dir) -> tuple:
     """
-    True signal reconstruction figures, styled after compare_fe_vs_trans_recon.py:
-      1. Per-sample overlay panel — target (black) + FE recon (blue) / TR recon (red),
-         one column per available pathway, y-axis fixed to target range per row.
-      2. Per-sample MSE bars (log scale) comparing the pathways.
+    Shared per-sample overlay grid: target (black) + one column per pathway
+    present, y-axis fixed to target's own range per row. Used for both the
+    normalized (training-scale) view and the physical ([0, ~1]-scale) view —
+    only target/pathways/title/filename differ between the two calls.
     """
-    figures = []
-    if results.get("skipped"):
-        return figures
-
-    panel = results.get("panel") or {}
-    target  = panel.get("target")
-    indices = panel.get("indices") or []
-    names   = panel.get("names") or []
-    rdf     = results.get("results_df")
-
-    _PATHWAY_STYLE = [
-        ("fe",   "FE recon",          "#1f77b4"),
-        ("proj", "Projection recon",  "#2ca02c"),
-        ("tr",   "Transformer recon", "#d62728"),
-    ]
-    pathways = [
-        (label, panel[f"pred_{key}"], color, f"{key}_mse")
-        for key, label, color in _PATHWAY_STYLE
-        if panel.get(f"pred_{key}") is not None
-    ]
-    if target is None or not pathways:
-        return figures
-
     n = len(indices)
     T = target.shape[1]
     fig, axes = plt.subplots(n, len(pathways), figsize=(6.5 * len(pathways), 1.9 * n),
@@ -222,8 +207,8 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
             mse_val = ""
             if rdf is not None and mse_col in rdf.columns:
                 mse_val = f"    MSE = {rdf[rdf['index'] == indices[r]][mse_col].iloc[0]:.2e}"
-            title = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
-            ax.set_title(title, fontsize=7, loc="left")
+            title_cell = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
+            ax.set_title(title_cell, fontsize=7, loc="left")
             if r == 0:
                 ax.legend(fontsize=7, loc="upper right")
 
@@ -231,19 +216,70 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         f"{label} mean MSE = {results[f'recon_{key}_mse_mean']:.3e}"
         + (f" (MAE = {results[f'recon_{key}_mae_mean']:.3e})"
            if f"recon_{key}_mae_mean" in results else "")
-        for key, label, _ in _PATHWAY_STYLE
+        for key, label, _ in _RECON_PATHWAY_STYLE
         if f"recon_{key}_mse_mean" in results
     ]
     fig.suptitle(
-        "Signal Reconstruction — per-pathway (FE / projection / transformer)\n"
-        + "   |   ".join(mean_bits)
-        + f"\nnormalize={results.get('normalize')}   "
-        "(y-axis fixed to target range per row; predictions outside are clipped)",
+        f"{title}\n" + "   |   ".join(mean_bits) + f"\n{subtitle}",
         fontsize=9, y=1.0,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    path = _save_fig(fig, os.path.join(output_dir, "recon_overlay.png"))
+    path = _save_fig(fig, os.path.join(output_dir, filename))
+    return path
+
+
+def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
+    """
+    True signal reconstruction figures, styled after compare_fe_vs_trans_recon.py:
+      1. Per-sample overlay panel — target (black) + FE recon (blue) / TR recon (red),
+         one column per available pathway, y-axis fixed to target range per row.
+         Drawn twice: once on the normalized (training) scale, once mapped back
+         to physical [0, ~1] units (skipped if normalize=False, since the two
+         scales are then identical).
+      2. Per-sample MSE bars (log scale) comparing the pathways.
+    """
+    figures = []
+    if results.get("skipped"):
+        return figures
+
+    panel = results.get("panel") or {}
+    target  = panel.get("target")
+    indices = panel.get("indices") or []
+    names   = panel.get("names") or []
+    rdf     = results.get("results_df")
+
+    pathways = [
+        (label, panel[f"pred_{key}"], color, f"{key}_mse")
+        for key, label, color in _RECON_PATHWAY_STYLE
+        if panel.get(f"pred_{key}") is not None
+    ]
+    if target is None or not pathways:
+        return figures
+
+    path = _draw_recon_overlay(
+        target, pathways, indices, names, rdf, results,
+        title="Signal Reconstruction — per-pathway (FE / projection / transformer)",
+        subtitle=f"normalize={results.get('normalize')}   (normalized/training scale — "
+                 "zero-mean, unit-variance per sample; y-axis fixed to target range per row)",
+        filename="recon_overlay.png", output_dir=output_dir,
+    )
     figures.append(("Reconstruction overlay — target vs per-pathway recon", path))
+
+    target_phys = panel.get("target_phys")
+    if results.get("normalize") and target_phys is not None:
+        pathways_phys = [
+            (label, panel[f"pred_phys_{key}"], color, f"{key}_mse")
+            for key, label, color in _RECON_PATHWAY_STYLE
+            if panel.get(f"pred_phys_{key}") is not None
+        ]
+        path = _draw_recon_overlay(
+            target_phys, pathways_phys, indices, names, rdf, results,
+            title="Signal Reconstruction — physical scale (raw [0, ~1] units)",
+            subtitle="predictions mapped back via each sample's own pre-normalization "
+                     "mean/std; y-axis fixed to target range per row",
+            filename="recon_overlay_physical.png", output_dir=output_dir,
+        )
+        figures.append(("Reconstruction overlay — physical [0,~1] scale", path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
     bar_cols = [(label, color, mse_col) for label, _, color, mse_col in pathways

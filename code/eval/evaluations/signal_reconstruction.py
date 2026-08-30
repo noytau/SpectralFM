@@ -533,9 +533,19 @@ def run(
         data = data[idx]
         fnames = [fnames[i] for i in idx]
 
-    target = torch.from_numpy(data)
+    target_raw = torch.from_numpy(data)
     if normalize:
-        target = F.layer_norm(target, target.shape[-1:])
+        # Save each sample's own (mean, std) so predictions/target can be mapped
+        # back to physical [0, ~1] units for display — F.layer_norm itself is
+        # exactly invertible per-sample: normalized = (raw - mean) / sqrt(var + eps).
+        eps = 1e-5
+        phys_mean = target_raw.mean(dim=1, keepdim=True)
+        phys_std = (target_raw.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
+        target = F.layer_norm(target_raw, target_raw.shape[-1:])
+    else:
+        phys_mean = torch.zeros(len(target_raw), 1)
+        phys_std = torch.ones(len(target_raw), 1)
+        target = target_raw
     L = target.shape[1]
 
     # ── Reconstruct: preds keyed by pathway ('fe' / 'proj' / 'tr') ────────────
@@ -599,11 +609,14 @@ def run(
 
     # Example panel for the overlay plot (deterministic pick)
     ex_idx = np.linspace(0, len(target) - 1, min(n_examples, len(target)), dtype=int)
+    mu, sigma = phys_mean[ex_idx], phys_std[ex_idx]
     out["panel"] = {
         "indices": ex_idx.tolist(),
         "names": [fnames[i] for i in ex_idx],
         "target": target[ex_idx].numpy(),
+        "target_phys": target_raw[ex_idx].numpy(),
         **{f"pred_{k}": preds[k][ex_idx].numpy() for k in pathway_names},
+        **{f"pred_phys_{k}": (preds[k][ex_idx] * sigma + mu).numpy() for k in pathway_names},
     }
 
     msg = [f"[SignalRecon] n={len(target)}"]
