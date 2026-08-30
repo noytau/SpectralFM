@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # T4 — Geoffrey-local launcher for the TV-FE recon experiment (one run).
 # Mirrors the inner command of submit_signal_recon_tv_fe_runai.sh with /mnt5 paths.
+# Set WANDB_PROJECT env to enable W&B logging.
 # Usage: launch_tv_fe_geoffry.sh <gpu_idx> <lambda_tv_fe> [STEPS] [N_SAMPLES] [BATCH] [GA] [TAG]
 set -euo pipefail
 
@@ -8,6 +9,7 @@ GPU="$1"; LTV="$2"
 STEPS="${3:-2000}"; N_SAMPLES="${4:-950}"; BATCH="${5:-128}"; GA="${6:-4}"
 TAG="${7:-tv${LTV/./p}}"
 LR="${LR:-1e-4}"; WARMUP="${WARMUP:-200}"
+WANDB_PROJECT="${WANDB_PROJECT:-}"
 
 REPO=/mnt5/noy/SpectralFM
 TR_BACKBONE_CKPT=${REPO}/fairseq/outputs/recon_loss/2026-05-18_13-17-11_tr_signal_short/checkpoints/checkpoint_572_4000.pt
@@ -20,10 +22,12 @@ STAMP="$(date -u +%Y%m%d_%H%M%SZ)"
 OUT=${REPO}/fairseq/outputs/signal_recon_tv_fe_local/${STAMP}_${TAG}
 mkdir -p "${OUT}"
 
-for f in "${TR_BACKBONE_CKPT}" "${APR28_CKPT}" "${BASE_LIBRI_CKPT}" "${EXP2_LONG_CKPT}" "${MANIFEST}"; do
-  [[ -f "$f" ]] || { echo "ERROR: missing $f"; exit 2; }
-done
+WANDB_ARGS=()
+if [[ -n "${WANDB_PROJECT}" ]]; then
+  WANDB_ARGS=(--wandb_project "${WANDB_PROJECT}" --wandb_run_name "${TAG}_${STAMP}")
+fi
 
+export PYTHONUNBUFFERED=1
 export PYTHONPATH=${REPO}/code:${REPO}/fairseq:${REPO}/fairseq/examples
 export CUDA_VISIBLE_DEVICES=${GPU}
 
@@ -46,9 +50,10 @@ exec /mnt5/noy/miniconda3/envs/spectralfm/bin/python3 ${REPO}/code/train_reconst
     --lambda_recon_trans 0.0 \
     --monitor_recon_proj \
     --normalize \
-    --manifest ${MANIFEST} --n_samples ${N_SAMPLES} \
+    --data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_1k/wav --n_samples ${N_SAMPLES} \
     --steps ${STEPS} --warmup ${WARMUP} \
     --batch_size ${BATCH} --grad_accum_steps ${GA} \
     --lr ${LR} \
+    "${WANDB_ARGS[@]}" \
     --run_suffix ${TAG}_${STAMP} \
     --out_dir "${OUT}" --device cuda

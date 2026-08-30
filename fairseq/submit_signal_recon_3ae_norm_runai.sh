@@ -41,7 +41,7 @@ BASE_LIBRI_CKPT="${BASE_LIBRI_CKPT:-${REPO}/fairseq/base_libri_official.pt}"
 
 # Data manifests
 MANIFEST_SHORT="${MANIFEST_SHORT:-${REPO}/fairseq/data/nova_data/single_channel_100/train.tsv}"
-MANIFEST_LONG="${MANIFEST_LONG:-${REPO}/fairseq/data/nova_data/single_channel_1k/train.tsv}"
+MANIFEST_LONG="${MANIFEST_LONG:-${REPO}/fairseq/data/nova_data/single_channel_1k_with_valid/train.tsv}"
 
 OUT_PARENT="${OUT_PARENT:-${REPO}/fairseq/outputs/signal_recon_3ae_norm}"
 STAMP="$(date -u +%Y%m%d_%H%M%SZ)"
@@ -100,11 +100,12 @@ submit_one() {
 common_head() {
   local manifest="$1"
   echo "set -euo pipefail; \
+cd ${REPO} && git pull --ff-only 2>&1 | tail -5; \
 TR=\"${SPEC_CODE}/train_reconstruction.py\"; \
 for f in \"\$TR\" \"${TR_BACKBONE_CKPT}\" \"${APR28_CKPT}\" \"${BASE_LIBRI_CKPT}\" \"${manifest}\"; do \
   [[ -f \"\$f\" ]] || { echo \"ERROR: missing \$f on PVC\"; exit 2; }; \
 done; \
-cd ${REPO} && export PYTHONPATH=${REPO}/code:${REPO}/fairseq:${REPO}/fairseq/examples CUDA_VISIBLE_DEVICES=0"
+export PYTHONPATH=${REPO}/code:${REPO}/fairseq:${REPO}/fairseq/examples CUDA_VISIBLE_DEVICES=0"
 }
 
 # Shared backbone init flags (same for both experiments)

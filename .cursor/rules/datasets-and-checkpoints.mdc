@@ -88,5 +88,14 @@ For a quick test (500 train / 500 eval):
 |---|---|
 | Compare single vs multi run | `/mnt5/noy/SpectralFM/checkpoints/runai/2026-03-10-compare-single-to-multi/` |
 | Individual run dirs (best checkpoints) | `/mnt5/noy/SpectralFM/checkpoints/runai/<run-name>/checkpoint_best.pt` |
+| **Feb-15 2026 SpectralFM warm-start** (local) | `/mnt5/noy/SpectralFM/checkpoints/checkpoint_best_2026-02-15.pt` |
+| **Feb-15 2026 SpectralFM warm-start** (RunAI) | `/storage/noy/SpectralFM/checkpoints/checkpoint_best_2026-02-15.pt` |
+| May-18 transformer+decoder run (10k steps) | `/mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/2026-05-18_13-17-11_tr_signal_short/` |
+| Decoder-only 2k | `/tmp/checkpoint_last_decoder_2k.pt` (moved to /tmp to free disk) |
+| Decoder-only 10k (old, max_epoch bug) | `/tmp/checkpoint_last_decoder_10k.pt` (moved to /tmp) |
+| Decoder-only 10k-v2 (max_epoch=0) | `/mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/2026-05-20_00-22-00_tr_signal_short/` |
+| Decoder-only 100k (~5k steps, interim) | `/mnt5/noy/SpectralFM/fairseq/outputs/recon_loss/2026-05-20_00-19-58_tr_signal_short/checkpoints/checkpoint_last.pt` |
+
+> **Note:** `/mnt5` disk is at 100% capacity (~1.7 GB free). Old checkpoints were moved to `/tmp` (not persistent across reboots) to make space. Re-copy from RunAI PVC if needed via `kubectl cp spectralfm-shell-g-0-31:/storage/...`.
 
 Both layouts are supported by `--checkpoint_dir` in `eval_fe_decoder.py` and `evaluation_runner.py`.

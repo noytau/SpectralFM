@@ -76,11 +76,12 @@ criterion:
     - pred_var
     - regression          # [SMOKE] data2vec EMA loss
     - loss_recon_fe       # [SMOKE] FE reconstruction L2 (off here)
-    - loss_recon_trans    # [SMOKE] transformer reconstruction L2
+    - loss_recon_trans    # [SMOKE] transformer reconstruction L2 (mean; denom=1)
+    - recon_trans_mse     # true spectrogram MSE (matches offline eval scale)
 
 optimization:
   max_update: 100          # [SMOKE]
-  max_epoch: 100           # [SMOKE]
+  max_epoch: 0             # 0 = unlimited; CLI pins max_update for step budget
   lr: [1.0e-5]             # [SMOKE] from 1e-4 → 1e-5 (per spec)
   update_freq: [1]         # [SMOKE]
   clip_norm: 1.0

@@ -523,6 +523,16 @@ class Data2VecAudioConfig(Wav2Vec2Config):
     skip_pretrained_weights: bool = field(
         default=False, metadata={"help": "if true, does not load pretrained weights"}
     )
+    reset_transformer_init: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Ablation: after loading pretrained weights via model_path, "
+                "re-initialise the transformer encoder (model.encoder) to "
+                "random init while keeping FE / LN / proj / final_proj loaded."
+            )
+        },
+    )
 
     # --- Tier 1 ablation fields ---
     fe_mode: str = field(
@@ -597,6 +607,27 @@ class Data2VecAudioConfig(Wav2Vec2Config):
                     "'flat' (flatten all timesteps → MLP, no mean-pool), "
                     "'mirror' (ConvTranspose1d MirrorDecoder; sample-aligned upsampling; "
                     "needs_full_sequence=True; mirrors train_reconstruction.py heads)"
+        },
+    )
+    trans_recon_decoder_type: str = field(
+        default="mirror",
+        metadata={
+            "help": "Architecture for the transformer reconstruction decoder. Independent "
+                    "of `recon_decoder_type` (which controls the FE branch). Options: "
+                    "'mirror'             — current default; _TransMirrorWrap (Conv1d(embed→512) "
+                    "stem + LayerNorm(512) + MirrorReconDecoder(512, recon_output_dim)). "
+                    "'transformer_mirror' — N transformer blocks (same hyperparams as the "
+                    "encoder, controlled by trans_decoder_num_blocks) followed by a wide "
+                    "mirror upsample (47→237→…→245 keeping `embed` channels) then a final "
+                    "ConvTranspose1d(embed→1, k=3). 'mlp' — original ReconstructionDecoder."
+        },
+    )
+    trans_decoder_num_blocks: int = field(
+        default=12,
+        metadata={
+            "help": "Only used when trans_recon_decoder_type='transformer_mirror'. Number of "
+                    "transformer encoder blocks instantiated in the decoder. Default 12 "
+                    "matches encoder_layers so the decoder exactly mirrors the encoder depth."
         },
     )
 
@@ -915,6 +946,82 @@ class MirrorReconDecoder(nn.Module):
         return x.squeeze(1)  # [B, out_dim]
 
 
+class TransformerMirrorReconDecoder(nn.Module):
+    """Transformer-mirror reconstruction decoder.
+
+    Mirrors the encoder architecture exactly:
+
+    1. **N transformer blocks** with the same hyperparams as the encoder
+       (embed_dim, FFN, heads, activation, layer-norm-first, layerdrop),
+       built by re-instantiating :class:`fairseq.models.wav2vec.TransformerEncoder`
+       with ``skip_pos_conv=True`` (encoder already added positional info) and
+       ``override_encoder_layer=num_blocks``. By default ``num_blocks=encoder_layers``
+       so the decoder block stack is a structural mirror of the encoder.
+    2. **Wide mirror upsampling head** that expands time ``47 → 237 → 239 → 241 →
+       243 → 245`` while keeping the full ``in_channels`` width — no 768→512 stem.
+       The final ``ConvTranspose1d(in_channels → 1, k=3)`` projects to the single
+       output channel.
+
+    Input/output: ``[B, 47, in_channels]`` → ``[B, out_dim]``.
+    """
+
+    needs_full_sequence = True
+
+    def __init__(
+        self,
+        cfg,
+        in_channels: Optional[int] = None,
+        out_dim: int = 245,
+        num_blocks: Optional[int] = None,
+    ):
+        super().__init__()
+        if in_channels is None:
+            in_channels = int(getattr(cfg, "encoder_embed_dim", 768))
+        if num_blocks is None:
+            num_blocks = int(getattr(cfg, "encoder_layers", 12))
+
+        self.in_channels = int(in_channels)
+        self.out_dim = int(out_dim)
+        self.num_blocks = int(num_blocks)
+
+        self.trans_blocks = TransformerEncoder(
+            cfg, skip_pos_conv=True, override_encoder_layer=self.num_blocks,
+        )
+
+        C = self.in_channels
+        self.upsample_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.ConvTranspose1d(C, C, kernel_size=5, stride=5, output_padding=2),
+                nn.LayerNorm(237),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(C, C, kernel_size=3, stride=1),
+                nn.LayerNorm(239),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(C, C, kernel_size=3, stride=1),
+                nn.LayerNorm(241),
+                nn.GELU(),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(C, C, kernel_size=3, stride=1),
+                nn.LayerNorm(243),
+                nn.GELU(),
+            ),
+            nn.ConvTranspose1d(C, 1, kernel_size=3, stride=1),
+        ])
+
+    def forward(self, x_btc):
+        """``x_btc``: ``[B, T, C]`` (encoder output) → ``[B, out_dim]``."""
+        x, _ = self.trans_blocks(x_btc, padding_mask=None)
+        x = x.transpose(1, 2).contiguous()  # [B, C, T]
+        for layer in self.upsample_layers:
+            x = layer(x)
+        return x.squeeze(1)  # [B, out_dim]
+
+
 class FlatReconDecoder(nn.Module):
     """Flatten all timesteps then MLP: [B, T'*C] → [B, out_dim]. No mean-pool."""
 
@@ -1036,8 +1143,26 @@ class Data2VecAudioModel(BaseFairseqModel):
             self.fe_recon_decoder = ReconstructionDecoder(self.extractor_embed, out_d, hspec)
         logger.info(f"[recon] FE decoder type={dec_type}, class={type(self.fe_recon_decoder).__name__}")
 
-        # trans_recon_decoder: 'mirror' upsamples from transformer output (768→512 stem first).
-        if dec_type == "mirror":
+        # trans_recon_decoder. The architecture is selected by `trans_recon_decoder_type`
+        # (independent of `recon_decoder_type`, which controls the FE branch):
+        #
+        #   - 'mirror' (default): _TransMirrorWrap with Conv1d(embed→512, k=1) stem +
+        #     LayerNorm(512) + MirrorReconDecoder(512, recon_output_dim). ~4M params.
+        #   - 'transformer_mirror': TransformerMirrorReconDecoder — N transformer blocks
+        #     with the same hyperparams as the encoder (num_blocks = encoder_layers by
+        #     default) followed by a wide mirror upsample at `embed` width (no stem).
+        #     Aims to give the decoder the same representational capacity as the encoder.
+        #   - 'mlp': legacy ReconstructionDecoder (mean-pooled MLP).
+        #
+        # `recon_decoder_type` is still used as a fallback for back-compat: when
+        # `trans_recon_decoder_type` is left at its default 'mirror' and
+        # `recon_decoder_type` is not 'mirror', we drop back to the legacy MLP head
+        # (matches the pre-2026-05-16 behaviour).
+        trans_dec_type = getattr(cfg, "trans_recon_decoder_type", "mirror")
+        if trans_dec_type == "mirror" and dec_type != "mirror":
+            trans_dec_type = "mlp"  # legacy fallback
+
+        if trans_dec_type == "mirror":
             # Wrap a stem 1×1 conv (embed→512) so transformer features feed the same
             # MirrorReconDecoder used for the FE branch, with sample-aligned output.
             class _TransMirrorWrap(nn.Module):
@@ -1053,8 +1178,24 @@ class Data2VecAudioModel(BaseFairseqModel):
                     x = self.pre_ln(x.transpose(1, 2))
                     return self.body(x)
             self.trans_recon_decoder = _TransMirrorWrap(self.embed, 512, out_d)
+            logger.info(
+                f"[recon] trans_recon_decoder=_TransMirrorWrap(stem {self.embed}→512, "
+                f"MirrorReconDecoder(512,{out_d}))"
+            )
+        elif trans_dec_type == "transformer_mirror":
+            num_blocks = int(getattr(cfg, "trans_decoder_num_blocks", cfg.encoder_layers))
+            self.trans_recon_decoder = TransformerMirrorReconDecoder(
+                cfg, in_channels=self.embed, out_dim=out_d, num_blocks=num_blocks,
+            )
+            logger.info(
+                f"[recon] trans_recon_decoder=TransformerMirrorReconDecoder("
+                f"C={self.embed}, out={out_d}, num_blocks={num_blocks}) [mirrors encoder]"
+            )
         else:
             self.trans_recon_decoder = ReconstructionDecoder(self.embed, out_d, hspec)
+            logger.info(
+                f"[recon] trans_recon_decoder=ReconstructionDecoder({self.embed},{out_d}) [legacy mlp]"
+            )
 
         self.num_updates = 0
         
@@ -1248,6 +1389,22 @@ class Data2VecAudioModel(BaseFairseqModel):
             else:
                 model.load_state_dict(ckpt, strict=False)
                 logger.info(f"Loaded full pretrained checkpoint (strict=False)")
+
+        # Optional ablation: re-initialise just the transformer encoder to
+        # random init (everything else stays pretrained). Useful for
+        # quantifying how much the pretrained encoder matters.
+        if getattr(cfg, "reset_transformer_init", False):
+            n_reset = 0
+            def _reset(m):
+                nonlocal n_reset
+                if hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+                    n_reset += 1
+            model.encoder.apply(_reset)
+            logger.info(
+                f"[reset_transformer_init] Re-initialised model.encoder to "
+                f"random init ({n_reset} submodules reset)."
+            )
 
         # ── Per-component init / freeze / param-group tagging (this PR) ──
         _maybe_apply_recon_components(model, cfg)
@@ -1718,6 +1875,7 @@ class Data2VecAudioModel(BaseFairseqModel):
             result["losses"]["recon_fe"] = (
                 recon_loss_fn(pred_fe, recon_target, reduction="mean") * self.cfg.lambda_recon_fe
             )
+            result.setdefault("loss_sample_sizes", {})["recon_fe"] = 1
         if getattr(self.cfg, "lambda_recon_trans", 0.0) > 0:
             if getattr(self.trans_recon_decoder, "needs_full_sequence", False):
                 pred_t = self.trans_recon_decoder(x)
@@ -1727,6 +1885,14 @@ class Data2VecAudioModel(BaseFairseqModel):
             result["losses"]["recon_trans"] = (
                 recon_loss_fn(pred_t, recon_target, reduction="mean") * self.cfg.lambda_recon_trans
             )
+            # recon losses are already mean-reduced; ModelCriterion must not divide
+            # them by the regression token count (see loss_sample_sizes below).
+            result.setdefault("loss_sample_sizes", {})["recon_trans"] = 1
+            result.setdefault("logs", {})
+            with torch.no_grad():
+                result["logs"]["recon_trans_mse"] = F.mse_loss(
+                    pred_t.float(), recon_target.float(), reduction="mean"
+                ).item()
 
         x = x[mask_indices]
         x = self.final_proj(x)
@@ -1772,6 +1938,7 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         if "sample_size" not in result:
             result["sample_size"] = loss.numel()
+        result.setdefault("loss_sample_sizes", {})["regression"] = loss.numel()
 
         with torch.no_grad():
             result["target_var"] = self.compute_var(y)

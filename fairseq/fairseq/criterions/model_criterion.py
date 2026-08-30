@@ -107,11 +107,23 @@ class ModelCriterion(FairseqCriterion):
                     for i, v in enumerate(net_output[lk]):
                         logging_output[f"{lk}_{i}"] = float(v)
 
+        loss_sample_sizes = {}
+        if isinstance(net_output, dict):
+            loss_sample_sizes = net_output.get("loss_sample_sizes", {}) or {}
+
         if len(scaled_losses) > 1:
             for lk, l in scaled_losses.items():
                 if l.numel() > 1:
                     l = l.sum()
                 logging_output[f"loss_{lk}"] = l.item()
+                logging_output[f"_loss_denom_{lk}"] = loss_sample_sizes.get(lk, sample_size)
+        elif len(scaled_losses) == 1:
+            lk = next(iter(scaled_losses))
+            l = scaled_losses[lk]
+            if l.numel() > 1:
+                l = l.sum()
+            logging_output[f"loss_{lk}"] = l.item()
+            logging_output[f"_loss_denom_{lk}"] = loss_sample_sizes.get(lk, sample_size)
 
         if "logs" in net_output:
             for lgw in net_output["logs"]:
@@ -143,6 +155,9 @@ class ModelCriterion(FairseqCriterion):
             "sample_size",
             "_world_size",
         }
+        builtin_keys.update(
+            k for k in logging_outputs[0] if k.startswith("_loss_denom_")
+        )
 
         world_size = utils.item(
             sum(log.get("_world_size", 0) for log in logging_outputs)
@@ -152,7 +167,29 @@ class ModelCriterion(FairseqCriterion):
             if k not in builtin_keys and not k.startswith("_"):
                 val = sum(log.get(k, 0) for log in logging_outputs)
                 if k.startswith("loss_"):
-                    metrics.log_scalar(k, val / sample_size, sample_size, round=3)
+                    lk = k[len("loss_") :]
+                    denom_key = f"_loss_denom_{lk}"
+                    if denom_key in logging_outputs[0]:
+                        total_denom = sum(
+                            log.get(denom_key, 0) for log in logging_outputs
+                        )
+                    else:
+                        total_denom = sample_size
+                    if total_denom > 0:
+                        metrics.log_scalar(
+                            k, val / total_denom, total_denom, round=3
+                        )
+                    else:
+                        metrics.log_scalar(k, val, round=3)
+                elif k.endswith("_mse") or k in ("recon_trans_mse",):
+                    # Per-batch means already; average over micro-batches in this interval.
+                    n_batches = sum(
+                        log.get("nsentences", 0) for log in logging_outputs
+                    )
+                    if n_batches > 0:
+                        metrics.log_scalar(k, val / n_batches, n_batches, round=3)
+                    else:
+                        metrics.log_scalar(k, val / world_size, round=3)
                 else:
                     metrics.log_scalar(k, val / world_size, round=3)
 

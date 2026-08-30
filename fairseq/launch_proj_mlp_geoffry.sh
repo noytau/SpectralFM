@@ -20,6 +20,7 @@ STAMP="$(date -u +%Y%m%d_%H%M%SZ)"
 OUT=${REPO}/fairseq/outputs/signal_recon_proj_mlp_local/${STAMP}_${TAG}
 mkdir -p "${OUT}"
 
+export PYTHONUNBUFFERED=1
 export PYTHONPATH=${REPO}/code:${REPO}/fairseq:${REPO}/fairseq/examples
 export CUDA_VISIBLE_DEVICES=${GPU}
 
@@ -42,7 +43,7 @@ exec /mnt5/noy/miniconda3/envs/spectralfm/bin/python3 ${REPO}/code/train_reconst
     --lambda_recon_trans 0.0 \
     --lambda_tv_fe      0.0 \
     --normalize \
-    --manifest ${MANIFEST} --n_samples ${N_SAMPLES} \
+    --data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/single_channel_1k/wav --n_samples ${N_SAMPLES} \
     --steps ${STEPS} --warmup ${WARMUP} \
     --batch_size ${BATCH} --grad_accum_steps ${GA} \
     --lr ${LR} \
