@@ -58,6 +58,7 @@ All standalone HTML documentation lives in one place: [`docs/html/`](docs/html/)
 |---|---|
 | `docs/html/index.html` | **Start here** — hub page linking every doc and resource in the project. |
 | `docs/html/architecture.html` | `ARCHITECTURE.md`, styled for reading rather than editing. |
+| `docs/html/training-plan.html` | The Step 0–4 training-experiment ladder (3AE + d2v joint plan): architecture diagram + per-step freeze/loss table. Archived snapshot of the original plan; the live ledger is `TASKS.md` (T8–T12). |
 | `docs/html/project-story.html` | A non-technical project overview — what SpectralFM is and why, for someone outside the immediate team. |
 | `docs/html/RECON_2AE_BASEMERGE.html` | `code/docs/RECON_2AE_BASEMERGE.md`. |
 | `docs/html/recon_loss_explained.html` | Background on the original data2vec reconstruction-loss design. |
