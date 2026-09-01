@@ -172,6 +172,14 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     return figures
 
 
+def _recon_fig_caption(path: str) -> str:
+    """Short caption for a figure, from the shared recon_plots registry."""
+    from . import recon_plots
+    d = recon_plots.doc_for_figure(path)
+    return d["caption"] if d else os.path.basename(path)
+
+
+
 _RECON_PATHWAY_STYLE = [
     ("fe",   "FE recon",          "#1f77b4"),
     ("proj", "Projection recon",  "#2ca02c"),
@@ -180,14 +188,22 @@ _RECON_PATHWAY_STYLE = [
 
 
 def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
-                         title, subtitle, filename, output_dir) -> tuple:
+                        title, subtitle, filename, output_dir) -> str:
     """
-    Shared per-sample overlay grid: target (black) + one column per pathway
-    present, y-axis fixed to target's own range per row. Used for both the
-    normalized (training-scale) view and the physical ([0, ~1]-scale) view —
-    only target/pathways/title/filename differ between the two calls.
+    Shared per-sample overlay grid: target (black) + one column per pathway present,
+    y-axis fixed to the target's own range per row. Used for both the normalized
+    (training-scale) view and the physical ([0, ~1]-scale) one.
     """
-    n = len(indices)
+    from . import recon_plots
+    eink = recon_plots.is_eink()
+
+    # Eighteen panels across a 6-inch page is nothing but ink; the full set stays in the
+    # HTML, where there is room to scroll.
+    rows = list(range(len(indices)))
+    if eink and len(rows) > 3:
+        rows = [rows[i] for i in np.linspace(0, len(rows) - 1, 3).astype(int)]
+
+    n = len(rows)
     T = target.shape[1]
     cell_w, cell_h = (2.3, 1.75) if eink else (6.5, 1.9)
     fs_tick, fs_label, fs_title = (8, 10, 8) if eink else (6, 9, 7)
@@ -211,9 +227,12 @@ def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
                               ha="right", labelpad=22)
             mse_val = ""
             if rdf is not None and mse_col in rdf.columns:
-                mse_val = f"    MSE = {rdf[rdf['index'] == indices[r]][mse_col].iloc[0]:.2e}"
-            title_cell = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
-            ax.set_title(title_cell, fontsize=7, loc="left")
+                match = rdf[rdf["index"] == indices[ri]]
+                if len(match):
+                    mse_val = f"    MSE = {match[mse_col].iloc[0]:.2e}"
+            title_cell = (f"{names[ri][-40:]}{mse_val}" if c == 0
+                          else f"{pw_label}{mse_val}")
+            ax.set_title(title_cell, fontsize=fs_title, loc="left")
             if r == 0:
                 ax.legend(fontsize=fs_title, loc="upper right")
 
@@ -224,13 +243,10 @@ def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
         for key, label, _ in _RECON_PATHWAY_STYLE
         if f"recon_{key}_mse_mean" in results
     ]
-    fig.suptitle(
-        f"{title}\n" + "   |   ".join(mean_bits) + f"\n{subtitle}",
-        fontsize=9, y=1.0,
-    )
+    fig.suptitle(f"{title}\n" + "   |   ".join(mean_bits) + f"\n{subtitle}",
+                 fontsize=9, y=1.0)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    path = _save_fig(fig, os.path.join(output_dir, filename))
-    return path
+    return _save_fig(fig, os.path.join(output_dir, filename))
 
 
 def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
@@ -253,9 +269,11 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     names   = panel.get("names") or []
     rdf     = results.get("results_df")
 
+    from . import recon_plots
     pathways = [
-        (label, panel[f"pred_{key}"], color, f"{key}_mse")
-        for key, label, color in _RECON_PATHWAY_STYLE
+        (label, panel[f"pred_{key}"], recon_plots._HEAD_COLOR[key],
+         recon_plots._HEAD_LS[key], f"{key}_mse")
+        for key, label, _ in _RECON_PATHWAY_STYLE
         if panel.get(f"pred_{key}") is not None
     ]
     if target is None or not pathways:
@@ -273,8 +291,9 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     target_phys = panel.get("target_phys")
     if results.get("normalize") and target_phys is not None:
         pathways_phys = [
-            (label, panel[f"pred_phys_{key}"], color, f"{key}_mse")
-            for key, label, color in _RECON_PATHWAY_STYLE
+            (label, panel[f"pred_phys_{key}"], recon_plots._HEAD_COLOR[key],
+             recon_plots._HEAD_LS[key], f"{key}_mse")
+            for key, label, _ in _RECON_PATHWAY_STYLE
             if panel.get(f"pred_phys_{key}") is not None
         ]
         path = _draw_recon_overlay(
@@ -287,6 +306,10 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         figures.append(("Reconstruction overlay — physical [0,~1] scale", path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
+    eink = recon_plots.is_eink()
+    rows = list(range(len(indices)))
+    if eink and len(rows) > 3:
+        rows = [rows[i] for i in np.linspace(0, len(rows) - 1, 3).astype(int)]
     bar_cols = [(label, color, mse_col.split("_")[0], mse_col)
                 for label, _, color, _, mse_col in pathways
                 if rdf is not None and mse_col in rdf.columns]
