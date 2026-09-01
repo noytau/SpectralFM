@@ -172,53 +172,22 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     return figures
 
 
-def _recon_fig_caption(path: str) -> str:
-    """Short caption for a figure, from the shared recon_plots registry."""
-    from . import recon_plots
-    d = recon_plots.doc_for_figure(path)
-    return d["caption"] if d else os.path.basename(path)
+_RECON_PATHWAY_STYLE = [
+    ("fe",   "FE recon",          "#1f77b4"),
+    ("proj", "Projection recon",  "#2ca02c"),
+    ("tr",   "Transformer recon", "#d62728"),
+]
 
 
-def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
+def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
+                         title, subtitle, filename, output_dir) -> tuple:
     """
-    True signal reconstruction figures, styled after compare_fe_vs_trans_recon.py:
-      1. Per-sample overlay panel — target (black) + FE recon (blue) / TR recon (red),
-         one column per available pathway, y-axis fixed to target range per row.
-      2. Per-sample MSE bars (log scale) comparing the pathways.
+    Shared per-sample overlay grid: target (black) + one column per pathway
+    present, y-axis fixed to target's own range per row. Used for both the
+    normalized (training-scale) view and the physical ([0, ~1]-scale) view —
+    only target/pathways/title/filename differ between the two calls.
     """
-    figures = []
-    if results.get("skipped"):
-        return figures
-
-    panel = results.get("panel") or {}
-    target  = panel.get("target")
-    indices = panel.get("indices") or []
-    names   = panel.get("names") or []
-    rdf     = results.get("results_df")
-
-    # Head colours, line styles and the e-ink switch all live in recon_plots, so this
-    # figure follows them too rather than keeping a private palette that would stay in
-    # colour when everything else went greyscale.
-    from . import recon_plots
-    eink = recon_plots.is_eink()
-
-    pathways = [
-        (label, panel[f"pred_{key}"], recon_plots._HEAD_COLOR[key],
-         recon_plots._HEAD_LS[key], f"{key}_mse")
-        for key, label in (("fe", "FE recon"), ("proj", "Projection recon"),
-                           ("tr", "Transformer recon"))
-        if panel.get(f"pred_{key}") is not None
-    ]
-    if target is None or not pathways:
-        return figures
-
-    # Eighteen panels across a 6-inch page is nothing but ink. Fewer, taller rows on a
-    # page; the full six stay in the HTML, where there is room to scroll.
-    rows = list(range(len(indices)))
-    if eink and len(rows) > 3:
-        rows = [rows[i] for i in np.linspace(0, len(rows) - 1, 3).astype(int)]
-
-    n = len(rows)
+    n = len(indices)
     T = target.shape[1]
     cell_w, cell_h = (2.3, 1.75) if eink else (6.5, 1.9)
     fs_tick, fs_label, fs_title = (8, 10, 8) if eink else (6, 9, 7)
@@ -242,9 +211,9 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
                               ha="right", labelpad=22)
             mse_val = ""
             if rdf is not None and mse_col in rdf.columns:
-                mse_val = f"  MSE = {rdf[rdf['index'] == indices[ri]][mse_col].iloc[0]:.2e}"
-            title = f"{names[ri][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
-            ax.set_title(title, fontsize=fs_title, loc="left")
+                mse_val = f"    MSE = {rdf[rdf['index'] == indices[r]][mse_col].iloc[0]:.2e}"
+            title_cell = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
+            ax.set_title(title_cell, fontsize=7, loc="left")
             if r == 0:
                 ax.legend(fontsize=fs_title, loc="upper right")
 
@@ -252,20 +221,70 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         f"{label} mean MSE = {results[f'recon_{key}_mse_mean']:.3e}"
         + (f" (MAE = {results[f'recon_{key}_mae_mean']:.3e})"
            if f"recon_{key}_mae_mean" in results else "")
-        for key, label in (("fe", "FE recon"), ("proj", "Projection recon"),
-                           ("tr", "Transformer recon"))
+        for key, label, _ in _RECON_PATHWAY_STYLE
         if f"recon_{key}_mse_mean" in results
     ]
     fig.suptitle(
-        "Signal Reconstruction — per-pathway (FE / projection / transformer)\n"
-        + "   |   ".join(mean_bits)
-        + f"\nnormalize={results.get('normalize')}   "
-        "(y-axis fixed to target range per row; predictions outside are clipped)",
+        f"{title}\n" + "   |   ".join(mean_bits) + f"\n{subtitle}",
         fontsize=9, y=1.0,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    path = _save_fig(fig, os.path.join(output_dir, "recon_overlay.png"))
-    figures.append((_recon_fig_caption(path), path))
+    path = _save_fig(fig, os.path.join(output_dir, filename))
+    return path
+
+
+def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
+    """
+    True signal reconstruction figures, styled after compare_fe_vs_trans_recon.py:
+      1. Per-sample overlay panel — target (black) + FE recon (blue) / TR recon (red),
+         one column per available pathway, y-axis fixed to target range per row.
+         Drawn twice: once on the normalized (training) scale, once mapped back
+         to physical [0, ~1] units (skipped if normalize=False, since the two
+         scales are then identical).
+      2. Per-sample MSE bars (log scale) comparing the pathways.
+    """
+    figures = []
+    if results.get("skipped"):
+        return figures
+
+    panel = results.get("panel") or {}
+    target  = panel.get("target")
+    indices = panel.get("indices") or []
+    names   = panel.get("names") or []
+    rdf     = results.get("results_df")
+
+    pathways = [
+        (label, panel[f"pred_{key}"], color, f"{key}_mse")
+        for key, label, color in _RECON_PATHWAY_STYLE
+        if panel.get(f"pred_{key}") is not None
+    ]
+    if target is None or not pathways:
+        return figures
+
+    path = _draw_recon_overlay(
+        target, pathways, indices, names, rdf, results,
+        title="Signal Reconstruction — per-pathway (FE / projection / transformer)",
+        subtitle=f"normalize={results.get('normalize')}   (normalized/training scale — "
+                 "zero-mean, unit-variance per sample; y-axis fixed to target range per row)",
+        filename="recon_overlay.png", output_dir=output_dir,
+    )
+    figures.append(("Reconstruction overlay — target vs per-pathway recon", path))
+
+    target_phys = panel.get("target_phys")
+    if results.get("normalize") and target_phys is not None:
+        pathways_phys = [
+            (label, panel[f"pred_phys_{key}"], color, f"{key}_mse")
+            for key, label, color in _RECON_PATHWAY_STYLE
+            if panel.get(f"pred_phys_{key}") is not None
+        ]
+        path = _draw_recon_overlay(
+            target_phys, pathways_phys, indices, names, rdf, results,
+            title="Signal Reconstruction — physical scale (raw [0, ~1] units)",
+            subtitle="predictions mapped back via each sample's own pre-normalization "
+                     "mean/std; y-axis fixed to target range per row",
+            filename="recon_overlay_physical.png", output_dir=output_dir,
+        )
+        figures.append(("Reconstruction overlay — physical [0,~1] scale", path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
     bar_cols = [(label, color, mse_col.split("_")[0], mse_col)
@@ -1098,8 +1117,24 @@ def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
                  if first.get("normalize") else "targets are the raw signal"), ""]
     lines += _RECON_INTRO
 
-    # ── 1. Per dataset ───────────────────────────────────────────────────────
-    lines += ["", "### 1. Per dataset", "",
+    # ── 1. Sample level (the pre-existing overlays) ──────────────────────────
+    sample_figs = {key: figures_by_eval.get(key, []) for key in keys}
+    if any(sample_figs.values()):
+        lines += ["", "### 1. Individual reconstructions", "",
+                  "Target against each head's output, per dataset — on the training "
+                  "scale and, when `normalize=True`, mapped back to physical units.", ""]
+        for key in keys:
+            r = results[key]
+            alias = _split_eval_key(key)[1]
+            if r.get("skipped") or not sample_figs.get(key):
+                continue
+            lines += ["#### %s" % _recon_dataset_heading(r, alias), ""]
+            for f in sample_figs[key]:
+                lines += _recon_md_figure(f[0], f[1], run_dir) + [""]
+        lines += ["---", ""]
+
+    # ── 2. Per dataset ───────────────────────────────────────────────────────
+    lines += ["", "### 2. Per dataset", "",
               "Headline numbers per head, over every sample drawn.", "",
               _RECON_TABLE_LEGEND, ""]
     for key in keys:
@@ -1121,7 +1156,7 @@ def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
 
     # ── 2. Across datasets ───────────────────────────────────────────────────
     if summary_figs:
-        lines += ["---", "", "### 2. Across datasets", "",
+        lines += ["---", "", "### 3. Across datasets", "",
                   "Every dataset in one view, with single-component and multi-component "
                   "blocks kept visually separate.", ""]
         combined = _recon_combined_table(results)
@@ -1249,7 +1284,21 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list,
                          if first.get("normalize") else "targets are the raw signal")))
     parts += intro_html
 
-    parts += ["<h3>1. Per dataset</h3>",
+    if any(figures_by_eval.get(key) for key in keys):
+        parts += ["<h3>1. Individual reconstructions</h3>",
+                  para("Target against each head's output, per dataset — on the training "
+                       "scale and, when <code>normalize=True</code>, mapped back to "
+                       "physical units.")]
+        for key in keys:
+            r = results[key]
+            if r.get("skipped") or not figures_by_eval.get(key):
+                continue
+            parts.append("<h4>%s</h4>" % _md_inline_to_html(
+                _recon_dataset_heading(r, _split_eval_key(key)[1])))
+            for f in figures_by_eval[key]:
+                parts.append(_recon_html_figure(f[0], f[1]))
+
+    parts += ["<h3>2. Per dataset</h3>",
               para("Headline numbers per head, over every sample drawn."),
               para(_md_inline_to_html(_RECON_TABLE_LEGEND))]
     for key in keys:
@@ -1268,7 +1317,7 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list,
                               % len(spec)))
 
     if summary_figs:
-        parts += ["<h3>2. Across datasets</h3>",
+        parts += ["<h3>3. Across datasets</h3>",
                   para("Every dataset in one view, with single-component and "
                        "multi-component blocks kept visually separate.")]
         combined = _recon_combined_table(results)
@@ -1299,6 +1348,63 @@ def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list,
 
     parts.append("</section>")
     return "\n".join(p for p in parts if p)
+_SWEEP_COLORS = ["dimgray", "steelblue", "darkorange", "mediumseagreen", "purple", "crimson"]
+
+
+def _label_reg_sweep_cell(ax, cell: dict, color: str, is_best: bool, show_col_title: bool) -> None:
+    """One true-vs-predicted scatter panel for a label-regression sweep grid.
+    Matches legacy label_reg_evaluation.py::_scatter_panel styling exactly."""
+    y_true, y_pred, y_train = cell["y_true"], cell["y_pred"], cell["y_train"]
+    ax.scatter(y_true, y_pred, s=3, alpha=0.2, color=color, rasterized=True)
+    lo = min(y_true.min(), y_pred.min()) - 0.05
+    hi = max(y_true.max(), y_pred.max()) + 0.05
+    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.2)
+    best_tag = "★ BEST  " if is_best else ""
+    title = f"{cell['col_label']}\n{cell['row_label']}" if show_col_title else cell["row_label"]
+    ax.set_title(
+        f"{best_tag}{title}\n"
+        f"R²={cell['r2']:.3f}  r={cell['pearson_r']:.3f}  MAE={cell['mae']:.3f}\n"
+        f"train μ={y_train.mean():.2f} σ={y_train.std():.2f}\n"
+        f"pred  μ={y_pred.mean():.2f} σ={y_pred.std():.2f}",
+        fontsize=7.5, fontweight="bold" if is_best else "normal",
+        color="darkgreen" if is_best else "black",
+    )
+    if is_best:
+        for spine in ax.spines.values():
+            spine.set_edgecolor("gold")
+            spine.set_linewidth(3)
+        ax.patch.set_facecolor("#fffff0")
+    ax.set_xlabel("True", fontsize=7)
+    ax.set_ylabel("Pred", fontsize=7)
+    ax.grid(True, alpha=0.2)
+    ax.tick_params(labelsize=6)
+
+
+def _plot_label_reg_sweep(sweep: dict, output_dir: str, suptitle: str, fname: str) -> list:
+    """
+    Side-by-side checkpoint comparison grid for a label_regression_sweeps result
+    (run_train_size_sweep or run_component_sweep): rows = sweep['row_values'],
+    cols = sweep['columns'] (Raw input + one per checkpoint), one scatter panel
+    per (row, col) cell, global-best cell highlighted in gold.
+    """
+    row_values = sweep["row_values"]
+    columns = sweep["columns"]
+    cells = sweep["cells"]
+    if not cells:
+        return []
+    n_rows, n_cols = len(row_values), len(columns)
+
+    best = max(cells, key=lambda k: cells[k]["r2"])
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
+    fig.suptitle(suptitle, fontsize=12, fontweight="bold")
+    for (row, col), cell in cells.items():
+        _label_reg_sweep_cell(
+            axes[row][col], cell, _SWEEP_COLORS[col % len(_SWEEP_COLORS)],
+            is_best=(row, col) == best, show_col_title=(row == 0),
+        )
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    path = _save_fig(fig, os.path.join(output_dir, fname))
+    return [(suptitle, path, "")]
 
 
 # Eval name → output subdirectory name (E3 restructure)
@@ -1402,6 +1508,21 @@ def _plot_checkpoint_comparison(results: dict, output_dir: str) -> list:
             figures += _relocate(figs, os.path.join(output_dir, "comparison", alias))
         lr_figs = _plot_label_regression_comparison(cdf, output_dir)
         figures += _relocate(lr_figs, os.path.join(output_dir, "comparison", "labeled"))
+
+        if results.get("label_reg_train_size_sweep"):
+            figs = _plot_label_reg_sweep(
+                results["label_reg_train_size_sweep"], output_dir,
+                "Label Regression — Training Size Sweep (linear probe)",
+                "label_reg_train_size_sweep.png",
+            )
+            figures += _relocate(figs, os.path.join(output_dir, "comparison", "labeled"))
+        if results.get("label_reg_component_sweep"):
+            figs = _plot_label_reg_sweep(
+                results["label_reg_component_sweep"], output_dir,
+                "Label Regression — 1 vs 2 vs 3 Components (linear probe)",
+                "label_reg_component_sweep.png",
+            )
+            figures += _relocate(figs, os.path.join(output_dir, "comparison", "labeled"))
 
     # ── Summary: all-models structured similarity (raw + centered) ───────────
     if per_cp:

@@ -362,8 +362,24 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
     doc.append(_prose(_RECON_INTRO))
     doc.append(r"\clearpage")
 
-    # 1 — per dataset.
-    doc.append(r"\section*{1. Per dataset}")
+    # 1 — the pre-existing per-sample overlays.
+    if any(figures_by_eval.get(k) for k in keys):
+        doc.append(r"\section*{1. Individual reconstructions}")
+        doc.append(tex_inline(
+            "Target against each head's output, per dataset - on the training scale and, "
+            "when normalize=True, mapped back to physical units."))
+        for key in keys:
+            r = results[key]
+            if r.get("skipped") or not figures_by_eval.get(key):
+                continue
+            heading = _recon_dataset_heading(r, _split_eval_key(key)[1])
+            for f in figures_by_eval[key]:
+                title, explain = _explain_lines(f[1])
+                doc.append(_figure_page(f[1], _recon_fig_caption(f[1]), explain,
+                                        "%s \u2014 %s" % (heading, title)))
+
+    # 2 — per dataset.
+    doc.append(r"\section*{2. Per dataset}")
     doc.append(tex_inline("Headline numbers per head, over every sample drawn."))
     doc.append(r"{\small %s\par}" % tex_inline(_RECON_TABLE_LEGEND))
     for key in keys:
@@ -384,7 +400,7 @@ def build_tex(results: dict, figures_by_eval: dict, summary_figs: list,
 
     # 3 — across datasets.
     if summary_figs:
-        doc.append(r"\section*{2. Across datasets}")
+        doc.append(r"\section*{3. Across datasets}")
         doc.append(tex_inline(
             "Every dataset in one view, with single-component and multi-component blocks "
             "kept visually separate."))

@@ -1,0 +1,752 @@
+<title>SpectralFM — 3AE + d2v Training Plan</title>
+<style>
+  :root {
+    --paper: #f3f4ef;
+    --ink: #171b21;
+    --ink-soft: #4c525c;
+    --ink-faint: #7a808a;
+    --line: rgba(23, 27, 33, 0.13);
+    --line-strong: rgba(23, 27, 33, 0.24);
+    --card: #fbfbf8;
+    --signal: #a9631c;
+    --signal-bg: rgba(169, 99, 28, 0.10);
+    --signal-bg-strong: rgba(169, 99, 28, 0.16);
+    --deep: #2c4a63;
+    --deep-bg: rgba(44, 74, 99, 0.10);
+    --teal: #35695f;
+    --teal-bg: rgba(53, 105, 95, 0.10);
+    --warn: #a53f22;
+    --warn-bg: rgba(165, 63, 34, 0.10);
+    --frozen-bg: rgba(76, 82, 92, 0.09);
+    --state-frozen: #ad3a30;
+    --state-frozen-bg: rgba(173, 58, 48, 0.10);
+    --state-train: #3f7d3a;
+    --state-train-bg: rgba(63, 125, 58, 0.11);
+    --shadow: 0 1px 2px rgba(23,27,33,0.04), 0 8px 24px -12px rgba(23,27,33,0.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #12161c;
+      --ink: #e9eae4;
+      --ink-soft: #b3b8c1;
+      --ink-faint: #7d8490;
+      --line: rgba(233, 234, 228, 0.14);
+      --line-strong: rgba(233, 234, 228, 0.26);
+      --card: #171c23;
+      --signal: #e3a24a;
+      --signal-bg: rgba(227, 162, 74, 0.12);
+      --signal-bg-strong: rgba(227, 162, 74, 0.20);
+      --deep: #86accb;
+      --deep-bg: rgba(134, 172, 203, 0.14);
+      --teal: #74b6a9;
+      --teal-bg: rgba(116, 182, 169, 0.12);
+      --warn: #e2825a;
+      --warn-bg: rgba(226, 130, 90, 0.13);
+      --frozen-bg: rgba(179, 184, 193, 0.10);
+      --state-frozen: #e2685a;
+      --state-frozen-bg: rgba(226, 104, 90, 0.15);
+      --state-train: #7ecb72;
+      --state-train-bg: rgba(126, 203, 114, 0.14);
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #12161c; --ink: #e9eae4; --ink-soft: #b3b8c1; --ink-faint: #7d8490;
+    --line: rgba(233, 234, 228, 0.14); --line-strong: rgba(233, 234, 228, 0.26);
+    --card: #171c23; --signal: #e3a24a; --signal-bg: rgba(227, 162, 74, 0.12);
+    --signal-bg-strong: rgba(227, 162, 74, 0.20); --deep: #86accb; --deep-bg: rgba(134, 172, 203, 0.14); --teal: #74b6a9;
+    --teal-bg: rgba(116, 182, 169, 0.12); --warn: #e2825a; --warn-bg: rgba(226, 130, 90, 0.13);
+    --frozen-bg: rgba(179, 184, 193, 0.10);
+    --state-frozen: #e2685a; --state-frozen-bg: rgba(226, 104, 90, 0.15);
+    --state-train: #7ecb72; --state-train-bg: rgba(126, 203, 114, 0.14);
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+  }
+  :root[data-theme="light"] {
+    --paper: #f3f4ef; --ink: #171b21; --ink-soft: #4c525c; --ink-faint: #7a808a;
+    --line: rgba(23, 27, 33, 0.13); --line-strong: rgba(23, 27, 33, 0.24);
+    --card: #fbfbf8; --signal: #a9631c; --signal-bg: rgba(169, 99, 28, 0.10);
+    --signal-bg-strong: rgba(169, 99, 28, 0.16); --deep: #2c4a63; --deep-bg: rgba(44, 74, 99, 0.10); --teal: #35695f;
+    --teal-bg: rgba(53, 105, 95, 0.10); --warn: #a53f22; --warn-bg: rgba(165, 63, 34, 0.10);
+    --frozen-bg: rgba(76, 82, 92, 0.09);
+    --state-frozen: #ad3a30; --state-frozen-bg: rgba(173, 58, 48, 0.10);
+    --state-train: #3f7d3a; --state-train-bg: rgba(63, 125, 58, 0.11);
+    --shadow: 0 1px 2px rgba(23,27,33,0.04), 0 8px 24px -12px rgba(23,27,33,0.18);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+  }
+  body {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  h1, h2, h3 {
+    font-family: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .page {
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 56px 32px 96px;
+  }
+
+  /* ---------- Masthead ---------- */
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--signal);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 22px;
+    height: 1px;
+    background: var(--signal);
+    display: inline-block;
+  }
+  h1 {
+    font-size: clamp(28px, 4vw, 40px);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .subtitle {
+    margin-top: 10px;
+    font-size: 16px;
+    color: var(--ink-soft);
+    max-width: 62ch;
+  }
+
+  /* ---------- Section headings ---------- */
+  .section-heading {
+    margin-top: 56px;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .section-heading h2 {
+    font-size: 21px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .section-heading .section-sub {
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+
+  /* ---------- Architecture diagram ---------- */
+  .diagram-wrap {
+    margin-top: 20px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card);
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+    padding: 8px;
+  }
+  .diagram-wrap svg { display: block; min-width: 900px; width: 100%; height: auto; }
+  .dg-box { fill: var(--paper); stroke: var(--line-strong); stroke-width: 1.25; }
+  .dg-box.ghost { fill: none; stroke: var(--ink-faint); stroke-dasharray: 4 3; }
+  .dg-box.d2v { fill: var(--deep); fill-opacity: 0.10; stroke: var(--deep); }
+  .dg-box.recon { fill: var(--signal); fill-opacity: 0.09; stroke: var(--signal); }
+  .dg-title { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; fill: var(--ink); text-anchor: middle; }
+  .dg-sub { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-size: 10px; fill: var(--ink-soft); text-anchor: middle; }
+  .dg-sub.ghost-text { fill: var(--ink-faint); }
+  .dg-path-fwd { fill: none; stroke: var(--ink-faint); stroke-width: 1.5; marker-end: url(#arrow-fwd); }
+  .dg-path-d2v { fill: none; stroke: var(--deep); stroke-width: 1.5; stroke-dasharray: 5 4; marker-end: url(#arrow-d2v); }
+  .dg-path-recon { fill: none; stroke: var(--signal); stroke-width: 1.5; stroke-dasharray: 5 4; marker-end: url(#arrow-recon); }
+  .dg-path-bus { fill: none; stroke: var(--ink-faint); stroke-width: 1.25; stroke-dasharray: 3 3; }
+  .dg-path-bus.arrowed { marker-end: url(#arrow-bus); }
+  .dg-caption { font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 10.5px; fill: var(--ink-faint); text-anchor: middle; }
+  .dg-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-top: 14px;
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .dg-legend-item { display: flex; align-items: center; gap: 7px; }
+  .dg-legend-line { width: 22px; height: 0; border-top-width: 2px; border-top-style: solid; flex: none; }
+
+  /* ---------- Chain diagram ---------- */
+  .chain {
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+  .chain .node {
+    padding: 5px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 3px;
+    color: var(--ink-soft);
+    background: var(--card);
+    white-space: nowrap;
+  }
+  .chain .node.origin { border-color: var(--signal); color: var(--signal); font-weight: 600; }
+  .chain .node.dashed { border-style: dashed; color: var(--ink-faint); background: transparent; }
+  .chain .arrow { color: var(--ink-faint); padding: 0 2px; }
+  .chain.chain-branch { margin-top: 8px; font-size: 11px; }
+  .chain-branch .branch-label { color: var(--ink-faint); white-space: nowrap; }
+
+  /* ---------- Legend ---------- */
+  .legend {
+    margin-top: 40px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .swatch {
+    width: 10px; height: 10px; border-radius: 2px; flex: none;
+  }
+
+  /* ---------- Table ---------- */
+  .table-wrap {
+    margin-top: 22px;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: var(--shadow);
+    background: var(--card);
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 1080px;
+  }
+  thead th {
+    text-align: left;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line-strong);
+    background: var(--card);
+    position: sticky;
+    top: 0;
+  }
+  thead th:first-child { position: sticky; left: 0; z-index: 3; }
+  tbody th[scope="row"] {
+    position: sticky;
+    left: 0;
+    background: var(--card);
+    z-index: 2;
+    box-shadow: 1px 0 0 var(--line-strong);
+  }
+  td, tbody th {
+    padding: 16px;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: none; }
+  tbody tr:hover td, tbody tr:hover th { background: var(--signal-bg); }
+  @media (prefers-reduced-motion: no-preference) {
+    tbody tr td, tbody tr th { transition: background 120ms ease; }
+  }
+
+  .step-name {
+    font-family: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+    font-weight: 600;
+    font-size: 14.5px;
+    color: var(--ink);
+    min-width: 190px;
+  }
+  .step-num {
+    display: block;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--signal);
+    letter-spacing: 0.04em;
+    margin-bottom: 3px;
+  }
+  .status-flag {
+    display: inline-block;
+    margin-top: 8px;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+  .status-flag.existing { color: var(--teal); background: var(--teal-bg); }
+  .status-flag.new { color: var(--warn); background: var(--warn-bg); }
+  .status-flag.verify { color: var(--deep); background: var(--deep-bg); }
+
+  .comp-cell { min-width: 175px; }
+  .decoder-cell { min-width: 165px; }
+  .decoder-item { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+  .decoder-item:last-child { margin-bottom: 0; }
+  .decoder-item .pill { margin-bottom: 0; flex: none; }
+  .decoder-item .dname { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink-soft); }
+  .decoder-item .dnote { display: block; font-size: 10.5px; color: var(--ink-faint); margin-top: 1px; }
+  .pill {
+    display: inline-block;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 2px 7px;
+    border-radius: 3px;
+    margin-bottom: 6px;
+  }
+  .pill.train { color: var(--state-train); background: var(--state-train-bg); }
+  .pill.frozen { color: var(--state-frozen); background: var(--state-frozen-bg); }
+  .pill.unused { color: var(--ink-faint); background: transparent; border: 1px dashed var(--line-strong); }
+  .comp-detail {
+    display: block;
+    color: var(--ink-soft);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .comp-detail .mono { font-size: 12px; }
+
+  .loss-cell { min-width: 215px; }
+  .loss-expr {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+  }
+  .loss-expr .lx-d2v { color: var(--deep); font-weight: 600; }
+  .loss-expr .lx-recon { color: var(--signal); }
+  .loss-expr .lx-opt { color: var(--ink-faint); }
+
+  .hp-cell { min-width: 175px; }
+  .hp-row { display: flex; gap: 6px; font-size: 12px; margin-bottom: 3px; }
+  .hp-row .k { color: var(--ink-faint); min-width: 62px; flex: none; }
+  .hp-row .v { color: var(--ink); font-family: ui-monospace, monospace; }
+
+  footer.page-footer {
+    margin-top: 40px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--ink-faint);
+  }
+
+  @media (max-width: 640px) {
+    .page { padding: 40px 18px 72px; }
+  }
+</style>
+
+<div class="page">
+  <div class="eyebrow">SpectralFM — data2vec-audio on NOVA spectra</div>
+  <h1>3AE + d2v Joint Training Plan</h1>
+  <p class="subtitle">
+    Built bottom-up: a pure self-distillation FE pretrain (no decoder), then
+    FE and projection trained together with a reconstruction decoder
+    attached, then projection fine-tuned further across three capacities,
+    then the transformer — each step freezing and building on the previous
+    one's checkpoint — joined in a final full fine-tune.
+  </p>
+
+  <div class="section-heading">
+    <h2>Architecture — signal path &amp; loss wiring</h2>
+    <span class="section-sub">what backprops into what, independent of any one step's freeze config</span>
+  </div>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 1180 520" role="img" aria-label="Block diagram of the FE, projection, transformer and three reconstruction decoders, showing the d2v self-distillation loss and the three reconstruction losses with their backprop paths.">
+      <defs>
+        <marker id="arrow-fwd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-faint)" />
+        </marker>
+        <marker id="arrow-d2v" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--deep)" />
+        </marker>
+        <marker id="arrow-recon" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--signal)" />
+        </marker>
+        <marker id="arrow-bus" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-faint)" />
+        </marker>
+      </defs>
+
+      <!-- forward pass -->
+      <path class="dg-path-fwd" d="M130,165 L170,165" />
+      <path class="dg-path-fwd" d="M340,165 L380,165" />
+      <path class="dg-path-fwd" d="M550,165 L590,165" />
+      <path class="dg-path-fwd" d="M780,165 L820,165" />
+      <path class="dg-path-fwd" d="M255,200 L255,250" />
+      <path class="dg-path-fwd" d="M465,200 L465,250" />
+      <path class="dg-path-fwd" d="M685,200 L685,250" />
+      <path class="dg-path-fwd" d="M255,305 L255,355" />
+      <path class="dg-path-fwd" d="M465,305 L465,355" />
+      <path class="dg-path-fwd" d="M685,305 L685,355" />
+      <path class="dg-path-fwd" d="M780,55 L820,55" />
+      <path class="dg-path-fwd" d="M685,130 L685,105 L850,105 L850,90" />
+
+      <!-- d2v backprop -->
+      <path class="dg-path-d2v" d="M860,90 L860,115 L220,115 L220,130" />
+      <path class="dg-path-d2v" d="M900,90 L900,118 L430,118 L430,130" />
+      <path class="dg-path-d2v" d="M940,90 L940,122 L720,122 L720,130" />
+
+      <!-- reconstruction backprop -->
+      <path class="dg-path-recon" d="M275,355 L275,305" />
+      <path class="dg-path-recon" d="M485,355 L485,305" />
+      <path class="dg-path-recon" d="M705,355 L705,305" />
+      <path class="dg-path-recon" d="M275,250 L275,200" />
+      <path class="dg-path-recon" d="M485,250 L485,200" />
+      <path class="dg-path-recon" d="M705,250 L705,200" />
+
+      <!-- shared target bus -->
+      <path class="dg-path-bus" d="M75,200 L75,460 L150,460" />
+      <path class="dg-path-bus" d="M150,460 L800,460" />
+      <path class="dg-path-bus arrowed" d="M255,460 L255,415" />
+      <path class="dg-path-bus arrowed" d="M465,460 L465,415" />
+      <path class="dg-path-bus arrowed" d="M685,460 L685,415" />
+      <text class="dg-caption" x="475" y="483">shared reconstruction target: the original input signal</text>
+
+      <!-- EMA teacher -->
+      <rect class="dg-box ghost" x="170" y="20" width="610" height="70" rx="4" />
+      <text class="dg-title dg-sub ghost-text" x="475" y="48" style="font-family: ui-sans-serif, sans-serif; font-size:12px; font-weight:600;">EMA teacher copy</text>
+      <text class="dg-sub ghost-text" x="475" y="64">clean input · no mask · no grad</text>
+      <text class="dg-sub ghost-text" x="475" y="78">(backbone weights = EMA of student)</text>
+
+      <!-- d2v loss -->
+      <rect class="dg-box d2v" x="820" y="20" width="200" height="70" rx="4" />
+      <text class="dg-title" x="920" y="60">d2v loss</text>
+
+      <!-- backbone row -->
+      <rect class="dg-box" x="20" y="130" width="110" height="70" rx="4" />
+      <text class="dg-title" x="75" y="160">Input</text>
+      <text class="dg-sub" x="75" y="176">245 pts · 16 kHz</text>
+
+      <rect class="dg-box" x="170" y="130" width="170" height="70" rx="4" />
+      <text class="dg-title" x="255" y="160">FE + LayerNorm</text>
+      <text class="dg-sub" x="255" y="176">conv ×5 · 245→47×512</text>
+
+      <rect class="dg-box" x="380" y="130" width="170" height="70" rx="4" />
+      <text class="dg-title" x="465" y="160">Projection</text>
+      <text class="dg-sub" x="465" y="176">512→768 · linear / MLP</text>
+
+      <rect class="dg-box" x="590" y="130" width="190" height="70" rx="4" />
+      <text class="dg-title" x="685" y="160">Transformer</text>
+      <text class="dg-sub" x="685" y="176">12 layers · 768-d</text>
+
+      <rect class="dg-box ghost" x="820" y="130" width="140" height="70" rx="4" />
+      <text class="dg-title ghost-text" x="890" y="160" style="fill: var(--ink-faint);">→ embeddings</text>
+      <text class="dg-sub ghost-text" x="890" y="176">eval / label regression</text>
+
+      <!-- decoders -->
+      <rect class="dg-box" x="170" y="250" width="170" height="55" rx="4" />
+      <text class="dg-title" x="255" y="282">FE decoder</text>
+
+      <rect class="dg-box" x="380" y="250" width="170" height="55" rx="4" />
+      <text class="dg-title" x="465" y="282">Projection decoder</text>
+
+      <rect class="dg-box" x="590" y="250" width="190" height="55" rx="4" />
+      <text class="dg-title" x="685" y="282">Transformer decoder</text>
+
+      <!-- reconstruction losses -->
+      <rect class="dg-box recon" x="170" y="355" width="170" height="60" rx="4" />
+      <text class="dg-title" x="255" y="390">recon loss — fe</text>
+
+      <rect class="dg-box recon" x="380" y="355" width="170" height="60" rx="4" />
+      <text class="dg-title" x="465" y="390">recon loss — proj</text>
+
+      <rect class="dg-box recon" x="590" y="355" width="190" height="60" rx="4" />
+      <text class="dg-title" x="685" y="390">recon loss — trans</text>
+    </svg>
+  </div>
+  <div class="dg-legend">
+    <div class="dg-legend-item"><span class="dg-legend-line" style="border-color: var(--ink-faint);"></span>forward pass</div>
+    <div class="dg-legend-item"><span class="dg-legend-line" style="border-color: var(--deep); border-top-style: dashed;"></span>d2v backprop</div>
+    <div class="dg-legend-item"><span class="dg-legend-line" style="border-color: var(--signal); border-top-style: dashed;"></span>reconstruction backprop</div>
+    <div class="dg-legend-item"><span class="dg-legend-line" style="border-color: var(--ink-faint); border-top-style: dashed;"></span>shared reconstruction target</div>
+  </div>
+  <p style="margin-top: 10px; font-size: 12.5px; color: var(--ink-faint); max-width: 78ch;">
+    Backprop into a backbone block (FE / projection / transformer) only happens
+    when that block is unfrozen for the given step — see the FROZEN / TRAIN
+    pills in the table below for which blocks receive which arrows on each run.
+  </p>
+
+  <div class="section-heading">
+    <h2>Training sequence</h2>
+    <span class="section-sub">Strictly sequential — each step freezes and builds on the previous one's checkpoint. Implementation notes tracked as T8–T12 in TASKS.md</span>
+  </div>
+
+  <div class="chain">
+    <span class="node origin">random init</span>
+    <span class="arrow">→</span>
+    <span class="node">Step 0 · FE + d2v only, no decoder</span>
+    <span class="arrow">→</span>
+    <span class="node">Step 1 · FE + projection jointly, + decoder + recon</span>
+    <span class="arrow">→</span>
+    <span class="node">Step 2 · projection + d2v</span>
+    <span class="arrow">→</span>
+    <span class="node">Step 3 · transformer + d2v</span>
+    <span class="arrow">→</span>
+    <span class="node">Step 4 · full joint</span>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:var(--signal)"></span>trainable component</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--ink-soft)"></span>frozen component</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--deep)"></span>d2v self-distillation term</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--teal)"></span>existing infra — no code change</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--deep)"></span>existing (uncommitted) — validate before use</div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">Step</th>
+          <th scope="col">FE</th>
+          <th scope="col">Projection</th>
+          <th scope="col">Transformer</th>
+          <th scope="col">Decoders</th>
+          <th scope="col">Loss</th>
+          <th scope="col">Hyperparams</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Step 0 -->
+        <tr>
+          <th scope="row">
+            <span class="step-name">
+              <span class="step-num">STEP 0</span>
+              FE + d2v only, no decoder
+            </span>
+            <span class="status-flag verify">existing — verify first</span>
+          </th>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">random init<br><span class="mono">5-layer conv, 245→47</span></span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = base_libri
+              <span style="display:block; font-size:11px; color:var(--ink-faint); margin-top:4px;">option: TRAIN random init, jointly with FE (see note)</span>
+            </span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = base_libri</span>
+          </td>
+          <td class="decoder-cell">
+            <div class="decoder-item"><span class="pill unused">N/A</span><span class="dname">FE decoder<span class="dnote">no decoder this step</span></span></div>
+            <div class="decoder-item"><span class="pill unused">N/A</span><span class="dname">Projection decoder<span class="dnote">no decoder this step</span></span></div>
+            <div class="decoder-item"><span class="pill unused">N/A</span><span class="dname">Transformer decoder<span class="dnote">no decoder this step</span></span></div>
+          </td>
+          <td class="loss-cell">
+            <div class="loss-expr"><span class="lx-d2v">λ_d2v·d2v</span></div>
+          </td>
+          <td class="hp-cell">
+            <div class="hp-row"><span class="k">steps</span><span class="v">TBD</span></div>
+            <div class="hp-row"><span class="k">lr</span><span class="v">1e-4 (start)</span></div>
+            <div class="hp-row"><span class="k">warmup</span><span class="v">500</span></div>
+            <div class="hp-row"><span class="k">data</span><span class="v">single_channel_one</span></div>
+          </td>
+        </tr>
+        <!-- Step 1 -->
+        <tr>
+          <th scope="row">
+            <span class="step-name">
+              <span class="step-num">STEP 1</span>
+              FE + projection: random init, + decoder + recon
+            </span>
+            <span class="status-flag verify">existing — verify first</span>
+          </th>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">random init<br><span class="mono">5-layer conv, 245→47</span></span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">random init</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = base_libri</span>
+          </td>
+          <td class="decoder-cell">
+            <div class="decoder-item"><span class="pill train">TRAIN</span><span class="dname">FE decoder<span class="dnote">random init — newly attached</span></span></div>
+            <div class="decoder-item"><span class="pill unused">N/A</span><span class="dname">Projection decoder<span class="dnote">shaped by d2v only, no recon term yet</span></span></div>
+            <div class="decoder-item"><span class="pill unused">N/A</span><span class="dname">Transformer decoder<span class="dnote">λ=0, not built</span></span></div>
+          </td>
+          <td class="loss-cell">
+            <div class="loss-expr"><span class="lx-d2v">λ_d2v·d2v</span> + <span class="lx-recon">λ_fe·recon_fe</span> <span class="lx-opt">[+ λ_tv·TV(recon_fe)]</span></div>
+          </td>
+          <td class="hp-cell">
+            <div class="hp-row"><span class="k">steps</span><span class="v">5,000–10,000</span></div>
+            <div class="hp-row"><span class="k">lr_fe</span><span class="v">1e-5</span></div>
+            <div class="hp-row"><span class="k">lr_proj</span><span class="v">1e-5</span></div>
+            <div class="hp-row"><span class="k">λ sweep</span><span class="v">0.1 / 1 / 10</span></div>
+          </td>
+        </tr>
+        <!-- Step 2 -->
+        <tr>
+          <th scope="row">
+            <span class="step-name">
+              <span class="step-num">STEP 2</span>
+              Projection fine-tune + d2v
+            </span>
+            <span class="status-flag verify">existing — verify first</span>
+          </th>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = Step 1 winner</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">3 variants:<br><span class="mono">linear / mlp768 / mlp2048</span><br>random init</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = base_libri</span>
+          </td>
+          <td class="decoder-cell">
+            <div class="decoder-item"><span class="pill frozen">FROZEN</span><span class="dname">FE decoder<span class="dnote">carried from Step 1</span></span></div>
+            <div class="decoder-item"><span class="pill train">TRAIN</span><span class="dname">Projection decoder<span class="dnote">TODO: random init (fresh ×3 sweep), or fine-tune + load from T2/T6's existing linear/mlp768/mlp2048 checkpoints?</span></span></div>
+            <div class="decoder-item"><span class="pill unused">N/A</span><span class="dname">Transformer decoder<span class="dnote">λ=0, not built</span></span></div>
+          </td>
+          <td class="loss-cell">
+            <div class="loss-expr"><span class="lx-d2v">λ_d2v·d2v</span> + <span class="lx-recon">λ_proj·recon_proj</span></div>
+          </td>
+          <td class="hp-cell">
+            <div class="hp-row"><span class="k">steps</span><span class="v">10,000</span></div>
+            <div class="hp-row"><span class="k">lr</span><span class="v">1e-5</span></div>
+            <div class="hp-row"><span class="k">warmup</span><span class="v">500</span></div>
+          </td>
+        </tr>
+        <!-- Step 3 -->
+        <tr>
+          <th scope="row">
+            <span class="step-name">
+              <span class="step-num">STEP 3</span>
+              Transformer FT + d2v
+            </span>
+            <span class="status-flag verify">existing — verify first</span>
+          </th>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = Step 1 checkpoint</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill frozen">FROZEN</span>
+            <span class="comp-detail">init = Step 2 winner</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">init = base_libri<br>trained on NOVA data</span>
+          </td>
+          <td class="decoder-cell">
+            <div class="decoder-item"><span class="pill frozen">FROZEN</span><span class="dname">FE decoder<span class="dnote">carried from Step 1</span></span></div>
+            <div class="decoder-item"><span class="pill frozen">FROZEN</span><span class="dname">Projection decoder<span class="dnote">carried from Step 2</span></span></div>
+            <div class="decoder-item"><span class="pill train">TRAIN</span><span class="dname">Transformer decoder<span class="dnote">random init</span></span></div>
+          </td>
+          <td class="loss-cell">
+            <div class="loss-expr"><span class="lx-d2v">λ_d2v·d2v</span> + <span class="lx-recon">λ_trans·recon_trans</span></div>
+          </td>
+          <td class="hp-cell">
+            <div class="hp-row"><span class="k">steps</span><span class="v">10,000–20,000</span></div>
+            <div class="hp-row"><span class="k">lr</span><span class="v">1e-5</span></div>
+            <div class="hp-row"><span class="k">warmup</span><span class="v">500</span></div>
+          </td>
+        </tr>
+        <!-- Step 4 -->
+        <tr>
+          <th scope="row">
+            <span class="step-name">
+              <span class="step-num">STEP 4</span>
+              Full joint fine-tune
+            </span>
+            <span class="status-flag verify">existing — verify first</span>
+          </th>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">init = Step 1 winner</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">init = Step 2 winner</span>
+          </td>
+          <td class="comp-cell">
+            <span class="pill train">TRAIN</span>
+            <span class="comp-detail">init = Step 3 checkpoint<br>(or base_libri)</span>
+          </td>
+          <td class="decoder-cell">
+            <div class="decoder-item"><span class="pill train">TRAIN</span><span class="dname">FE decoder<span class="dnote">init = Step 1 winner</span></span></div>
+            <div class="decoder-item"><span class="pill train">TRAIN</span><span class="dname">Projection decoder<span class="dnote">init = Step 2 winner</span></span></div>
+            <div class="decoder-item"><span class="pill train">TRAIN</span><span class="dname">Transformer decoder<span class="dnote">init = Step 3 winner</span></span></div>
+          </td>
+          <td class="loss-cell">
+            <div class="loss-expr">
+              <span class="lx-d2v">λ_d2v·d2v</span> + <span class="lx-recon">λ_fe·recon_fe</span> +
+              <span class="lx-recon">λ_proj·recon_proj</span> +
+              <span class="lx-recon">λ_trans·recon_trans</span>
+              <span class="lx-opt">[+ λ_tv·TV(recon_fe)]</span>
+            </div>
+          </td>
+          <td class="hp-cell">
+            <div class="hp-row"><span class="k">steps</span><span class="v">largest</span></div>
+            <div class="hp-row"><span class="k">lr</span><span class="v">1e-5</span></div>
+            <div class="hp-row"><span class="k">λs</span><span class="v">from 1 / 2 / 3</span></div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p style="margin-top: 14px; font-size: 12.5px; color: var(--ink-faint); max-width: 78ch;">
+    <strong style="color: var(--ink-soft); font-weight: 600;">Step 0 option:</strong>
+    train FE + projection together from random init (transformer still frozen
+    from base_libri), rather than freezing projection at base_libri from the
+    start. Same d2v-only loss, no decoder either way — just widens which
+    components receive gradients in Step 0 itself.
+  </p>
+  <p style="margin-top: 8px; font-size: 12.5px; color: var(--ink-faint); max-width: 78ch;">
+    <strong style="color: var(--ink-soft); font-weight: 600;">λ_d2v is new.</strong>
+    Every step's d2v term now carries an explicit weight, same pattern as the
+    recon λs — it doesn't exist in the model yet (today's <code>forward()</code>
+    writes the regression loss with no lambda multiplier). Small addition,
+    same shape of change as the existing recon lambdas.
+  </p>
+
+  <footer class="page-footer">
+    SpectralFM · data2vec-audio backbone · NOVA single-channel spectra (245 frames, 16&nbsp;kHz) ·
+    d2v + recon_fe + recon_trans + recon_proj already run jointly in one forward pass, natively, in
+    <code>data2vec_audio.py</code> on <code>recon/2ae-basemerge</code> (uncommitted — validate before
+    relying on it, including confirming which checkout has the projection-decoder merge). Every step
+    is existing-but-unvalidated native support, plus the small new <code>lambda_d2v</code> field.
+    <br><br>
+    Archived 2026-08-30 from the claude.ai artifact
+    "SpectralFM — 3AE + d2v Training Plan" (last updated 2026-08-09) — the original
+    training-plan document whose T# numbers the checkpoint README references. Snapshot of the plan
+    as written; the live, updated ledger is <code>TASKS.md</code> (T8–T12), where later corrections
+    (e.g. Correction 4's proj-decoder engineering, the 2026-08-29 proj_seq mask-aliasing fix) are tracked.
+  </footer>
+</div>

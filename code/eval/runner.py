@@ -139,6 +139,16 @@ class EvalConfig:
     run_label_regression_in_comparison: bool = True
     label_reg_max_samples: int = 1000
 
+    # Label regression side-by-side sweeps (run once across all checkpoints,
+    # in addition to the per-checkpoint RidgeCV probe above): a single LBFGS
+    # linear probe at fixed train/eval sizes, laid out as
+    # [train size 100/1000/2000] x [Raw input + one column per checkpoint], and
+    # [1-comp/2-comp/3-comp] x [Raw input + one column per checkpoint].
+    run_label_reg_sweeps_in_comparison: bool = True
+    label_reg_train_sizes: List[int] = field(default_factory=lambda: [100, 1000, 2000])
+    label_reg_sweep_comps: tuple = (0, 1)
+    label_reg_sweep_train_size: int = 1000
+
     # Multi-dataset evaluation (E4). Aliases resolve under nova_data_dir; sizes
     # overridable via eval_set_sizes ("sanity=100,in_dist=500,...") or the global
     # eval_set_size shortcut. multi_dataset=False falls back to the single
@@ -373,6 +383,10 @@ class EvalRunner:
                     nova_data_dir=cfg.nova_data_dir,
                     labeled_data_dir=cfg.labeled_data_dir,
                     label_reg_max_samples=cfg.label_reg_max_samples,
+                    run_label_reg_sweeps=cfg.run_label_reg_sweeps_in_comparison,
+                    label_reg_train_sizes=cfg.label_reg_train_sizes,
+                    label_reg_sweep_comps=cfg.label_reg_sweep_comps,
+                    label_reg_sweep_train_size=cfg.label_reg_sweep_train_size,
                 )
 
         # ── signal reconstruction: one result per matrix dataset ──────────────
@@ -506,6 +520,10 @@ class EvalRunner:
                     nova_data_dir=cfg.nova_data_dir,
                     labeled_data_dir=cfg.labeled_data_dir,
                     label_reg_max_samples=cfg.label_reg_max_samples,
+                    run_label_reg_sweeps=cfg.run_label_reg_sweeps_in_comparison,
+                    label_reg_train_sizes=cfg.label_reg_train_sizes,
+                    label_reg_sweep_comps=cfg.label_reg_sweep_comps,
+                    label_reg_sweep_train_size=cfg.label_reg_sweep_train_size,
                 )
 
         if ("signal_reconstruction" in cfg.evals
@@ -720,6 +738,12 @@ def main():
                              "multi_channel). Every dataset is then treated as "
                              "single-component, disabling the per-spectrum and "
                              "component-index views.")
+    parser.add_argument("--label_reg_max_samples", type=int, default=1000)
+    parser.add_argument("--label_reg_train_sizes", type=int, nargs="+", default=None,
+                        help="Train sizes for the checkpoint-comparison train-size sweep "
+                             "(default: 100 1000 2000; fixed 2-comp, eval=1000).")
+    parser.add_argument("--label_reg_sweep_train_size", type=int, default=1000,
+                        help="Fixed train size for the 1/2/3-component sweep (default: 1000).")
 
     args = parser.parse_args()
     if args.recon_normalize is not None:

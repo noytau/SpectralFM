@@ -856,9 +856,18 @@ def run(
         data = data[idx]
         fnames = [fnames[i] for i in idx]
 
-    target = torch.from_numpy(data)
+    target_raw = torch.from_numpy(data)
     if normalize:
-        target = F.layer_norm(target, target.shape[-1:])
+        # F.layer_norm is exactly invertible per sample, so keeping (mean, std) lets the
+        # overlay panel show predictions in physical [0, ~1] units as well.
+        eps = 1e-5
+        phys_mean = target_raw.mean(dim=1, keepdim=True)
+        phys_std = (target_raw.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
+        target = F.layer_norm(target_raw, target_raw.shape[-1:])
+    else:
+        phys_mean = torch.zeros(len(target_raw), 1)
+        phys_std = torch.ones(len(target_raw), 1)
+        target = target_raw
     L = target.shape[1]
     target_np = target.numpy()
 
@@ -1023,6 +1032,7 @@ def run(
     # over thousands of samples, and the alternative is a second inference pass.
     keep_rows = rdf["index"].to_numpy()
     keep_index = {int(gi): new for new, gi in enumerate(keep_rows)}
+    kept_raw_idx = fig_idx
     if len(keep_rows) != len(target):
         surviving = set(int(i) for i in keep_rows)
         if ref_lowpass is not None:
@@ -1033,7 +1043,10 @@ def run(
         kept_preds = {k: v[sel] for k, v in kept_preds.items()}
         fig_idx = fig_idx[sel]
         fnames = [fnames[i] for i in keep_rows]
-        # fig_idx indexed the original draw; remap it onto rdf's new 0..n-1 rows.
+        # fig_idx indexed the original draw; remap it onto rdf's new 0..n-1 rows, and
+        # keep the pre-remap indices for anything still addressed by the original draw
+        # (the physical-scale panel reads phys_mean / target_raw that way).
+        kept_raw_idx = fig_idx.copy()
         remap = {int(gi): new for new, gi in enumerate(keep_rows)}
         fig_idx = np.array([remap[int(gi)] for gi in fig_idx], dtype=int)
         rdf = rdf.assign(index=np.arange(len(keep_rows)))
@@ -1111,11 +1124,16 @@ def run(
     n_ex = min(n_examples, n_kept)
     local = np.linspace(0, n_kept - 1, n_ex, dtype=int) if n_ex else np.array([], int)
     global_idx = fig_idx[local] if n_ex else local
+    raw_idx = kept_raw_idx[local] if n_ex else local
+    mu = phys_mean.numpy()[raw_idx]
+    sigma = phys_std.numpy()[raw_idx]
     out["panel"] = {
         "indices": [int(i) for i in global_idx],
         "names": [fnames[i] for i in global_idx],
         "target": kept_target[local],
+        "target_phys": target_raw.numpy()[raw_idx],
         **{f"pred_{k}": kept_preds[k][local] for k in pathway_names},
+        **{f"pred_phys_{k}": kept_preds[k][local] * sigma + mu for k in pathway_names},
     }
 
     label = dataset_alias or dataset_subset or "dataset"

@@ -21,12 +21,24 @@ import torch
 
 # ── Path helpers ───────────────────────────────────────────────────────────────
 
-_PATH_REMAPS = [("/storage/noy/", "/mnt5/noy/"), ("/storage/", "/mnt5/")]
+_PATH_REMAPS = [
+    ("/storage/noy/", "/mnt5/noy/"), ("/storage/", "/mnt5/"),
+    ("/mnt5/noy/", "/storage/noy/"), ("/mnt5/", "/storage/"),
+]
 
 def _remap_root(root: str) -> str:
+    # Try both directions (/storage <-> /mnt5) when the recorded root doesn't
+    # resolve locally, keeping whichever candidate actually does. Needed
+    # because some manifests (e.g. the Geoffrey-authored special reference
+    # datasets under nova_data/) still carry a /mnt5/... root even after
+    # their wav files are copied to a /storage/...-native host like gpu55/56.
+    if os.path.isdir(root):
+        return root
     for src, dst in _PATH_REMAPS:
         if root.startswith(src):
-            return dst + root[len(src):]
+            candidate = dst + root[len(src):]
+            if os.path.isdir(candidate):
+                return candidate
     return root
 
 

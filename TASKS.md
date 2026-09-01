@@ -47,6 +47,38 @@ verify**, matching T8/T10/T12. First step on either is confirming the merged
 code is present and correct on whichever checkout is actually used to
 launch, not building anything new.
 
+**Correction 4 (2026-08-09): the projection-decoder claim in Correction 2 does
+not hold — verified by direct inspection, not by asking again.** Checked three
+places `proj_recon_decoder`/`lambda_recon_proj` could live: (1) this repo
+clone's `main`, `eval-methods`, and `origin/recon/2ae-basemerge` —
+`data2vec_audio.py` is byte-identical across all three (ends at commit
+`62d36d0`, the same "Fix stagnant regression loss" commit already cited in
+Correction 1), zero hits for either symbol; (2) Geoffrey's live working tree
+(`/mnt5/noy/SpectralFM`, branch `recon/2ae-basemerge`, 3 commits ahead of
+`origin/recon/2ae-basemerge`) — `data2vec_audio.py` **is** modified there
+(uncommitted), but the diff is unrelated: a `reset_transformer_init` ablation
+flag and a `trans_recon_decoder_type`/`TransformerMirrorReconDecoder` option
+for the *transformer* decoder, not a projection decoder; grep for
+`lambda_recon_proj`/`proj_recon_decoder` on that live file returns zero hits
+too. So this isn't a sync/push gap as Correction 2 guessed — **the projection
+decoder does not exist in `data2vec_audio.py` anywhere, committed or
+uncommitted.** It only exists in Pipeline C (`code/recon_components.py` +
+`code/train_reconstruction.py`'s `head_proj`, confirmed real and working —
+that's what T2/T6 actually trained). T10 and T12 revert from "existing —
+verify" back to **new engineering**: port `head_proj`
+(`TransformerMirrorDecoder`, reading post-`post_extract_proj` features) into
+`data2vec_audio.py`'s native `forward()`, add a `lambda_recon_proj` config
+field gating it (same pattern as `lambda_recon_fe`/`lambda_recon_trans`,
+`data2vec_audio.py:573-580` and `:1713-1729`), add
+`init_proj_recon_decoder_ckpt`/`freeze_proj_recon_decoder` keys to
+`_maybe_apply_recon_components()` (currently only has FE/trans-decoder
+keys — no `init_proj_recon_decoder_ckpt`/`freeze_proj_recon_decoder` at all,
+confirmed at lines 75-130), tag it into the composite optimizer's param
+groups, and confirm gradients actually reach it under `mask=True` (T10's own
+checklist already asked for this last item; now the first four apply too).
+This is real work, not verification — scope T10 accordingly before
+launching it.
+
 **Correction 3 (2026-08-09): sequence simplified per user request — old
 Step 1 removed, old Step 2 restructured, and every step's loss now carries
 an explicit λ_d2v weight.**
@@ -71,7 +103,7 @@ an explicit λ_d2v weight.**
   already for the recon terms. Needed before any step below can be launched
   with a non-default λ_d2v.
 
-### T8. Step 0 — FE pretrain via d2v loss only, no decoder (config work, not new code — validate first)
+### T8. Step 0 — FE pretrain via d2v loss only, no decoder (SMOKE + FULL RUN DONE 2026-08-10; see below)
 Train the FE end to end against the **d2v self-distillation loss only** — no
 decoder, no reconstruction loss. Projection and transformer participate in the
 forward pass (d2v's loss reads the transformer's top-k-layer output) but are
@@ -111,6 +143,74 @@ forward pass (d2v's loss reads the transformer's top-k-layer output) but are
   batch (512) that's ~5,000 passes over the *same* 1,000 wavs. A bad
   foundation for the FE everything downstream inherits — the motivation for
   moving off the old recon-only Step 0.
+**SMOKE + FULL RUN DONE (2026-08-10).** Code path validated: the "Fix
+stagnant regression loss" commit is fine — d2v loss decreases cleanly, not
+stagnant. Both the "Option" variants ran, back-to-back:
+- **Smoke** (2000 steps, `single_channel_1k`, lr 1e-4): both variants'
+  `loss_regression` dropped within the first ~50 updates — confirms the code
+  path before committing to a longer run.
+- **Full run** (30,000 steps, `single_channel_one` [999k], batch 128, lr
+  1e-4, warmup 1500, cosine decay to 0): **Variant A** (projection FROZEN @
+  base_libri, only FE+LN train) → `loss_regression` 10.76 → 8.22. **Variant
+  B** (projection TRAIN random-init, jointly with FE) → 10.76 → **7.77**,
+  consistently lower than A from partway through and finishing lower — joint
+  FE+projection training outperformed FE-only in this setup, though B also
+  has strictly more trainable capacity so this isn't a clean ablation (worth
+  a controlled rerun if the gap matters later). Both plateaued ~8.0–8.6
+  through the middle of the run before the cosine LR decay pulled loss down
+  further in the last ~3k steps — normal cosine-schedule shape, not a sign
+  of stagnation. Ran 15,765s / 16,007s (~4.4h each) on Geoffrey GPUs 0/1,
+  zero crashes, zero watchdog restarts needed.
+- **Caveat:** ran at implicit λ_d2v=1 (the field itself — see Correction
+  3 — still hasn't been added; nothing here needed a non-default weight).
+- **Operational note:** launched directly on Geoffrey (`nohup` +
+  `code/../fairseq/fairseq_cli/hydra_train.py`, GPUs 0/1 — GPU 3 has a
+  hardware fault, `Unable to determine the device handle`, avoid it), **not**
+  via RunAI — `runai ... logs`/`runai submit` were failing cluster-side that
+  day (`cluster-api/status: EOF` on log fetch; submitted jobs errored inside
+  the pod within seconds with no way to see why, and PVC writes from those
+  pods never showed up on the `/mnt5` side either). Needed a Geoffrey-rooted
+  manifest copy (`train_mnt5.tsv`, since the checked-in `train.tsv` roots at
+  `/storage/...` for RunAI) — same trick as `single_channel_1k`'s existing
+  `train_mnt5.tsv`; generated fresh for `single_channel_one` at
+  `fairseq/data/nova_data/single_channel_one/train_mnt5.tsv` (line 1 swapped
+  to `/mnt5/...`, otherwise identical). Checkpoints:
+  `fairseq/outputs/recon_loss/t8_step0_projFrozen_baseLibri_one/checkpoints/checkpoint_4_30000.pt`
+  and `.../t8_step0_projRandom_joint_one/checkpoints/checkpoint_4_30000.pt`.
+- **Open decision before T9:** which variant's FE (+ projection, for B)
+  becomes the canonical init replacing `apr28_fe_recon_best.pt`? B scored
+  lower loss but trained projection too (T9 also starts projection from
+  random init, so B's projection weights would be redundant/overwritten
+  anyway) — leaning toward carrying **A's FE checkpoint** forward (isolates
+  what T9 is actually testing) unless embedding-quality eval says otherwise.
+  Not yet run through the eval suite.
+**EVAL DONE (2026-08-10).** Checkpoints copied to
+`checkpoints/t8_step0/{t8_step0_projFrozen_baseLibri_30k,t8_step0_projRandom_joint_30k}.pt`;
+`checkpoint_comparison` run on `in_dist`/`sanity` + labeled_data, output
+`code/eval_outputs/2026-08-10_19-06-05/` (60 figures). Verdict — **B (joint
+proj) is the stronger or equal candidate, not A as guessed above:**
+- Label regression R² (main comparison, 1000-sample labeled set): 1c
+  A=0.0002 vs **B=0.035**; 2c A=0.132 vs **B=0.176**; 3c A=0.186 vs
+  **B=0.229** — B ahead at every component count.
+- A separate n-components sweep (different sample loading, ran after) gives
+  a noisier picture: 1c near-identical (~0.006 both), 2c B still ahead
+  (0.161 vs 0.199), but **3c flips to A ahead** (0.240 vs 0.212) — likely
+  sample-size/split variance between the two measurements, not a real
+  contradiction, but the 3c edge for either variant isn't stable across
+  measurements.
+- Noise robustness: **A** more stable (e.g. gaussian_mean cosine sim 0.755
+  vs 0.706; shot noise 0.648/0.624 vs 0.606/0.546).
+- Clustering ARI ≈ 0 for both (no k-means-recoverable structure), stack
+  retrieval match score ~50 for both (no embedding advantage over raw input
+  for retrieval) — consistent with T6's prior finding.
+- Neither variant beats the raw-input label-regression baseline (input R²
+  0.38–0.76 vs both variants' 0.0002–0.23) — expected, per T6/ARCHITECTURE.md:
+  a frozen, out-of-domain (base_libri) transformer caps how label-informative
+  embeddings can get regardless of which Step-0 variant feeds it.
+- **Decision for T9: carry B's checkpoint forward** (joint FE+projection) as
+  the stronger label-informativeness signal, accepting the noise-robustness
+  tradeoff — reverses this doc's earlier lean toward A. `signal_reconstruction`
+  eval intentionally skipped (T8 has no trained decoder to evaluate).
 
 ### T9. Step 1 — FE + projection jointly from random init: attach FE decoder, add recon(fe) on top of d2v (config work — precedented by the existing basemerge yaml)
 First link in the (now fully linear) chain — starts fresh rather than
@@ -134,7 +234,7 @@ decoder for the first time.
 - Acceptance: sweep completed with logged d2v + recon_fe curves. Winning
   config's FE+projection checkpoint is what T10–T12 build on.
 
-### T10. Step 2 — Projection fine-tune + d2v, 3 capacities (existing — verify)
+### T10. Step 2 — Projection fine-tune + d2v, 3 capacities (new engineering — see Correction 4)
 - FE: FROZEN, init = **T9's winning checkpoint**. Projection: TRAIN, 3
   variants — linear / mlp768 / mlp2048, random init (T2 recipe). Transformer:
   FROZEN, init = base_libri. Decoders: projection decoder TRAIN (random init,
@@ -150,25 +250,32 @@ decoder for the first time.
   checkpoints (T6 already crowned mlp2048 the winner at 10k steps) and
   fine-tune further under the new d2v-joint loss instead of starting over —
   decide before launching.
-- **Not new engineering (aside from `lambda_d2v`) — per user (2026-08-09),
-  the projection decoder has already been merged into the native model, with
-  a minor adjustment from the merge.** Freeze granularity already exists
-  (`freeze_proj=False` while FE/transformer stay frozen via
-  `freeze_fe_v2`/`freeze_transformer_v2`). Before launching, verify:
-  - `proj_recon_decoder` (or equivalent) is instantiated in
-    `data2vec_audio.py` alongside `fe_recon_decoder`/`trans_recon_decoder`,
-    and a `lambda_recon_proj` config field gates it.
-  - It's wired into `forward()`'s masked (`mask=True`) path and contributes to
-    `result["losses"]` the same way `recon_fe`/`recon_trans` do.
-  - Per-component init/freeze exists for it in `_maybe_apply_recon_components()`
-    (an `init_proj_recon_decoder_ckpt` / `freeze_proj_recon_decoder` pair, or
-    whatever the merge named them) and it's tagged for the composite optimizer.
-  - Gradients actually reach it under `mask=True` — run (or extend)
-    `recon_components.audit_gradient_flow()`-style check, since that helper as
-    last inspected only tested `mask=False`.
-  - Confirm which checkout (Geoffrey vs. wherever the merge landed) has the
-    change — the `/mnt5/noy/SpectralFM` copy inspected 2026-08-09 didn't show
-    it yet.
+- **New engineering, confirmed by direct inspection (Correction 4,
+  2026-08-09) — Correction 2's "already merged" claim did not hold up.**
+  Freeze granularity for the *layer* already exists (`freeze_proj=False`
+  while FE/transformer stay frozen via `freeze_fe_v2`/`freeze_transformer_v2`)
+  but there is no decoder to attach it to yet. Build, in
+  `data2vec_audio.py`:
+  - Instantiate a `proj_recon_decoder` (reuse `TransformerMirrorDecoder`
+    from `code/recon_components.py`/`code/train_reconstruction.py` — same
+    architecture Pipeline C already trains as `head_proj`, reading
+    post-`post_extract_proj` features) alongside
+    `fe_recon_decoder`/`trans_recon_decoder`.
+  - Add a `lambda_recon_proj` config field gating it, same shape as
+    `lambda_recon_fe`/`lambda_recon_trans` (`data2vec_audio.py:573-580`).
+  - Wire it into `forward()`'s masked (`mask=True`) path so it contributes to
+    `result["losses"]` the same way `recon_fe`/`recon_trans` do
+    (`:1713-1729`).
+  - Add `init_proj_recon_decoder_ckpt` / `freeze_proj_recon_decoder` keys to
+    `_maybe_apply_recon_components()` (currently lines 75-130 only handle
+    fe/trans-decoder keys — confirmed no proj-decoder keys exist there) and
+    tag it for the composite optimizer (`tag_param_groups`).
+  - Verify gradients actually reach it under `mask=True` — run (or extend)
+    `recon_components.audit_gradient_flow()`-style check, since that helper
+    as last inspected only tested `mask=False`.
+  - Add `lambda_recon_proj` to the Hydra config family (e.g.
+    `spectralfm_recon_loss_basemerge.yaml`, which currently only has
+    `lambda_recon_fe`/`lambda_recon_trans`).
 - Acceptance: verification above passes; all 3 capacity variants (or just
   mlp2048) trained to completion with logged d2v + recon curves. Winning
   variant is what T11–T12 build on.
@@ -191,7 +298,7 @@ decoder for the first time.
   SSL-informative backbone with reconstruction. Compare directly against T5b.
 - Acceptance: completed checkpoint, compared against T5b.
 
-### T12. Step 4 — Full joint fine-tune (existing — verify, depends on T10)
+### T12. Step 4 — Full joint fine-tune (existing — verify, depends on T10's new engineering landing first)
 - FE: TRAIN, init = T9's winner. Projection: TRAIN, init = T10's winner.
   Transformer: TRAIN, init = T11's checkpoint (or base_libri, if T11
   underperforms T5b). Decoders: all three TRAIN, seeded from T9/T10/T11's
@@ -199,10 +306,10 @@ decoder for the first time.
   λ_trans·recon_trans [+ λ_tv·TV(recon_fe)].
 - Hyperparams: largest step budget of the round; lr 1e-5 (fine-tune LR); λs
   carried over from T9–T11.
-- Mechanically native aside from `lambda_d2v` (`train_only_fe=False` or all
-  three `freeze_*_v2=False`, `lambda_recon_fe/trans>0` already exist, and per
-  T10 `lambda_recon_proj` should too now) — once T10's verification checklist
-  passes, this step is pure config, no new code.
+- Mechanically native aside from `lambda_d2v`, **but only once T10 has built
+  `proj_recon_decoder`/`lambda_recon_proj`** (Correction 4: this does not
+  exist yet) — `train_only_fe=False` or all three `freeze_*_v2=False`,
+  `lambda_recon_fe/trans>0` already exist; T10 is what has to land first.
 - Run only after T9, T10, T11 land in sequence — seed lambdas/inits from
   whichever config wins at each link. Hardest run to attribute if metrics
   move, since three components change at once.
