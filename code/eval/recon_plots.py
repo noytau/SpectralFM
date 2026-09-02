@@ -207,24 +207,35 @@ _FIG_DOC = {
             "a long flat tail means a few samples are far worse than the median."
         ),
         "what": (
-            "Top row: the empirical cumulative distribution of per-sample reconstruction "
-            "MSE, one panel per decoder head, one curve per dataset. The x-axis is MSE on "
-            "a log scale; the y-axis is the fraction of samples with error at or below "
-            "that value. Bottom row: the same distributions as violins of log10 MSE, with "
-            "single-component datasets left of the divider and multi-component datasets "
-            "right of it. The population is every sample drawn into the eval subset."
+            "Four rows over the same per-sample MSE. Rows 1-2 group by HEAD: row 1 is the "
+            "empirical cumulative distribution (x = MSE, log scale; y = fraction of "
+            "samples at or below), one panel per decoder head, one curve per dataset; row "
+            "2 is the same distributions as violins of log10 MSE, single-component "
+            "datasets left of the divider and multi-component right of it. Rows 3-4 "
+            "regroup the SAME numbers by DATASET instead, with all three heads together "
+            "in one panel, so the effect of tap depth on error is one picture rather than "
+            "three separate ones read side by side: row 3 is the ECDF per dataset with "
+            "one curve per head (its panel title also states the head ordering by "
+            "median), and row 4 is the per-head violins for that dataset with a line "
+            "connecting the medians, so a depth trend - or a reversal of it - is a single "
+            "visible slope. The population is every sample drawn into the eval subset."
         ),
         "read": (
             "curves further LEFT are better; a steeply rising curve means error is "
             "consistent across samples, while a long flat right tail means most samples "
             "are fine and a few are catastrophic - which is exactly when the mean MSE "
-            "stops describing the typical sample"
+            "stops describing the typical sample; in rows 3-4, a median line that falls "
+            "as depth increases (FE to projection to transformer) means the deeper tap "
+            "is preserving useful signal, and a line that rises means the opposite - "
+            "compare that slope across datasets, since it is not required to point the "
+            "same way on every one"
         ),
         "good": (
             "All curves far left and steep, with the multi-component curves close to the "
             "single-component ones. A large left-to-right gap between solid "
             "(single-component) and dashed (multi-component) curves is a generalization "
-            "gap, not noise."
+            "gap, not noise. In rows 3-4, a flat or gently sloped median line means depth "
+            "is not costing accuracy on that dataset."
         ),
         "caveats": (
             "Medians, not means, are the headline statistic here: on the multi-component "
@@ -302,38 +313,59 @@ _FIG_DOC = {
         "title": "Amplitude calibration - is dynamic range preserved?",
         "caption": (
             "Predicted against true amplitude. A tight diagonal cloud is faithful; a "
-            "flattened cloud means the output is collapsing toward the mean."
+            "flattened cloud means the output is collapsing toward the mean. The values "
+            "on both axes run past +-1 because under normalize=True they are per-sample "
+            "z-scores, not a physically bounded amplitude - see the explainer column."
         ),
         "what": (
-            "Hexbin density of predicted amplitude against target amplitude, one row per "
-            "dataset (labelled down the left) and one column per head (labelled across "
-            "the top), with the y = x line of perfect calibration drawn. No particular "
-            "bin is singled out: every one of the 245 bins of every plotted sample "
-            "contributes a point, so one hexagon counts sample-and-bin pairs and the "
-            "colour is that count on a log scale. This is the only figure here that draws "
-            "raw signals, so it uses the bounded figure subsample rather than the whole "
-            "split - the row label gives both counts whenever they differ. The rightmost column plots each sample's prediction standard deviation "
-            "against its target standard deviation, with y = x and y = 0.5x guides - or, "
-            "when normalize=True has made every target's standard deviation 1, the "
-            "distribution of the ratio std(prediction)/std(target) with a line at 1. Its "
-            "column header says which."
+            "Hexbin density of predicted value against target value, one row per dataset "
+            "(labelled down the left) and one column per head (labelled across the top), "
+            "with the y = x line of perfect calibration drawn. No particular bin is "
+            "singled out: every one of the 245 bins of every plotted sample contributes a "
+            "point, so one hexagon counts sample-and-bin pairs and the colour is that "
+            "count on a log scale. This is the only figure here that draws raw signals, so "
+            "it uses the bounded figure subsample rather than the whole split - the row "
+            "label gives both counts whenever they differ. When normalize=True, an extra "
+            "column pools every target value in that dataset into a histogram and overlays "
+            "a standard normal N(0,1) curve with the same mean and std by construction, so "
+            "a reader can see directly that the axis is a z-score and how much of a "
+            "standard normal's own mass already sits past |z|=1. The next column plots "
+            "each sample's prediction standard deviation against its target standard "
+            "deviation, with y = x and y = 0.5x guides - or, when normalize=True has made "
+            "every target's standard deviation 1, the distribution of the ratio "
+            "std(prediction)/std(target) with a line at 1. Column headers say which mode "
+            "each is in."
         ),
         "read": (
             "a tight cloud along y = x is faithful reproduction; a cloud FLATTER than y = x, "
             "compressed vertically toward a horizontal band, means the decoder is hedging "
-            "toward the mean and losing dynamic range; in the rightmost column, points "
-            "below y = x quantify how much amplitude each sample loses"
+            "toward the mean and losing dynamic range; in the z-score column, a histogram "
+            "close to the red N(0,1) curve means the axis is behaving exactly as a "
+            "standardized target should, and the annotated percentage past |z|=1 is the "
+            "number to compare against a standard normal's own 32%; in the dynamic-range "
+            "column, points below y = x quantify how much amplitude each sample loses"
         ),
         "good": (
-            "A narrow diagonal cloud spanning the full target range, and rightmost-column "
-            "points scattered tightly along y = x rather than along a shallower slope."
+            "A narrow diagonal cloud spanning the full target range; a z-score histogram "
+            "tracking the N(0,1) curve rather than sitting far outside it (which would "
+            "mean the target itself is unusually heavy-tailed, not merely standardized); "
+            "and dynamic-range points scattered tightly along y = x rather than a "
+            "shallower slope."
         ),
         "caveats": (
-            "Dynamic-range collapse is the failure this figure exists to catch, and it is "
-            "invisible in MSE - a flattened prediction can post a modest error while "
+            "Every normalized dataset's hexbin shares the SAME fixed window (+-5), rather "
+            "than each auto-scaling to its own min/max - the point is to make the panels "
+            "comparable at a glance, not to show each dataset at maximum resolution. Any "
+            "points further out are noted as a percentage rather than silently dropped, "
+            "and the best-fit slope is always computed from the full cloud, including "
+            "them. Dynamic-range collapse is the failure this figure exists to catch, and "
+            "it is invisible in MSE - a flattened prediction can post a modest error while "
             "carrying almost no signal. Especially informative on multi-component data, "
-            "where per-component target std spans more than a factor of ten. "
-            + CROSS_HEAD_CAVEAT
+            "where per-component target std spans more than a factor of ten. A z-score "
+            "has no upper or lower bound by construction - normalize=True layer-norms "
+            "each sample to zero mean and unit variance, it does not clip to any physical "
+            "range, so seeing |z| > 1 or even > 3 on a peaked signal is expected, not a "
+            "bug. " + CROSS_HEAD_CAVEAT
         ),
     },
     "recon_spectral_fidelity": {
@@ -820,10 +852,28 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    fig, cell = _two_row_grid(len(heads), 5.6, 4.2)
+    # Rows 0-1 group by head (existing view: one dataset gap at a time). Rows 2-3 group
+    # by dataset instead, with all heads together in one panel, so the effect of tap
+    # DEPTH on error is a single picture rather than something read off separate panels.
+    # A fine common grid keeps both groupings aligned: each head-panel spans n_aliases
+    # of the fine columns, each dataset-panel spans n_heads of them.
+    n_h, n_a = len(heads), len(aliases)
+    fine_cols = n_h * n_a
+    # constrained_layout, not the shared _tight()/fig.tight_layout(): a gridspec whose
+    # panels span an uneven number of columns per row is exactly the case plain
+    # tight_layout warns it cannot handle, and it left stray y-axis labels floating
+    # mid-panel here. constrained_layout is built for ragged grids like this one.
+    fig = plt.figure(figsize=(1.35 * fine_cols, 15.5), constrained_layout=True)
+    gs = fig.add_gridspec(4, fine_cols, hspace=0.55, wspace=0.5)
+
+    def head_cell(row, hi):
+        return fig.add_subplot(gs[row, hi * n_a:(hi + 1) * n_a])
+
+    def dataset_cell(row, di):
+        return fig.add_subplot(gs[row, di * n_h:(di + 1) * n_h])
 
     for c, k in enumerate(heads):
-        ax = cell(0, c)
+        ax = head_cell(0, c)
         all_mse = np.concatenate(
             [by_alias[a]["results_df"][f"{k}_mse"].to_numpy()
              for a in aliases if f"{k}_mse" in by_alias[a]["results_df"].columns]
@@ -852,7 +902,7 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
         ax.legend(fontsize=6.5, loc="lower right", title="dotted vline = median",
                   title_fontsize=6)
 
-        ax = cell(1, c)
+        ax = head_cell(1, c)
         data, labels, colors = [], [], []
         for i, a in enumerate(aliases):
             r = by_alias[a]
@@ -877,7 +927,7 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
                     parts[piece].set_linewidth(1.0)
             ax.set_xticks(pos)
             ax.set_xticklabels(labels, fontsize=7.5)
-            ax.set_ylabel("per-sample MSE, log\u2081\u2080 scale  (\u2193 better)", fontsize=8)
+            ax.set_ylabel("per-sample MSE, log₁₀ scale  (↓ better)", fontsize=8)
             ax.grid(True, alpha=0.3, axis="y")
             ax.set_title("distribution shape per dataset - %s" % PATHWAY_SHORT[k],
                          fontsize=8.5, color=_head_text_color(k))
@@ -888,13 +938,91 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
             if spread < 1e-6:
                 ax.text(0.5, 0.5,
                         "distribution is degenerate:\nevery sample has essentially\n"
-                        "the same error (spread < 1e-6 in log\u2081\u2080)",
+                        "the same error (spread < 1e-6 in log₁₀)",
                         transform=ax.transAxes, ha="center", va="center", fontsize=8,
                         color="#b00000", fontweight="bold",
                         bbox=dict(facecolor="white", alpha=0.85, edgecolor="#b00000"))
 
-    _suptitle(fig, "recon_error_distribution", _run_note(by_alias))
-    _tight(fig, reserve_in=1.0)
+    # ── Rows 2-3: one panel per dataset, all heads together — the depth view ──────
+    for c, a in enumerate(aliases):
+        r = by_alias[a]
+        rdf = r["results_df"]
+        group = r.get("component_group", "single")
+
+        ax = dataset_cell(2, c)
+        all_mse = np.concatenate(
+            [rdf[f"{k}_mse"].to_numpy() for k in heads if f"{k}_mse" in rdf.columns]
+            or [np.array([])])
+        medians = {}
+        for k in heads:
+            if f"{k}_mse" not in rdf.columns:
+                continue
+            v = np.sort(rdf[f"{k}_mse"].to_numpy())
+            v = v[v > 0]
+            if not len(v):
+                continue
+            ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=_HEAD_COLOR[k],
+                    ls=_HEAD_LS[k], lw=1.7, marker=_HEAD_MARKER[k],
+                    markevery=max(len(v) // 12, 1), ms=4.5, markerfacecolor="none",
+                    label=PATHWAY_SHORT[k])
+            medians[k] = float(np.median(v))
+            ax.axvline(medians[k], color=_HEAD_COLOR[k], ls=":", lw=0.8, alpha=0.6)
+        _error_axis(ax, all_mse)
+        ax.set_ylabel("fraction of samples at or below", fontsize=8)
+        ax.set_ylim(0, 1.02)
+        ax.grid(True, alpha=0.3, which="both")
+        order = sorted(medians, key=medians.get)
+        depth_note = " < ".join(PATHWAY_SHORT[k].split()[0] for k in order) if order else ""
+        ax.set_title("%s  [%s]\nby median: %s" % (_ds_label(r, short=True), group,
+                                                   depth_note),
+                     fontsize=8, color="#444444", fontweight="bold")
+        ax.legend(fontsize=6.5, loc="lower right", title="dotted vline = median",
+                  title_fontsize=6)
+
+        ax = dataset_cell(3, c)
+        data, labels, colors_v = [], [], []
+        for k in heads:
+            if f"{k}_mse" not in rdf.columns:
+                continue
+            v = rdf[f"{k}_mse"].to_numpy()
+            v = v[v > 0]
+            if len(v) < 5:
+                continue
+            data.append(np.log10(v))
+            labels.append(PATHWAY_SHORT[k])
+            colors_v.append(_HEAD_COLOR[k])
+        if data:
+            pos = np.arange(1, len(data) + 1)
+            parts = ax.violinplot(data, positions=pos, showmedians=True, widths=0.8)
+            for body, col in zip(parts["bodies"], colors_v):
+                body.set_facecolor(col)
+                body.set_alpha(0.6)
+            for piece in ("cbars", "cmins", "cmaxes", "cmedians"):
+                if piece in parts:
+                    parts[piece].set_color("#333333")
+                    parts[piece].set_linewidth(1.0)
+            # Connect the medians so the depth trend (or its absence) reads as one
+            # line rather than three separate marks the eye has to compare by hand.
+            med_y = [np.median(d) for d in data]
+            ax.plot(pos, med_y, color="#000000", lw=1.2, ls="-", marker="o", ms=4,
+                    zorder=5, label="median, by depth")
+            ax.set_xticks(pos)
+            ax.set_xticklabels(labels, fontsize=7)
+            ax.set_ylabel("per-sample MSE, log₁₀ scale  (↓ better)", fontsize=8)
+            ax.grid(True, alpha=0.3, axis="y")
+            ax.set_title("%s — spread by head" % a, fontsize=8.5, color="#444444")
+            ax.legend(fontsize=6, loc="best")
+            spread = max(np.ptp(np.concatenate(data)), 0.0)
+            if spread < 1e-6:
+                ax.text(0.5, 0.5,
+                        "distribution is degenerate:\nevery sample has essentially\n"
+                        "the same error (spread < 1e-6 in log₁₀)",
+                        transform=ax.transAxes, ha="center", va="center", fontsize=8,
+                        color="#b00000", fontweight="bold",
+                        bbox=dict(facecolor="white", alpha=0.85, edgecolor="#b00000"))
+
+    _suptitle(fig, "recon_error_distribution", _run_note(by_alias), y=1.02)
+    fig.get_layout_engine().set(rect=[0, 0, 1, 0.93])
     _footnote(fig, "recon_error_distribution")
     path = _save_fig(fig, os.path.join(out_dir, "recon_error_distribution.png"))
     return [(_caption("recon_error_distribution"), path)]
@@ -1117,10 +1245,32 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
-    n_cols = len(heads) + 1
+    # An extra column explaining why the axes below run past +-1: under normalize=True
+    # the target is a per-sample z-score (mean 0, std 1), not a bounded physical value,
+    # so it has no reason to stay inside +-1. A standard normal already puts 32% of its
+    # mass past |z|=1; this dataset measures close to that, not far beyond it.
+    any_normalized = any(by_alias[a].get("normalize") for a in aliases)
+    n_cols = len(heads) + 1 + (1 if any_normalized else 0)
     fig, axes = plt.subplots(len(aliases), n_cols,
                              figsize=(4.0 * n_cols, 3.7 * len(aliases)), squeeze=False)
     range_modes = set()
+
+    # Every normalized (z-scored) dataset shares ONE axis window, same as the z-score
+    # explainer column. Auto-scaling per row used to put in_dist on [-3, 3] and
+    # multi_ch on [-15, 15] in the same figure - technically correct, but it makes the
+    # panels impossible to compare at a glance and looks like a different quantity is
+    # being plotted. A fixed +-5 covers a standard normal out past 5 sigma; anything
+    # further out is a genuine outlier bin, noted rather than silently clipped.
+    Z_LIM = 5.0
+    clipped_counts = {}
+    for a in aliases:
+        r = by_alias[a]
+        if not r.get("normalize"):
+            continue
+        t = r["_arrays"]["target"]
+        preds = r["_arrays"]["preds"]
+        pooled = np.concatenate([t.ravel()] + [p.ravel() for p in preds.values()])
+        clipped_counts[a] = float((np.abs(pooled) > Z_LIM).mean())
     for rowi, a in enumerate(aliases):
         r = by_alias[a]
         t = r["_arrays"]["target"]
@@ -1141,27 +1291,44 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                 continue
             p = preds[k]
             tf, pf = t.ravel(), p.ravel()
-            lim_lo = float(min(tf.min(), np.percentile(pf, 0.1)))
-            lim_hi = float(max(tf.max(), np.percentile(pf, 99.9)))
+            if r.get("normalize"):
+                # Shared window across every normalized dataset - see Z_LIM above.
+                lim_lo, lim_hi = -Z_LIM, Z_LIM
+            else:
+                lim_lo = float(min(tf.min(), np.percentile(pf, 0.1)))
+                lim_hi = float(max(tf.max(), np.percentile(pf, 99.9)))
             hb = ax.hexbin(tf, pf, gridsize=60, bins="log", cmap=_density_cmap(),
                            extent=(lim_lo, lim_hi, lim_lo, lim_hi), mincnt=1)
             ax.plot([lim_lo, lim_hi], [lim_lo, lim_hi], color="#ff4d4d", lw=1.4,
                     ls="--", label="y = x (perfect calibration)")
-            # Least-squares slope through the cloud quantifies the compression.
+            # Least-squares slope through the FULL cloud, not just the visible window -
+            # a few points sitting outside +-5 should not silently change the number.
             slope = float(np.polyfit(tf, pf, 1)[0])
             ax.plot([lim_lo, lim_hi], [slope * lim_lo, slope * lim_hi],
                     color="#ffffff", lw=1.2, label="best-fit slope = %.2f" % slope)
             ax.set_xlim(lim_lo, lim_hi)
             ax.set_ylim(lim_lo, lim_hi)
-            ax.set_xlabel("target amplitude\n(one point per sample-and-bin pair)",
-                          fontsize=8)
+            if r.get("normalize") and clipped_counts.get(a, 0) > 0:
+                ax.text(0.02, 0.02, "%.1f%% of points fall outside \u00b1%g,\nnot shown"
+                        % (100 * clipped_counts[a], Z_LIM), transform=ax.transAxes,
+                        fontsize=6, color="#888888", va="bottom")
+            # Under normalize=True this axis is a per-sample z-score, not a physically
+            # bounded amplitude, and has no reason to sit inside +-1 - see the
+            # z-score-vs-normal column for why. Say so on the axis, not just in the doc.
+            unit = ("target z-score\n(one point per sample-and-bin pair)"
+                   if r.get("normalize") else
+                   "target amplitude\n(one point per sample-and-bin pair)")
+            ax.set_xlabel(unit, fontsize=8)
+            pred_unit = ("predicted z-score,\nsame sample and bin"
+                        if r.get("normalize") else
+                        "predicted amplitude,\nsame sample and bin")
             # A datasets x heads grid: name each axis once, as a column header and a row
             # label, rather than repeating both in every panel.
             if c == 0:
-                ax.set_ylabel("%s\n\npredicted amplitude,\nsame sample and bin"
-                              % row_label, fontsize=8.5, fontweight="bold")
+                ax.set_ylabel("%s\n\n%s" % (row_label, pred_unit),
+                              fontsize=8.5, fontweight="bold")
             else:
-                ax.set_ylabel("predicted amplitude,\nsame sample and bin", fontsize=8)
+                ax.set_ylabel(pred_unit, fontsize=8)
             if rowi == 0:
                 ax.set_title(PATHWAY_SHORT[k], fontsize=10,
                              color=_head_text_color(k), fontweight="bold", pad=8)
@@ -1170,6 +1337,46 @@ def _plot_amplitude_calibration(by_alias: dict, out_dir: str) -> list:
                 # Colourbars cost a quarter of the width; on an e-ink page that is dear.
                 fig.colorbar(hb, ax=ax, label="point density (log)", fraction=0.046)
 
+        # Explainer column: why the axes above run past +-1. Only meaningful under
+        # normalize=True, where the target is a per-sample z-score with no physical
+        # bound - a standard normal already puts 32% of its mass past |z|=1.
+        if any_normalized:
+            ax = axes[rowi][len(heads)]
+            if r.get("normalize"):
+                z = t.ravel()
+                frac1 = float((np.abs(z) > 1).mean())
+                frac3 = float((np.abs(z) > 3).mean())
+                lo, hi = -5.0, 5.0
+                ax.hist(z, bins=80, range=(lo, hi), density=True, color="#888888",
+                        alpha=0.6, label="target z-score (this dataset)")
+                grid = np.linspace(lo, hi, 400)
+                ax.plot(grid, np.exp(-0.5 * grid ** 2) / np.sqrt(2 * np.pi),
+                        color="#d62728", lw=1.6, ls="--",
+                        label="standard normal N(0,1)\n(same mean/std by construction)")
+                for zc in (-1, 1):
+                    ax.axvline(zc, color="#000000", lw=1.0, ls=":")
+                ax.axvline(-3, color="#000000", lw=0.7, ls=":", alpha=0.5)
+                ax.axvline(3, color="#000000", lw=0.7, ls=":", alpha=0.5)
+                ax.text(0.5, 0.04,
+                        "%.0f%% of points fall outside |z|=1\n(a standard normal has 32%%)\n"
+                        "%.2f%% fall outside |z|=3" % (100 * frac1, 100 * frac3),
+                        transform=ax.transAxes, ha="center", va="bottom", fontsize=7.5,
+                        bbox=dict(facecolor="white", alpha=0.85, edgecolor="#888888"))
+                ax.set_xlim(lo, hi)
+                ax.set_xlabel("z-score = (raw value - sample mean) / sample std",
+                              fontsize=7.5)
+                ax.set_ylabel("density", fontsize=8)
+                if rowi == 0:
+                    ax.set_title("Why values pass ±1\n(z-score, not physical amplitude)",
+                                 fontsize=9, fontweight="bold", pad=8)
+                ax.legend(fontsize=6, loc="upper left")
+            else:
+                ax.axis("off")
+                ax.text(0.5, 0.5, "normalize=False for this dataset -\ntarget is the raw "
+                        "signal, already\nbounded, so nothing to explain here",
+                        transform=ax.transAxes, ha="center", va="center", fontsize=7.5,
+                        color="#666666")
+            ax.grid(True, alpha=0.25)
         # Rightmost column: per-sample dynamic range. Normally a prediction-std vs
         # target-std scatter, but normalize=True pins target std to 1 and the scatter
         # collapses to a vertical strip, so the ratio is plotted instead. The test must
