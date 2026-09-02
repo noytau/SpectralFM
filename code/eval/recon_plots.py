@@ -2438,7 +2438,7 @@ def _selftest(out_dir: str) -> int:
     ]
     # Reference ladder: a head built from a known rung has to come back at that rung.
     from .recon_analysis import (DEFAULT_REF_LADDER, effective_resolution,
-                                 reference_operators, tail_mask)
+                                 reference_operators)
     ops = reference_operators(245, DEFAULT_REF_LADDER)
     ks = sorted(ops["interp"])
     tgt = by_alias["in_dist"]["_arrays"]["target"].astype(np.float64)
