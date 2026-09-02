@@ -282,31 +282,46 @@ _FIG_DOC = {
     "recon_position_profile": {
         "title": "Where along the signal the error sits",
         "caption": (
-            "Where along the 245 bins the error sits. Flat and low is good; spikes at the "
-            "two ends are convolution edge artifacts, and the lower row shows systematic "
-            "bias."
+            "Where along the 245 bins the error sits. The shaded band at each end is the "
+            "measured edge region, running well above the middle for every head - flat "
+            "and low elsewhere is good, and the lower row shows systematic bias."
         ),
         "what": (
             "Top row: mean absolute reconstruction error at each of the 245 signal bins, "
             "one panel per dataset, one line per head, with the per-bin standard deviation "
-            "of the target as a grey band for scale. Bottom row: the mean SIGNED error at "
-            "each bin, so systematic over- or under-shoot is visible. Averaged over every "
-            "sample in the eval subset."
+            "of the target as a grey band for scale. The outermost 8 bins at each end are "
+            "shaded and the panel title states, for that specific dataset, how many times "
+            "higher the mean error in that shaded region is than in the middle - measured "
+            "from the same curves plotted, not a fixed number carried over from elsewhere. "
+            "Bottom row: the mean SIGNED error at each bin (same shading), so systematic "
+            "over- or under-shoot is visible. Averaged over every sample in the eval "
+            "subset."
         ),
         "read": (
-            "a flat line means error is spread evenly along the signal; spikes at bin 0 and "
-            "bin 244 are convolution edge artifacts; a repeating period-5 ripple points at "
-            "the final (512, 5, 5) feature-extractor stage that compresses 245 bins to 47; "
-            "in the bottom row any sustained departure from zero is a bias, not noise"
+            "a flat line means error is spread evenly along the signal; the shaded edge "
+            "running above the unshaded middle, at the ratio stated in the title, is a "
+            "boundary effect - the convolutional feature extractor has less context to "
+            "work with at the two ends of the signal than in the middle, so the effect is "
+            "architectural rather than a property of any one dataset; in the bottom row "
+            "any sustained departure from zero is a bias, not noise"
         ),
         "good": (
             "Flat, low, and - in the bottom row - hugging zero, with the error band well "
-            "below the grey target-variability band."
+            "below the grey target-variability band, and an edge ratio close to 1 (the "
+            "boundary costing little more than the middle)."
         ),
         "caveats": (
             "Errors are averaged across samples, so a large per-bin value can come either "
             "from all samples erring a little or a few erring a lot; read this together "
-            "with the error-distribution figure. " + CROSS_HEAD_CAVEAT
+            "with the error-distribution figure. The edge ratio is pooled across whichever "
+            "heads are present, so it describes the dataset, not any single head - open "
+            "the underlying per_position_abs_err_{head} arrays if a specific head's edge "
+            "behaviour is what matters. A claim about a periodic ripple tied to the "
+            "feature extractor's final (512, 5, 5) stage appeared in an earlier version of "
+            "this caption; checking the FFT of the mid-signal error found no such "
+            "periodicity (the dominant components were long, tens-of-bins periods, not a "
+            "period of 5), so it has been removed rather than repeated unverified. "
+            + CROSS_HEAD_CAVEAT
         ),
     },
     "recon_amplitude_calibration": {
@@ -461,9 +476,15 @@ _FIG_DOC = {
             "showing which levels of which property are over-represented in its tail "
             "(lift = the level's share of the tail divided by its share of the dataset), "
             "how far the tail sits from the rest on the property that separates them best, "
-            "and what the worst reconstructions actually look like. Heads are named in "
-            "short here; what each one taps and decodes with is spelled out in the "
-            "error-distribution figure."
+            "and finally what six of the worst reconstructions actually look like - each "
+            "one labelled with its own R-squared, amplitude ratio and correlation against "
+            "the target (the same three numbers that tell hedging-toward-the-mean apart "
+            "from emitting something large and unrelated), the value of whichever "
+            "property the previous panel found to separate the tail, and its component "
+            "index on multi-component data - so the population-level claim in the "
+            "previous panel is checked against six actual samples, not just asserted. "
+            "Heads are named in short here; what each one taps and decodes with is "
+            "spelled out in the error-distribution figure."
         ),
         "read": (
             "a curve bending sharply toward the top-left means a handful of samples carry "
@@ -1191,14 +1212,35 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
     if not aliases or not heads:
         return []
 
+    # How many bins at each end count as "the edge" for the shaded band and the
+    # measured ratio - matched to what was actually checked (see the doc caveat).
+    EDGE_W = 8
+
     fig, cell = _two_row_grid(len(aliases), 4.9, 3.6, sharex=True)
     for c, a in enumerate(aliases):
         r = by_alias[a]
         prof = r["profiles"]
         group = r.get("component_group", "single")
         bins = np.arange(len(prof["per_position_target_std"]))
+        n_bins = len(bins)
+
+        # Measured, not asserted: edge-vs-middle ratio of mean |error|, pooled over
+        # whichever heads this dataset has. Used for both the shading and the
+        # annotation so the number on the figure is always what the figure shows.
+        err_stack = np.stack([prof[f"per_position_abs_err_{k}"] for k in heads
+                              if f"per_position_abs_err_{k}" in prof])
+        edge_ratio = None
+        if len(err_stack) and n_bins > 2 * EDGE_W:
+            pooled = err_stack.mean(axis=0)
+            edge_mean = np.r_[pooled[:EDGE_W], pooled[-EDGE_W:]].mean()
+            mid_mean = pooled[EDGE_W:-EDGE_W].mean()
+            if mid_mean > 0:
+                edge_ratio = float(edge_mean / mid_mean)
 
         ax = cell(0, c)
+        if n_bins > 2 * EDGE_W:
+            for span in ((0, EDGE_W), (n_bins - EDGE_W, n_bins - 1)):
+                ax.axvspan(*span, color="#ffcc66", alpha=0.35, zorder=0)
         ax.fill_between(bins, 0, prof["per_position_target_std"],
                         color=_REF_COLOR, alpha=0.45,
                         label="target variability (per-bin std) — scale reference")
@@ -1209,14 +1251,20 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
                         ls=_HEAD_LS[k],
                         label="%s — mean |error|" % PATHWAY_SHORT[k])
         ax.set_ylabel("mean |error| at this bin  (↓ better)", fontsize=8)
-        ax.set_title("%s\n[%s]" % (_ds_label(r), _GROUP_LABEL[group]), fontsize=8.5,
-                     color="#444444")
+        title = "%s\n[%s]" % (_ds_label(r), _GROUP_LABEL[group])
+        if edge_ratio is not None:
+            title += "\nshaded edge (%d bins each end): %.1fx the middle" % (
+                EDGE_W, edge_ratio)
+        ax.set_title(title, fontsize=8.5, color="#444444")
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0, bins[-1])
         if c == 0:
             ax.legend(fontsize=6.5, loc="upper center")
 
         ax = cell(1, c)
+        if n_bins > 2 * EDGE_W:
+            for span in ((0, EDGE_W), (n_bins - EDGE_W, n_bins - 1)):
+                ax.axvspan(*span, color="#ffcc66", alpha=0.35, zorder=0)
         ax.axhline(0.0, color="#000000", lw=1.0)
         for k in heads:
             key = f"per_position_signed_err_{k}"
@@ -1225,7 +1273,8 @@ def _plot_position_profile(by_alias: dict, out_dir: str) -> list:
                         ls=_HEAD_LS[k],
                         label="%s — mean signed error" % PATHWAY_SHORT[k])
         ax.set_ylabel("mean signed error  (0 = unbiased)", fontsize=8)
-        ax.set_xlabel("signal bin index (0–%d)" % bins[-1], fontsize=8.5)
+        ax.set_xlabel("signal bin index (0–%d)   (shaded = edge region)" % bins[-1],
+                      fontsize=8.5)
         ax.grid(True, alpha=0.3)
         if c == 0:
             ax.legend(fontsize=6.5, loc="upper center")
@@ -1898,28 +1947,51 @@ def _plot_failure_anatomy(by_alias: dict, out_dir: str) -> list:
     else:
         ax.axis("off")
 
-    # ── What the worst reconstructions look like ─────────────────────────────
+    # ── What the worst reconstructions look like, and why ────────────────────
+    # N_WORST traces rather than 3, each labelled with its failure signature (R2,
+    # amplitude ratio, correlation - the same three that separate hedging-toward-the-mean
+    # from emitting something large and unrelated) plus the value of whichever signal
+    # property the previous panel found to separate the tail from the rest, so the same
+    # discriminator that panel claims is visible on a per-sample basis.
     ax = axes[len(heads) + 3]
+    N_WORST = 6
     worst = (focus_r.get("_worst") or {}).get(focus_head)
     if worst is not None and len(worst.get("mse", [])):
-        order = np.argsort(worst["mse"])[::-1][:3]
-        # Space by the range actually drawn: the worst traces are not unit-scale.
+        order = np.argsort(worst["mse"])[::-1][:N_WORST]
         drawn = np.concatenate([worst["target"][order], worst["pred"][order]])
         step = 1.25 * float(np.ptp(drawn)) if np.ptp(drawn) > 0 else 1.0
+        r2_col = f"{focus_head}_r2"
+        amp_col = f"{focus_head}_amp_ratio"
+        pear_col = f"{focus_head}_pearson"
+        has_row_idx = "index" in worst and len(worst["index"]) == len(worst["mse"])
         for rank, idx in enumerate(order):
             off = rank * step
-            ax.plot(worst["target"][idx] + off, color="#000000", lw=1.1,
+            ax.plot(worst["target"][idx] + off, color="#000000", lw=1.0,
                     label="target" if rank == 0 else None)
             ax.plot(worst["pred"][idx] + off, color=_HEAD_COLOR[focus_head],
-                    ls=_HEAD_LS[focus_head], lw=1.3,
+                    ls=_HEAD_LS[focus_head], lw=1.2,
                     label=PATHWAY_SHORT[focus_head] if rank == 0 else None)
-            ax.text(2, off + 0.42 * step, "MSE %.3g" % worst["mse"][idx], fontsize=6.6,
-                    bbox=dict(fc="white", ec="none", alpha=0.7, pad=1.0))
+            bits = ["MSE %.3g" % worst["mse"][idx]]
+            if has_row_idx:
+                row_i = int(worst["index"][idx])
+                if 0 <= row_i < len(rdf):
+                    row = rdf.iloc[row_i]
+                    for col, fmt in ((r2_col, "R\u00b2 %.1f"), (amp_col, "amp %.1fx"),
+                                     (pear_col, "r %.2f")):
+                        if col in row.index and np.isfinite(row[col]):
+                            bits.append(fmt % row[col])
+                    if axis_name and axis_name in row.index and np.isfinite(row[axis_name]):
+                        bits.append("%s=%.2g" % (axis_name, row[axis_name]))
+                    if "comp" in row.index and np.isfinite(row.get("comp", np.nan)):
+                        bits.append("comp %d" % int(row["comp"]))
+            ax.text(2, off + 0.40 * step, ", ".join(bits), fontsize=6.0,
+                    bbox=dict(fc="white", ec="none", alpha=0.75, pad=1.0))
+        ax.set_ylim(top=(len(order) - 1) * step + 0.9 * step)
         ax.set_xlabel("signal bin (0-%d)" % (worst["target"].shape[1] - 1), fontsize=8)
         ax.set_ylabel("amplitude (traces offset for legibility)", fontsize=8)
-        ax.set_title("The three worst reconstructions — dataset `%s`\n(%s head, from the "
+        ax.set_title("The %d worst reconstructions — dataset `%s`\n(%s head, from the "
                      "whole split, not the figure subsample)"
-                     % (focus, PATHWAY_SHORT[focus_head]),
+                     % (len(order), focus, PATHWAY_SHORT[focus_head]),
                      fontsize=8.5)
         ax.grid(True, alpha=0.25)
         ax.legend(fontsize=6.6, loc="upper right", framealpha=0.9)
