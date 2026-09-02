@@ -332,21 +332,18 @@ _FIG_DOC = {
             "collapsing toward the mean."
         ),
         "what": (
-            "Hexbin density of predicted value against target value, one row per dataset "
-            "(labelled down the left) and one column per head (labelled across the top), "
-            "with the y = x line of perfect calibration drawn. No particular bin is "
-            "singled out: every one of the 245 bins of every plotted sample contributes a "
-            "point, so one hexagon counts sample-and-bin pairs and the colour is that "
-            "count on a log scale. This is the only figure here that draws raw signals, so "
-            "it uses the bounded figure subsample rather than the whole split - the row "
-            "label gives both counts whenever they differ. Both axes are shown in the "
-            "signal's own RAW units (roughly [0, 1] across this project's datasets), not "
-            "the per-sample z-score the model is actually trained against under "
-            "normalize=True - the z-score is inverted back using each sample's own "
-            "(mean, std) from before normalization, since a z-score has no fixed range "
-            "and would put every dataset on a different, confusing scale. The rightmost "
-            "column plots each sample's prediction standard deviation against its target "
-            "standard deviation, also in raw units, with y = x and y = 0.5x guides."
+            "Hexbin density of predicted value against target value, in the signal's "
+            "own raw units (roughly [0, 1] for this project's datasets), one row per "
+            "dataset (labelled down the left) and one column per head (labelled across "
+            "the top), with the y = x line of perfect calibration drawn. No particular "
+            "bin is singled out: every one of the 245 bins of every plotted sample "
+            "contributes a point, so one hexagon counts sample-and-bin pairs and the "
+            "colour is that count on a log scale. This is the only figure here that "
+            "draws raw signals, so it uses the bounded figure subsample rather than the "
+            "whole split - the row label gives both counts whenever they differ. The "
+            "rightmost column plots each sample's prediction standard deviation against "
+            "its target standard deviation, also in raw units, with y = x and y = 0.5x "
+            "guides."
         ),
         "read": (
             "a tight cloud along y = x is faithful reproduction; a cloud FLATTER than "
@@ -367,10 +364,10 @@ _FIG_DOC = {
             "Dynamic-range collapse is the failure this figure exists to catch, and it "
             "is invisible in MSE - a flattened prediction can post a modest error while "
             "carrying almost no signal. Especially informative on multi-component data, "
-            "where per-component target std spans more than a factor of ten. Training "
-            "itself still happens on the z-scored target when normalize=True - this "
-            "figure only changes what is DISPLAYED, not what the model was fit to. "
-            + CROSS_HEAD_CAVEAT
+            "where per-component target std spans more than a factor of ten. (Training "
+            "itself standardizes each sample under normalize=True; this figure is shown "
+            "in physical units purely for readability, matching the rest of the "
+            "report.) " + CROSS_HEAD_CAVEAT
         ),
     },
     "recon_spectral_fidelity": {
