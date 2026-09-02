@@ -306,13 +306,13 @@ are not part of this section.
 
 | Figure | Answers |
 |---|---|
-| `recon_error_distribution` | how big the error is, and what the single→multi-component shift costs — ECDF plus violins |
+| `recon_error_distribution` | how big the error is, what the single→multi-component shift costs, and — a second pair of rows — how error changes with decoder depth, all three heads together per dataset |
 | `recon_skill_vs_baseline` | **check this first** — does the head beat a flat line at the sample mean at all? |
 | `recon_reference_ladder` | does it beat resampling the target at the rate its own bottleneck provides? Reports effective resolution |
-| `recon_position_profile` | where along the 245 bins the error sits: edge artifacts, bias, period-5 ripple from the `(512,5,5)` FE stage |
-| `recon_amplitude_calibration` | is dynamic range preserved, or has the output collapsed toward the mean? |
+| `recon_position_profile` | where along the 245 bins the error sits: a shaded, measured edge-vs-middle ratio per dataset, plus bias |
+| `recon_amplitude_calibration` | is dynamic range preserved, or has the output collapsed toward the mean? Explains why values pass ±1 under `normalize=True` |
 | `recon_spectral_fidelity` | do narrow spectral lines survive, or only the smooth envelope? |
-| `recon_failure_anatomy` | what the worst few per cent are made of — concentration, lift per property, the worst traces |
+| `recon_failure_anatomy` | what the worst few per cent are made of — concentration, lift per property, six worst traces labelled with why |
 | `recon_component_error` | multi-component: error per component index and each one's share of the error budget |
 
 `_FIG_DOC` in `recon_plots.py` is the single source for every figure's explanation — the
