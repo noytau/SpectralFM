@@ -69,9 +69,11 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 
 from .checkpoint_loader import CheckpointLoader
+from .recon_analysis import DEFAULT_REF_LADDER
 from .data_loader import (
     load_data, build_dataloader, split_stack_holdout, split_partial_stack,
     load_manifest_subset,
+    parse_component_metadata,
 )
 from .evaluations import (
     EmbeddingSimilarityEval,
@@ -153,7 +155,7 @@ class EvalConfig:
     # data_source behaviour.
     multi_dataset: bool = True
     eval_set_sizes: Optional[str] = None
-    eval_set_size: Optional[int] = None
+    eval_set_size: Optional[str] = None      # int, or "all" for whole splits
 
     # Signal reconstruction (per-component checkpoints, independent of checkpoint_mode)
     recon_ckpt: Optional[str] = None         # single 3AE ckpt: all pathways (fe/proj/transformer)
@@ -161,7 +163,26 @@ class EvalConfig:
     recon_proj_ckpt: Optional[str] = None    # native ckpt carrying a proj_recon_decoder
     recon_tr_ckpt: Optional[str] = None      # TR recon ckpt: transformer_mirror/backbone_ckpt keys
     recon_normalize: Optional[bool] = None   # None → use flag recorded in ckpt
-    recon_max_samples: int = 200
+    # 1000, not 200: the dataset-level figures are distributions and per-component
+    # aggregates, which 200 samples leave too thin to quote. 0 means no cap — metrics and
+    # profiles are streamed, so memory is bounded by the loaded signals.
+    recon_max_samples: int = 1000
+    # Raw signals kept for the figures that plot individual points (hexbin, dynamic
+    # range). Everything else covers all N; a few thousand points already saturate a
+    # density plot.
+    recon_max_figure_samples: int = 2000
+    recon_n_examples: int = 6                # sample-level overlay traces
+    recon_seed: int = 42                     # which samples get drawn
+    # Component metadata unlocks the multi-component views (per-spectrum aggregation,
+    # component-index stratification). Scanning multi_channel's full train+valid costs
+    # ~17 s; set False to skip it and treat every dataset as single-component.
+    recon_component_meta: bool = True
+    # Matched-rate reference reconstructions: resolutions to build the ladder at, how
+    # many worst-error signals to keep per head for the failure-anatomy panel, and what
+    # counts as "the tail". Empty ladder disables the reference figure entirely.
+    recon_ref_ladder: tuple = DEFAULT_REF_LADDER
+    recon_worst_keep: int = 64
+    recon_tail_frac: float = 0.05
 
     # Runtime
     batch_size: int = 16
@@ -177,6 +198,14 @@ class EvalConfig:
 
     # Output
     output_dir: str = "eval_outputs"
+    # Build the e-ink PDFs alongside the HTML. On by default: it costs one extra
+    # matplotlib pass and no re-inference, and the two formats no longer interfere -
+    # the PDF renders its own greyscale figures, so the HTML keeps its colour ones.
+    pdf: bool = True
+    # Page sizes to emit, comma-separated: presets (onyx13/onyx10/onyx8) or WxH inches.
+    # Several cost only an extra pdflatex pass each, so the default covers both large
+    # Onyx panels rather than making anyone guess which page matches their device.
+    pdf_page: str = "onyx13,onyx10"
 
     def __post_init__(self):
         if self.device == "auto":
@@ -239,13 +268,18 @@ class EvalRunner:
     def _dataset_sizes(self) -> dict:
         cfg = self.cfg
         sizes = {alias: n for alias, (_, _, n) in DATASET_SPECS.items()}
+        # "all" (either flag) loads every row of each dataset's split. 0 means the same
+        # thing and is what reaches load_manifest_subset.
+        if str(cfg.eval_set_sizes).strip().lower() == "all" or \
+                str(cfg.eval_set_size).strip().lower() == "all":
+            return {alias: 0 for alias in sizes}
         if cfg.eval_set_size:
             sizes = {alias: int(cfg.eval_set_size) for alias in sizes}
         if cfg.eval_set_sizes:
             for part in str(cfg.eval_set_sizes).split(","):
                 alias, _, val = part.strip().partition("=")
                 if alias in sizes and val:
-                    sizes[alias] = int(val)
+                    sizes[alias] = 0 if val.strip().lower() == "all" else int(val)
         return sizes
 
     def _needed_aliases(self) -> set:
@@ -282,6 +316,31 @@ class EvalRunner:
             )
             datasets[alias] = {"df": df, "loader": loader, "df_raw": df_raw}
         return datasets
+
+    def _component_meta(self, alias: str):
+        """
+        Per-file component metadata for a dataset alias, or None if it has none.
+
+        Cached: the same manifest is scanned once even when several evals want it.
+        A dataset whose filenames carry no `comp` field (every single_channel_* subset)
+        yields an empty frame, which is itself the single-vs-multi-component signal, and
+        is returned as None so the eval treats it as single-component.
+        """
+        if not self.cfg.recon_component_meta or not self.cfg.nova_data_dir:
+            return None
+        cache = getattr(self, "_comp_meta_cache", None)
+        if cache is None:
+            cache = self._comp_meta_cache = {}
+        if alias not in cache:
+            subdir, split, _ = DATASET_SPECS[alias]
+            try:
+                meta = parse_component_metadata(
+                    os.path.join(self.cfg.nova_data_dir, subdir), split=split)
+            except (FileNotFoundError, OSError) as e:
+                print(f"[EvalRunner] no component metadata for {alias}: {e}")
+                meta = None
+            cache[alias] = meta if (meta is not None and len(meta)) else None
+        return cache[alias]
 
     # ── Main run ──────────────────────────────────────────────────────────────
 
@@ -340,6 +399,7 @@ class EvalRunner:
                 if alias not in datasets:
                     continue
                 print(f"\n[EvalRunner] Running: signal_reconstruction on {alias}")
+                subdir, split, _ = DATASET_SPECS[alias]
                 try:
                     res = SignalReconstructionEval.run(
                         df=datasets[alias]["df_raw"],
@@ -350,7 +410,16 @@ class EvalRunner:
                         device=cfg.device, arch=cfg.arch,
                         normalize=cfg.recon_normalize,
                         max_samples=cfg.recon_max_samples,
+                        max_figure_samples=cfg.recon_max_figure_samples,
+                        n_examples=cfg.recon_n_examples,
+                        seed=cfg.recon_seed,
                         batch_size=cfg.batch_size,
+                        ref_ladder=cfg.recon_ref_ladder,
+                        worst_keep=cfg.recon_worst_keep,
+                        tail_frac=cfg.recon_tail_frac,
+                        sample_meta=self._component_meta(alias),
+                        dataset_alias=alias,
+                        dataset_subset=subdir,
                     )
                 except (ValueError, FileNotFoundError, RuntimeError) as e:
                     print(f"[EvalRunner] signal_reconstruction ({alias}) failed: {e}")
@@ -470,7 +539,10 @@ class EvalRunner:
                     device=cfg.device, arch=cfg.arch,
                     normalize=cfg.recon_normalize,
                     max_samples=cfg.recon_max_samples,
+                    n_examples=cfg.recon_n_examples,
+                    seed=cfg.recon_seed,
                     batch_size=cfg.batch_size,
+                    dataset_subset=str(cfg.data_source or ""),
                 )
             except (ValueError, FileNotFoundError, RuntimeError) as e:
                 print(f"[EvalRunner] signal_reconstruction failed: {e}")
@@ -527,7 +599,8 @@ class EvalRunner:
         """Generate markdown + HTML reports. Returns (md_path, html_path)."""
         out = output_dir or self.cfg.output_dir
         os.makedirs(out, exist_ok=True)
-        return generate_report(results, output_dir=out, config=self.cfg)
+        return generate_report(results, output_dir=out, config=self.cfg,
+                               pdf=self.cfg.pdf)
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────────
@@ -571,11 +644,15 @@ def main():
                              "the E4 datasets from --nova_data_dir instead.")
     parser.add_argument("--single_dataset", action="store_true",
                         help="Disable E4 multi-dataset mode; evaluate --data_source only.")
+    # NOTE: this caps how many rows are LOADED; --recon_max_samples caps how many of
+    # those are evaluated. Running a whole split needs both raised.
     parser.add_argument("--eval_set_sizes", default=None,
                         help="Per-dataset sample counts, e.g. 'sanity=100,in_dist=500,"
                              "multi_ch=1000,samples=1000'. Defaults per DATASET_SPECS.")
-    parser.add_argument("--eval_set_size", type=int, default=None,
-                        help="Global sample-count override for all datasets (smoke runs).")
+    parser.add_argument("--eval_set_size", default=None,
+                        help="Global sample-count override for all datasets, or 'all' to "
+                             "load every row of each split. Pair with "
+                             "--recon_max_samples 0 to evaluate all of it.")
     parser.add_argument("--checkpoint_mode", default="file", choices=CHECKPOINT_MODES)
     parser.add_argument("--checkpoint_path", default=None, help="Path to .pt file or checkpoint dir")
     parser.add_argument("--checkpoint_paths", nargs="+", default=None,
@@ -591,6 +668,19 @@ def main():
     parser.add_argument("--mask_ratio", type=float, default=0.15)
     parser.add_argument("--masking_type", default="random")
     parser.add_argument("--output_dir", default="eval_outputs")
+    parser.add_argument("--no_pdf", dest="pdf", action="store_false", default=None,
+                        help="Skip the e-ink PDFs. They are built by default alongside "
+                             "the HTML: greyscale figures with heads separated by line "
+                             "style, marker and hatch, one page per figure, sized to the "
+                             "panel. Needs pdflatex.")
+    parser.add_argument("--pdf_page", default=None,
+                        help="Page sizes to emit, comma-separated (default "
+                             "'onyx13,onyx10'). Presets are the panels' physical sizes: "
+                             "onyx13 = 8x10.6in (13.3in Tab X / Max Lumi), onyx10 = "
+                             "6.2x8.3in (10.3in Note Air / Tab Ultra), onyx8 = 4.7x6.2in "
+                             "(7.8in Nova Air). Or give WxH inches. A page matching the "
+                             "panel renders 1:1, so 11pt type really is 11pt; a smaller "
+                             "page is scaled up and a larger one down.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--nova_data_dir", default=None, help="nova_data/ root for structured similarity")
     parser.add_argument("--labeled_data_dir", default=None, help="Dataset with labels.tsv for label regression")
@@ -614,7 +704,40 @@ def main():
     parser.add_argument("--recon_normalize", default=None, choices=["true", "false"],
                         help="Override per-sample layer_norm normalization for reconstruction "
                              "(default: use the flag recorded in the checkpoint).")
-    parser.add_argument("--recon_max_samples", type=int, default=200)
+    parser.add_argument("--recon_max_samples", type=int, default=None,
+                        help="Samples per dataset for reconstruction (default 1000). Use "
+                             "0 for no cap — every sample loaded is evaluated. Metrics "
+                             "and profiles are streamed, so this is limited by manifest "
+                             "read time (~1300 wavs/s) rather than memory.")
+    parser.add_argument("--recon_max_figure_samples", type=int, default=None,
+                        help="Raw signals kept for the point-plotting figures (default "
+                             "2000). All other statistics cover every sample regardless.")
+    parser.add_argument("--recon_ref_ladder", default=None,
+                        help="Resolutions for the matched-rate reference ladder, "
+                             "comma-separated (default %s). Each rung reconstructs the "
+                             "target from that many evenly spaced samples of itself, "
+                             "giving a fair yardstick at a known information rate; 47 is "
+                             "the rate the feature extractor delivers. Pass 'none' to "
+                             "skip the reference figure."
+                             % ",".join(str(k) for k in DEFAULT_REF_LADDER))
+    parser.add_argument("--recon_tail_frac", type=float, default=None,
+                        help="What counts as the tail in the failure-anatomy figure "
+                             "(default 0.05 = the worst 5%% of samples).")
+    parser.add_argument("--recon_worst_keep", type=int, default=None,
+                        help="Worst-error raw signals kept per head, so the "
+                             "failure-anatomy panel draws the real tail rather than "
+                             "whatever the figure subsample happened to catch "
+                             "(default 64; 0 disables that panel).")
+    parser.add_argument("--recon_n_examples", type=int, default=None,
+                        help="Sample-level overlay traces per dataset (default 6).")
+    parser.add_argument("--recon_seed", type=int, default=None,
+                        help="Seed for which samples are drawn (default 42).")
+    parser.add_argument("--no_recon_component_meta", dest="recon_component_meta",
+                        action="store_false", default=None,
+                        help="Skip the component-metadata manifest scan (~17s on "
+                             "multi_channel). Every dataset is then treated as "
+                             "single-component, disabling the per-spectrum and "
+                             "component-index views.")
     parser.add_argument("--label_reg_max_samples", type=int, default=1000)
     parser.add_argument("--label_reg_train_sizes", type=int, nargs="+", default=None,
                         help="Train sizes for the checkpoint-comparison train-size sweep "
@@ -625,6 +748,10 @@ def main():
     args = parser.parse_args()
     if args.recon_normalize is not None:
         args.recon_normalize = args.recon_normalize == "true"
+    if args.recon_ref_ladder is not None:
+        txt = str(args.recon_ref_ladder).strip().lower()
+        args.recon_ref_ladder = (() if txt in ("none", "off", "") else
+                                 tuple(int(x) for x in txt.replace(" ", "").split(",") if x))
     args.multi_dataset = not args.single_dataset
     del args.single_dataset
     runner = EvalRunner.from_args(args)

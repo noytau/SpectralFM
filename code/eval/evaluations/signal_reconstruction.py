@@ -44,6 +44,15 @@ import torch
 import torch.nn.functional as F
 
 from ..model import FairseqConvFeatureExtractor, MirrorDecoder, TransformerMirrorDecoder
+from ..recon_analysis import (
+    DEFAULT_REF_LADDER,
+    FE_BOTTLENECK_K,
+    effective_resolution,
+    peak_fwhm,
+    reference_operators,
+    tail_analysis,
+)
+from ..signal_features import compute_signal_features
 
 _FE_LAYERS = [(512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 3, 1), (512, 5, 5)]
 
@@ -390,6 +399,125 @@ def load_3ae_recon(ckpt_path: str, device: str = "cpu"):
     return backbone, heads, meta
 
 
+def _figure_subsample(n_total: int, cap: int, seed: int) -> np.ndarray:
+    """
+    Indices of the samples whose raw signals are kept for the point-plotting figures.
+
+    The hexbin and dynamic-range panels are the only things that need individual signals
+    rather than aggregates, and a few thousand samples already saturate a density plot -
+    2000 samples is half a million points. Everything else (per-sample metrics, profiles)
+    covers all N regardless, so this caps memory without capping the statistics.
+    """
+    if cap <= 0 or n_total <= cap:
+        return np.arange(n_total)
+    idx = np.random.default_rng(seed).choice(n_total, cap, replace=False)
+    idx.sort()
+    return idx
+
+
+class _StreamingProfiles:
+    """
+    Per-position and per-frequency means accumulated batch by batch.
+
+    Holding every prediction to average at the end costs N x heads x 245 floats - about
+    670 MB for multi_channel's full 170k-row valid split, on top of the targets. These
+    are all means, so running sums give the identical answer in O(245) memory and let a
+    run cover a whole split instead of a sample of it.
+    """
+
+    def __init__(self, length: int, heads: list):
+        self.length = length
+        self.heads = list(heads)
+        self.n = 0
+        self._t_sum = np.zeros(length)
+        self._t_sq = np.zeros(length)
+        self._fft_t = np.zeros(length // 2 + 1)
+        self._abs = {k: np.zeros(length) for k in heads}
+        self._signed = {k: np.zeros(length) for k in heads}
+        self._fft_p = {k: np.zeros(length // 2 + 1) for k in heads}
+
+    def update(self, target: np.ndarray, preds: dict) -> None:
+        t = np.asarray(target, dtype=np.float64)
+        self.n += len(t)
+        self._t_sum += t.sum(axis=0)
+        self._t_sq += (t ** 2).sum(axis=0)
+        self._fft_t += np.abs(np.fft.rfft(t, axis=1)).sum(axis=0)
+        for k, p in preds.items():
+            p = np.asarray(p, dtype=np.float64)
+            self._abs[k] += np.abs(p - t).sum(axis=0)
+            self._signed[k] += (p - t).sum(axis=0)
+            self._fft_p[k] += np.abs(np.fft.rfft(p, axis=1)).sum(axis=0)
+
+    def result(self) -> dict:
+        n = max(self.n, 1)
+        mean = self._t_sum / n
+        # Variance from the running sums; clipped because catastrophic cancellation can
+        # push a near-zero variance slightly negative.
+        var = np.maximum(self._t_sq / n - mean ** 2, 0.0)
+        prof = {
+            "per_position_target_mean": mean,
+            "per_position_target_std": np.sqrt(var),
+            "mean_fft_target": self._fft_t / n,
+            "freq_bins": np.fft.rfftfreq(self.length, d=1.0),
+        }
+        for k in self.heads:
+            prof[f"per_position_abs_err_{k}"] = self._abs[k] / n
+            prof[f"per_position_signed_err_{k}"] = self._signed[k] / n
+            prof[f"mean_fft_pred_{k}"] = self._fft_p[k] / n
+        return prof
+
+
+class _WorstReservoir:
+    """
+    The worst `keep` samples per head, kept as raw signals while streaming.
+
+    The figure subsample (`_figure_subsample`) is drawn before any error is known, so on a
+    136k-sample split it holds essentially none of the worst 5% - and the tail is exactly
+    what the failure-anatomy panel has to draw. Keeping a small running worst-K per head
+    costs `keep x 245 x 2` floats and guarantees that panel shows the real tail instead of
+    the nearest thing that happened to be sampled.
+    """
+
+    def __init__(self, heads: list, keep: int):
+        self.keep = max(int(keep), 0)
+        self.heads = list(heads)
+        self._store = {k: None for k in self.heads}   # (idx, mse, target, pred)
+
+    def update(self, offset: int, target: np.ndarray, preds: dict, mses: dict) -> None:
+        if self.keep <= 0:
+            return
+        for k in self.heads:
+            if k not in preds:
+                continue
+            idx = offset + np.arange(len(target))
+            cand = (idx, np.asarray(mses[k], dtype=np.float64),
+                    np.asarray(target, dtype=np.float32),
+                    np.asarray(preds[k], dtype=np.float32))
+            have = self._store[k]
+            if have is not None:
+                cand = tuple(np.concatenate([h, c]) for h, c in zip(have, cand))
+            order = np.argsort(cand[1])[::-1][: self.keep]
+            self._store[k] = tuple(a[order] for a in cand)
+
+    def result(self, keep_index: dict = None) -> dict:
+        """
+        {head: {index, mse, target, pred}}. `keep_index` maps surviving original indices to
+        their new row numbers; entries dropped by the redundant-component filter are
+        removed rather than left pointing at rows that no longer exist.
+        """
+        out = {}
+        for k, store in self._store.items():
+            if store is None:
+                continue
+            idx, mse, tgt, prd = store
+            if keep_index is not None:
+                sel = np.array([j for j, i in enumerate(idx) if int(i) in keep_index], int)
+                idx, mse, tgt, prd = (a[sel] for a in (idx, mse, tgt, prd))
+                idx = np.array([keep_index[int(i)] for i in idx], dtype=int)
+            out[k] = {"index": idx, "mse": mse, "target": tgt, "pred": prd}
+        return out
+
+
 @torch.no_grad()
 def _3ae_reconstruct_all(backbone, heads: dict, source: torch.Tensor) -> dict:
     """
@@ -457,6 +585,176 @@ def _proj_reconstruct(backbone, head, source: torch.Tensor) -> torch.Tensor:
     return head(captured["proj_seq"])   # [B, 245]
 
 
+# ── Dataset-level metrics (L1 per-component, L2 per-spectrum, L3 group summary) ─
+#
+# All computed against the same target the head was trained on — after the per-sample
+# F.layer_norm when the checkpoint recorded `normalize` — so R² divides by the variance
+# of that target, not of the raw wav.
+
+# Head key → legend text. Plots use these, never the bare keys.
+PATHWAY_SHORT = {"fe": "FE decoder", "proj": "Projection decoder", "tr": "Transformer decoder"}
+
+# Kept separate from PATHWAY_SHORT: the text contains dashes, so a combined label cannot
+# be split back apart.
+PATHWAY_DETAIL = {
+    "fe":   "from the post-LayerNorm conv feature-extractor output [47×512], "
+            "MirrorDecoder (~3.7M params)",
+    "proj": "from post_extract_proj, before the transformer [47×768], "
+            "TransformerMirrorDecoder (~4.1M params)",
+    "tr":   "from the transformer encoder output [47×768], "
+            "TransformerMirrorDecoder (~4.1M params)",
+}
+PATHWAY_LEGEND = {k: "%s — %s" % (PATHWAY_SHORT[k], PATHWAY_DETAIL[k]) for k in PATHWAY_SHORT}
+
+# Cross-head comparisons are confounded and every figure that makes one must say so.
+CROSS_HEAD_CAVEAT = (
+    "Cross-head comparison is confounded (TASKS.md T7): the FE decoder is a different "
+    "architecture on a narrower input (47×512, MirrorDecoder) than the projection and "
+    "transformer decoders (47×768, TransformerMirrorDecoder), so a gap between them mixes "
+    "encoder information content with decoder capacity. Comparisons of one head across "
+    "datasets are clean; comparisons between heads are not."
+)
+
+
+def _per_sample_metrics(target: np.ndarray, pred: np.ndarray, mse: np.ndarray) -> dict:
+    """
+    Per-sample skill metrics beyond MSE/MAE. `mse` is passed in rather than recomputed
+    so the returned values stay consistent with the existing float32 F.mse_loss numbers.
+
+    Returns numpy arrays, all [N]:
+      r2         1 - MSE / var(target) — skill against predicting the sample's own mean.
+                 0 means "no better than a flat line at the mean"; <0 means worse.
+                 Landing at exactly 0 is a real outcome, not a bug - see _R2_BEAT_TOL.
+      pearson    correlation of target and prediction — shape agreement, scale-invariant.
+      amp_ratio  std(pred) / std(target) — <1 is dynamic-range collapse, the classic
+                 autoencoder failure where output regresses toward the mean.
+      peak_err   signed error at the target's argmax — fidelity at the spectral line.
+    NaN where the quantity is undefined (constant target or constant prediction; several
+    multi_channel components are flat or monotone).
+    """
+    t = np.asarray(target, dtype=np.float64)
+    p = np.asarray(pred, dtype=np.float64)
+
+    var = t.var(axis=1)
+    ok_var = var > 1e-12
+    r2 = np.full(len(t), np.nan)
+    r2[ok_var] = 1.0 - mse[ok_var] / var[ok_var]
+
+    t_std, p_std = t.std(axis=1), p.std(axis=1)
+    amp_ratio = np.where(ok_var, p_std / np.where(ok_var, t_std, 1.0), np.nan)
+
+    tc = t - t.mean(axis=1, keepdims=True)
+    pc = p - p.mean(axis=1, keepdims=True)
+    denom = np.sqrt((tc ** 2).sum(axis=1) * (pc ** 2).sum(axis=1))
+    pearson = np.where(denom > 1e-12, (tc * pc).sum(axis=1) / np.where(denom > 0, denom, 1.0), np.nan)
+
+    peak_at = t.argmax(axis=1)
+    at = np.arange(len(t))
+    peak_err = p[at, peak_at] - t[at, peak_at]
+
+    return {"r2": r2, "pearson": pearson, "amp_ratio": amp_ratio, "peak_err": peak_err}
+
+
+# A model reproducing the baseline exactly lands at R2 = 0 up to float32 rounding, which
+# a bare `> 0` would score as beating it on half its samples.
+_R2_BEAT_TOL = 1e-6
+
+
+def _summary_table(rdf: pd.DataFrame, pathways: list) -> pd.DataFrame:
+    """
+    L3: one row per head, the headline numbers for a dataset.
+
+    Median leads, mean follows. The mean is outlier-driven on the multi-component sets —
+    the recorded T6 round has `samples` fe_mse mean 1.96 against a median of 0.36 — so a
+    table that shows only the mean misrepresents the typical sample by a factor of five.
+    """
+    rows = []
+    for k in pathways:
+        mse, mae = rdf[f"{k}_mse"].to_numpy(), rdf[f"{k}_mae"].to_numpy()
+        r2 = rdf[f"{k}_r2"].to_numpy()
+        finite_r2 = r2[np.isfinite(r2)]
+        rows.append({
+            "head":              k,
+            "head_label":        PATHWAY_SHORT.get(k, k),
+            "n":                 len(rdf),
+            "mse_median":        float(np.median(mse)),
+            "mse_mean":          float(mse.mean()),
+            "mse_p90":           float(np.percentile(mse, 90)),
+            "mse_p99":           float(np.percentile(mse, 99)),
+            "mae_median":        float(np.median(mae)),
+            "mae_mean":          float(mae.mean()),
+            "r2_median":         float(np.median(finite_r2)) if finite_r2.size else np.nan,
+            "r2_mean":           float(finite_r2.mean()) if finite_r2.size else np.nan,
+            "frac_r2_positive":  (float((finite_r2 > _R2_BEAT_TOL).mean())
+                                  if finite_r2.size else np.nan),
+            # Error read onto the reference ladder; absent when no ladder was built.
+            "k_eff_median":      (float(rdf[f"{k}_k_eff"].median())
+                                  if f"{k}_k_eff" in rdf.columns else np.nan),
+            "pearson_median":    float(rdf[f"{k}_pearson"].median()),
+            "amp_ratio_median":  float(rdf[f"{k}_amp_ratio"].median()),
+            "peak_err_median":   float(rdf[f"{k}_peak_err"].median()),
+        })
+    return pd.DataFrame(rows)
+
+
+def _spectrum_table(rdf: pd.DataFrame, pathways: list) -> pd.DataFrame:
+    """
+    L2, multi-component only: collapse each spectrum's components into one row.
+
+    A multi-component sample is the set of files sharing (dataset_id, spec). Per-file
+    error cannot distinguish "this whole spectrum reconstructs badly" from "one weak
+    component in an otherwise fine spectrum" — mse_max and mse_spread separate them.
+
+    Note the aggregation covers only the components that were actually drawn into this
+    eval subset (n_comps_in_split), not all n_comps the dataset provides.
+    """
+    if "spec" not in rdf.columns or rdf["spec"].isna().all():
+        return pd.DataFrame()
+    agg = {}
+    for k in pathways:
+        agg[f"{k}_mse_mean"] = (f"{k}_mse", "mean")
+        agg[f"{k}_mse_max"] = (f"{k}_mse", "max")
+        agg[f"{k}_mse_min"] = (f"{k}_mse", "min")
+    agg["n_comps_present"] = ("comp", "size")
+    agg["n_comps"] = ("n_comps", "first")
+    out = rdf.groupby(["dataset_id", "spec"], dropna=True).agg(**agg).reset_index()
+    for k in pathways:
+        out[f"{k}_mse_spread"] = out[f"{k}_mse_max"] - out[f"{k}_mse_min"]
+    # Which component was the worst, for the head with the deepest tap available.
+    ref = "tr" if "tr" in pathways else pathways[0]
+    worst = (rdf.loc[rdf.groupby(["dataset_id", "spec"])[f"{ref}_mse"].idxmax(),
+                     ["dataset_id", "spec", "comp"]]
+                .rename(columns={"comp": "worst_comp"}))
+    return out.merge(worst, on=["dataset_id", "spec"], how="left")
+
+
+def _profiles(target: np.ndarray, preds: dict) -> dict:
+    """
+    Position- and frequency-resolved error, averaged over the dataset.
+
+    per_position_*   [L]   where along the 245 bins the error sits. Exposes conv-padding
+                           edge artifacts and any period-5 structure from the final
+                           (512, 5, 5) FE conv stage that maps 245 bins down to 47.
+    mean_fft_*       [L//2+1] mean |rFFT| magnitude of target vs reconstruction. A decoder
+                           that reproduces only the smooth envelope and loses narrow
+                           spectral lines shows a magnitude deficit at high frequency
+                           while its MSE still looks acceptable.
+    """
+    t = np.asarray(target, dtype=np.float64)
+    prof = {
+        "per_position_target_std": t.std(axis=0),
+        "per_position_target_mean": t.mean(axis=0),
+        "mean_fft_target": np.abs(np.fft.rfft(t, axis=1)).mean(axis=0),
+        "freq_bins": np.fft.rfftfreq(t.shape[1], d=1.0),
+    }
+    for k, p in preds.items():
+        p = np.asarray(p, dtype=np.float64)
+        prof[f"per_position_abs_err_{k}"] = np.abs(p - t).mean(axis=0)
+        prof[f"per_position_signed_err_{k}"] = (p - t).mean(axis=0)
+        prof[f"mean_fft_pred_{k}"] = np.abs(np.fft.rfft(p, axis=1)).mean(axis=0)
+    return prof
+
+
 def run(
     df: pd.DataFrame,
     fe_ckpt: Optional[str] = None,
@@ -467,9 +765,16 @@ def run(
     arch: str = "conv1d",
     normalize: Optional[bool] = None,
     max_samples: int = 200,
+    max_figure_samples: int = 2000,
     n_examples: int = 6,
     batch_size: int = 32,
     seed: int = 42,
+    sample_meta: Optional[pd.DataFrame] = None,
+    dataset_alias: str = "",
+    dataset_subset: str = "",
+    ref_ladder=DEFAULT_REF_LADDER,
+    worst_keep: int = 64,
+    tail_frac: float = 0.05,
 ) -> dict:
     """
     Run true signal reconstruction on df ('data' column of raw signals).
@@ -486,9 +791,25 @@ def run(
 
     normalize: None → use the flag recorded in the checkpoint(s); True/False overrides.
 
-    Returns dict with per-sample results_df (full CSV export), mean MSEs per pathway
-    (recon_fe_mse_mean / recon_proj_mse_mean / recon_tr_mse_mean), and an example
-    panel (targets + reconstructions) for the overlay plot.
+    sample_meta: per-file component metadata from
+      `data_loader.parse_component_metadata`. Its presence marks the dataset as
+      multi-component and unlocks the per-spectrum (L2) and per-component views.
+    dataset_alias / dataset_subset: labels carried into the figures.
+    ref_ladder: resolutions for the matched-rate reference reconstructions (see
+      `recon_analysis`); empty disables them.
+    worst_keep: worst-error raw signals kept per head for the failure-anatomy panel.
+    tail_frac: what counts as the tail, 0.05 = worst 5%.
+
+    Returns dict with:
+      results_df      per-sample (L1) metrics → recon_df.csv
+      summary_df      per-head (L3) headline table, median-first
+      spectrum_df     per-spectrum (L2) table — multi-component only
+      profiles        per-position and per-frequency error arrays
+      reference       reference ladder medians and each head's effective resolution
+      tail / tail_lift_df / tail_effect_df   what the worst `tail_frac` is made of
+      _worst          worst-error raw signals per head
+      panel           the overlay-plot data (unchanged)
+      recon_{k}_mse_mean / _median, recon_{k}_mae_mean / _median  (unchanged scalars)
     """
     if not fe_ckpt and not tr_ckpt and not proj_ckpt and not recon_ckpt:
         return {"skipped": True,
@@ -527,7 +848,9 @@ def run(
     data = np.stack(df["data"].apply(np.array).values).astype(np.float32)
     fnames = (df["filename"].tolist() if "filename" in df.columns
               else [str(i) for i in range(len(df))])
-    if len(data) > max_samples:
+    # max_samples <= 0 means no cap: evaluate everything that was loaded. The metrics
+    # and profiles are streamed, so the cost is linear in N with bounded memory.
+    if max_samples > 0 and len(data) > max_samples:
         idx = np.random.default_rng(seed).choice(len(data), max_samples, replace=False)
         idx.sort()
         data = data[idx]
@@ -535,9 +858,8 @@ def run(
 
     target_raw = torch.from_numpy(data)
     if normalize:
-        # Save each sample's own (mean, std) so predictions/target can be mapped
-        # back to physical [0, ~1] units for display — F.layer_norm itself is
-        # exactly invertible per-sample: normalized = (raw - mean) / sqrt(var + eps).
+        # F.layer_norm is exactly invertible per sample, so keeping (mean, std) lets the
+        # overlay panel show predictions in physical [0, ~1] units as well.
         eps = 1e-5
         phys_mean = target_raw.mean(dim=1, keepdim=True)
         phys_std = (target_raw.var(dim=1, unbiased=False, keepdim=True) + eps).sqrt()
@@ -547,27 +869,86 @@ def run(
         phys_std = torch.ones(len(target_raw), 1)
         target = target_raw
     L = target.shape[1]
+    target_np = target.numpy()
 
     # ── Reconstruct: preds keyed by pathway ('fe' / 'proj' / 'tr') ────────────
     pathway_names = (sorted(heads_3ae) if heads_3ae is not None
                      else [n for n, p in (("fe", fe_parts), ("tr", tr_parts), ("proj", proj_parts)) if p])
-    preds = {k: torch.zeros_like(target) for k in pathway_names}
-    for i in range(0, len(target), batch_size):
-        batch = target[i : i + batch_size].to(device)
+    def _reconstruct_batch(batch: torch.Tensor) -> dict:
         if heads_3ae is not None:
-            batch_preds = _3ae_reconstruct_all(backbone_3ae, heads_3ae, batch)
-            for k, v in batch_preds.items():
-                preds[k][i : i + batch_size] = v[..., :L].cpu()
-        else:
-            if fe_parts:
-                fe, ln, decoder, _ = fe_parts
-                preds["fe"][i : i + batch_size] = _fe_reconstruct(fe, ln, decoder, batch).cpu()
-            if tr_parts:
-                backbone, head, _ = tr_parts
-                preds["tr"][i : i + batch_size] = _tr_reconstruct(backbone, head, batch)[..., :L].cpu()
-            if proj_parts:
-                backbone, head, _ = proj_parts
-                preds["proj"][i : i + batch_size] = _proj_reconstruct(backbone, head, batch)[..., :L].cpu()
+            return {k: v[..., :L] for k, v in
+                    _3ae_reconstruct_all(backbone_3ae, heads_3ae, batch).items()}
+        got = {}
+        if fe_parts:
+            fe, ln, decoder, _ = fe_parts
+            got["fe"] = _fe_reconstruct(fe, ln, decoder, batch)[..., :L]
+        if tr_parts:
+            backbone, head, _ = tr_parts
+            got["tr"] = _tr_reconstruct(backbone, head, batch)[..., :L]
+        if proj_parts:
+            backbone, head, _ = proj_parts
+            got["proj"] = _proj_reconstruct(backbone, head, batch)[..., :L]
+        return got
+
+    # Streamed: metrics and profiles accumulate batch by batch, and only a bounded
+    # subsample of raw signals is kept. Holding every prediction costs N x heads x 245.
+    profiles = _StreamingProfiles(L, pathway_names)
+    per_sample = {k: {name: [] for name in ("mse", "mae", "r2", "pearson",
+                                            "amp_ratio", "peak_err")}
+                  for k in pathway_names}
+    fig_idx = _figure_subsample(len(target), max_figure_samples, seed)
+    fig_set = set(fig_idx.tolist())
+    kept_target, kept_preds = [], {k: [] for k in pathway_names}
+
+    # Reference reconstructions at matched information rates — see recon_analysis. The
+    # interpolation rungs are kept per sample (effective resolution is read off each
+    # sample's own curve); the low-pass rungs only ever need their median.
+    ref_ops = reference_operators(L, ref_ladder) if ref_ladder else {"interp": {}, "lowpass": {}}
+    ref_ks = sorted(ref_ops["interp"])
+    ref_interp, ref_lowpass = [], []
+    worst = _WorstReservoir(pathway_names, worst_keep)
+
+    for i in range(0, len(target), batch_size):
+        batch = target[i : i + batch_size]
+        batch_np = batch.numpy()
+        batch_preds = {k: v.cpu().numpy() for k, v in
+                       _reconstruct_batch(batch.to(device)).items()}
+        profiles.update(batch_np, batch_preds)
+
+        batch_mse = {}
+        for k, pred_np in batch_preds.items():
+            err = pred_np.astype(np.float64) - batch_np
+            mse = (err ** 2).mean(axis=1)
+            batch_mse[k] = mse
+            per_sample[k]["mse"].append(mse)
+            per_sample[k]["mae"].append(np.abs(err).mean(axis=1))
+            for name, values in _per_sample_metrics(batch_np, pred_np, mse).items():
+                per_sample[k][name].append(values)
+
+        if ref_ks:
+            b64 = batch_np.astype(np.float64)
+            ref_interp.append(np.stack(
+                [((b64 @ ref_ops["interp"][k].T - b64) ** 2).mean(axis=1) for k in ref_ks],
+                axis=1))
+            ref_lowpass.append(np.stack(
+                [((b64 @ ref_ops["lowpass"][k].T - b64) ** 2).mean(axis=1) for k in ref_ks],
+                axis=1))
+        worst.update(i, batch_np, batch_preds, batch_mse)
+
+        local = [j for j in range(len(batch_np)) if (i + j) in fig_set]
+        if local:
+            kept_target.append(batch_np[local])
+            for k, pred_np in batch_preds.items():
+                kept_preds[k].append(pred_np[local])
+
+    kept_target = (np.concatenate(kept_target) if kept_target
+                   else np.zeros((0, L), dtype=np.float32))
+    kept_preds = {k: (np.concatenate(v) if v else np.zeros((0, L), dtype=np.float32))
+                  for k, v in kept_preds.items()}
+    per_sample = {k: {name: np.concatenate(v) for name, v in m.items()}
+                  for k, m in per_sample.items()}
+    ref_interp = np.concatenate(ref_interp) if ref_interp else None
+    ref_lowpass = np.concatenate(ref_lowpass) if ref_lowpass else None
 
     # ── Metrics + results ─────────────────────────────────────────────────────
     rows = {"index": np.arange(len(target)), "filename": fnames}
@@ -591,37 +972,190 @@ def run(
         out["proj_meta"] = proj_parts[2]
 
     for k in pathway_names:
-        mse = F.mse_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
-        mae = F.l1_loss(preds[k], target, reduction="none").mean(dim=1).numpy()
+        mse = per_sample[k]["mse"]
+        mae = per_sample[k]["mae"]
         rows[f"{k}_mse"] = mse
         rows[f"{k}_mae"] = mae
         out[f"recon_{k}_mse_mean"] = float(mse.mean())
         out[f"recon_{k}_mse_median"] = float(np.median(mse))
-        # MAE alongside MSE: `data2vec_audio.py`'s recon_loss_type defaults to L1, not
-        # L2/MSE, so a pathway trained under that default can show a large MSE (driven
-        # by a few outlier errors L1 doesn't penalize as harshly) while still being a
-        # genuinely improving, well-behaved fit by the metric it was actually trained
-        # on. Report both rather than letting MSE alone look falsely catastrophic.
+        # MAE alongside MSE: recon_loss_type defaults to L1, so a head trained under it
+        # can post a large MSE while fitting well by the metric it was trained on.
         out[f"recon_{k}_mae_mean"] = float(mae.mean())
         out[f"recon_{k}_mae_median"] = float(np.median(mae))
 
-    out["results_df"] = pd.DataFrame(rows)
+        # Skill metrics beyond error magnitude — see _per_sample_metrics.
+        for name in ("r2", "pearson", "amp_ratio", "peak_err"):
+            rows[f"{k}_{name}"] = per_sample[k][name]
 
-    # Example panel for the overlay plot (deterministic pick)
-    ex_idx = np.linspace(0, len(target) - 1, min(n_examples, len(target)), dtype=int)
-    mu, sigma = phys_mean[ex_idx], phys_std[ex_idx]
-    out["panel"] = {
-        "indices": ex_idx.tolist(),
-        "names": [fnames[i] for i in ex_idx],
-        "target": target[ex_idx].numpy(),
-        "target_phys": target_raw[ex_idx].numpy(),
-        **{f"pred_{k}": preds[k][ex_idx].numpy() for k in pathway_names},
-        **{f"pred_phys_{k}": (preds[k][ex_idx] * sigma + mu).numpy() for k in pathway_names},
+    if ref_interp is not None:
+        for j, k in enumerate(ref_ks):
+            rows[f"ref_interp{k}_mse"] = ref_interp[:, j].astype(np.float32)
+        for k in pathway_names:
+            res = effective_resolution(per_sample[k]["mse"], ref_ks, ref_interp)
+            rows[f"{k}_k_eff"] = res["k_eff"].astype(np.float32)
+
+    rdf = pd.DataFrame(rows)
+
+    # ── Sample descriptors + component metadata ───────────────────────────────
+    rdf = pd.concat([rdf, compute_signal_features(target_np)], axis=1)
+
+    is_multi = False
+    if sample_meta is not None and len(sample_meta):
+        meta_cols = [c for c in sample_meta.columns if c != "filename"]
+        rdf = rdf.merge(sample_meta[["filename"] + meta_cols], on="filename", how="left")
+        matched = int(rdf["comp"].notna().sum())
+        frac = matched / len(rdf) if len(rdf) else 0.0
+
+        if frac < 0.5:
+            # The metadata does not describe this draw (wrong split, wrong dataset).
+            # Better to treat the dataset as single-component than to drop most of it.
+            print(f"[SignalRecon] WARNING: component metadata matched only "
+                  f"{matched}/{len(rdf)} filenames — treating as single-component")
+            rdf = rdf.drop(columns=[c for c in meta_cols if c in rdf.columns])
+        else:
+            # Unmatched rows are the redundant components the metadata scan removed
+            # (comp20/21 duplicate comp14/15); dropping them is the point of the dedup.
+            dropped = len(rdf) - matched
+            rdf = rdf[rdf["comp"].notna()].reset_index(drop=True)
+            is_multi = True
+            msg = f"[SignalRecon] component metadata matched {matched}/{matched + dropped}"
+            if dropped:
+                msg += (f" — dropped {dropped} redundant-component samples "
+                        f"(comp20/comp21 duplicate comp14/comp15)")
+            print(msg)
+
+    rdf["component_group"] = "multi" if is_multi else "single"
+
+    # Dropping redundant-component rows means the kept raw signals no longer line up with
+    # rdf. The per-sample metrics and profiles were computed before the drop, so the
+    # profiles now cover a few rows that rdf excludes - a sub-percent effect on a mean
+    # over thousands of samples, and the alternative is a second inference pass.
+    keep_rows = rdf["index"].to_numpy()
+    keep_index = {int(gi): new for new, gi in enumerate(keep_rows)}
+    kept_raw_idx = fig_idx
+    if len(keep_rows) != len(target):
+        surviving = set(int(i) for i in keep_rows)
+        if ref_lowpass is not None:
+            ref_lowpass = ref_lowpass[keep_rows]
+            ref_interp = ref_interp[keep_rows]
+        sel = [j for j, gi in enumerate(fig_idx) if int(gi) in surviving]
+        kept_target = kept_target[sel]
+        kept_preds = {k: v[sel] for k, v in kept_preds.items()}
+        fig_idx = fig_idx[sel]
+        fnames = [fnames[i] for i in keep_rows]
+        # fig_idx indexed the original draw; remap it onto rdf's new 0..n-1 rows, and
+        # keep the pre-remap indices for anything still addressed by the original draw
+        # (the physical-scale panel reads phys_mean / target_raw that way).
+        kept_raw_idx = fig_idx.copy()
+        remap = {int(gi): new for new, gi in enumerate(keep_rows)}
+        fig_idx = np.array([remap[int(gi)] for gi in fig_idx], dtype=int)
+        rdf = rdf.assign(index=np.arange(len(keep_rows)))
+        out["n_samples"] = len(keep_rows)
+
+    out["results_df"] = rdf
+    out["component_group"] = "multi" if is_multi else "single"
+    out["dataset_alias"] = dataset_alias
+    out["dataset_subset"] = dataset_subset
+
+    # Recompute from the final row set, or dropped rows leave these disagreeing with
+    # summary_df over the same data.
+    for k in pathway_names:
+        out[f"recon_{k}_mse_mean"] = float(rdf[f"{k}_mse"].mean())
+        out[f"recon_{k}_mse_median"] = float(rdf[f"{k}_mse"].median())
+        out[f"recon_{k}_mae_mean"] = float(rdf[f"{k}_mae"].mean())
+        out[f"recon_{k}_mae_median"] = float(rdf[f"{k}_mae"].median())
+
+    # ── Reference ladder: what this data costs at a matched information rate ──
+    if ref_interp is not None and len(rdf):
+        ref_cols = [f"ref_interp{k}_mse" for k in ref_ks]
+        k_eff = {}
+        for k in pathway_names:
+            col = f"{k}_k_eff"
+            if col in rdf.columns:
+                k_eff[k] = float(rdf[col].median())
+        # Interpolation flatters smooth signals, so report how fine this data's
+        # structure is. Measured on the kept subsample, where the loop is affordable.
+        spacing = L / float(FE_BOTTLENECK_K)
+        fwhm = peak_fwhm(kept_target) if len(kept_target) else np.array([])
+        narrow = (float(np.nanmean(fwhm < spacing)) if len(fwhm) and np.isfinite(fwhm).any()
+                  else float("nan"))
+        out["reference"] = {
+            "ladder": list(ref_ks),
+            "bottleneck_k": FE_BOTTLENECK_K,
+            "length": L,
+            "sample_spacing": spacing,
+            "interp_mse_median": rdf[ref_cols].median().to_numpy(dtype=float),
+            "lowpass_mse_median": (np.median(ref_lowpass, axis=0)
+                                   if ref_lowpass is not None else None),
+            "k_eff_median": k_eff,
+            "peak_fwhm_median": (float(np.nanmedian(fwhm)) if len(fwhm) else float("nan")),
+            "narrow_peak_share": narrow,
+            "narrow_peak_n": int(len(fwhm)),
+        }
+
+    # Worst-error raw signals, so the failure-anatomy panel draws the actual tail.
+    if worst_keep:
+        out["_worst"] = worst.result(keep_index)
+
+    # ── Tail anatomy ──────────────────────────────────────────────────────────
+    # Here rather than in the plotting code, so the tables export as CSVs and the figures
+    # and findings read one set of numbers.
+    if len(rdf):
+        tail = tail_analysis(rdf, pathway_names, frac=tail_frac)
+        out["tail_lift_df"] = tail.pop("lift_df")
+        out["tail_effect_df"] = tail.pop("effect_df")
+        out["tail"] = tail
+
+    # ── L3 summary, L2 per-spectrum, profiles ─────────────────────────────────
+    out["summary_df"] = _summary_table(rdf, pathway_names)
+
+    if is_multi:
+        out["spectrum_df"] = _spectrum_table(rdf, pathway_names)
+
+    out["profiles"] = profiles.result()
+
+    # Raw signals for the figures that plot individual points — a bounded subsample.
+    # `index` maps each kept signal back to its results_df row so metadata can be joined.
+    # target_phys/preds_phys invert the per-sample z-score back to the RAW signal
+    # (mean, std) recorded before normalization, so figures can show physical amplitude
+    # instead of an internal training representation; equal to target/preds when
+    # normalize=False, since there is nothing to invert.
+    mu = phys_mean.numpy()[kept_raw_idx]
+    sigma = phys_std.numpy()[kept_raw_idx]
+    out["_arrays"] = {
+        "target": kept_target, "preds": kept_preds, "index": fig_idx,
+        "target_phys": kept_target * sigma + mu,
+        "preds_phys": {k: v * sigma + mu for k, v in kept_preds.items()},
+        "n_kept": len(kept_target), "n_total": len(target),
     }
 
-    msg = [f"[SignalRecon] n={len(target)}"]
+    # Overlay panel: a deterministic pick from the kept samples.
+    n_kept = len(kept_target)
+    n_ex = min(n_examples, n_kept)
+    local = np.linspace(0, n_kept - 1, n_ex, dtype=int) if n_ex else np.array([], int)
+    global_idx = fig_idx[local] if n_ex else local
+    raw_idx = kept_raw_idx[local] if n_ex else local
+    mu = phys_mean.numpy()[raw_idx]
+    sigma = phys_std.numpy()[raw_idx]
+    out["panel"] = {
+        "indices": [int(i) for i in global_idx],
+        "names": [fnames[i] for i in global_idx],
+        "target": kept_target[local],
+        "target_phys": target_raw.numpy()[raw_idx],
+        **{f"pred_{k}": kept_preds[k][local] for k in pathway_names},
+        **{f"pred_phys_{k}": kept_preds[k][local] * sigma + mu for k in pathway_names},
+    }
+
+    label = dataset_alias or dataset_subset or "dataset"
+    msg = [f"[SignalRecon] {label} ({out['component_group']}-component) "
+           f"n={out['n_samples']} (raw signals kept for figures: {n_kept})"]
     for k in pathway_names:
-        msg.append(f"{k.upper()} MSE mean={out[f'recon_{k}_mse_mean']:.4e} "
-                   f"MAE mean={out[f'recon_{k}_mae_mean']:.4e}")
+        s = out["summary_df"].set_index("head").loc[k]
+        line = (f"{k.upper()} MSE med={s['mse_median']:.4e} mean={s['mse_mean']:.4e} "
+                f"R2med={s['r2_median']:.3f} ampRatio={s['amp_ratio_median']:.3f}")
+        ref = out.get("reference")
+        if ref and k in ref["k_eff_median"]:
+            line += f" Keff={ref['k_eff_median'][k]:.1f}/{ref['bottleneck_k']}"
+        msg.append(line)
     print("  ".join(msg))
     return out

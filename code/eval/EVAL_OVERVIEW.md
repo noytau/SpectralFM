@@ -262,10 +262,180 @@ The 3AE path runs one backbone forward per batch with hooks at the three tap poi
 mirroring training. Score: per-sample `MSE(recon, target)` where target is the (optionally
 normalized) input.
 
-- **Metrics:** `recon_{fe,proj,tr}_mse_mean` / `_median`.
-- **Figures:** `recon_overlay.png` (target vs each pathway, per-row y-limits), `recon_mse_bars.png`
-  (per-sample, log scale).
-- **CSV:** `recon_df.csv` — per-sample `fe_mse` / `proj_mse` / `tr_mse`.
+#### Dataset-level metrics
+
+All computed against the same target the head was trained on (post `F.layer_norm` when the
+checkpoint recorded `normalize`). Mean MSE alone cannot tell a working reconstruction from a
+decoder emitting each sample's own mean, so three levels are kept:
+
+**L1, per sample** — `recon_df.csv`: `{h}_mse`, `{h}_mae`, `{h}_r2` (`1 − MSE/var(target)`,
+`≤ 0` = no better than a flat line), `{h}_pearson`, `{h}_amp_ratio` (`std(pred)/std(target)`),
+`{h}_peak_err`, `{h}_k_eff`, plus `ref_interp{K}_mse` per reference rung, the descriptors from
+`signal_features.py`, and on multi-component data the parsed `dataset_id` / `comp` / `spec` /
+`n_comps`.
+
+**L2, per spectrum** — `spectrum_df.csv`, multi-component only. Every wav is one *component*;
+the physical sample is every wav sharing a `spec` index. `mse_mean` / `mse_max` / `mse_spread`
+separate "the whole spectrum fails" from "one weak component in it".
+
+**L3, per head** — `summary_df.csv`, `recon_summary_all_datasets.csv`. Median leads, mean
+follows: outliers pull the mean well above the typical sample. Single- and multi-component
+results are separate blocks, never averaged together.
+
+Two derived tables:
+
+- **Matched-rate reference** (`recon_analysis.py`). R² = 0 — a flat line at the sample mean —
+  is a weak baseline. Reconstructing a target from *K* evenly spaced samples of itself is a
+  reference at a known information rate, and the feature extractor compresses 245 bins to 47
+  timesteps, so K = 47 is the rate each head decodes from. A head's error read onto that curve
+  is its **effective resolution**. The reference is an oracle at its sample points, so it
+  bounds what downsampling costs, not what a model could reach — the useful direction is the
+  negative one: a head below it at its own rate cannot blame the bottleneck.
+- **Component budget and tail anatomy** — `recon_component_error.csv`, `tail_lift_df.csv` per
+  dataset and `recon_tail_lift.csv` across them. `budget_lift` is a component's share of the
+  dataset's total squared error over its share of samples; 1.0 means it carries its own weight.
+  Separation between tail and rest is a median difference in units of the population IQR, never
+  a ratio — several descriptors cross zero. `contrast` is dropped when `normalize=True` has
+  collapsed it.
+
+#### Figures
+
+Eight, all cross-dataset, written to `<model>/reconstruction_summary/`. The pre-existing
+sample-level `recon_overlay.png` and `recon_mse_bars.png` are still produced per dataset but
+are not part of this section.
+
+| Figure | Answers |
+|---|---|
+| `recon_error_distribution` | how big the error is, what the single→multi-component shift costs, and — a second pair of rows — how error changes with decoder depth, all three heads together per dataset |
+| `recon_skill_vs_baseline` | **check this first** — does the head beat a flat line at the sample mean at all? |
+| `recon_reference_ladder` | does it beat resampling the target at the rate its own bottleneck provides? Reports effective resolution |
+| `recon_position_profile` | where along the 245 bins the error sits: a shaded, measured edge-vs-middle ratio per dataset, plus bias |
+| `recon_amplitude_calibration` | is dynamic range preserved, or has the output collapsed toward the mean? Shown in raw signal units, not the internal z-score |
+| `recon_spectral_fidelity` | do narrow spectral lines survive, or only the smooth envelope? |
+| `recon_failure_anatomy` | what the worst few per cent are made of — concentration, lift per property, six worst traces labelled with why |
+| `recon_component_error` | multi-component: error per component index and each one's share of the error budget |
+
+`_FIG_DOC` in `recon_plots.py` is the single source for every figure's explanation — the
+on-figure footnote, the report caption and `FIGURES.md`. A figure without a doc entry raises
+rather than shipping unexplained.
+
+**Stated on every cross-head figure** (TASKS.md T7): the FE decoder is a different architecture
+on a narrower input (47×512, `MirrorDecoder`) than the projection and transformer decoders
+(47×768, `TransformerMirrorDecoder`), so a gap between heads mixes encoder information content
+with decoder capacity. One head across datasets is clean; heads against each other is not.
+
+#### Report layout
+
+`eval_report.md` / `.html`: **1. Per dataset** (headline table per head) → **2. Across datasets**
+(the eight figures plus the combined table) → findings generated from this run's numbers →
+configuration appendix.
+
+#### Run it
+
+Every dataset in the matrix, whole validation splits:
+
+```bash
+python -m eval.runner \
+  --evals signal_reconstruction \
+  --recon_ckpt /mnt5/noy/SpectralFM/checkpoints/recon_runs_copied/3ae_norm_exp2_long.pt \
+  --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data \
+  --eval_set_size all --recon_max_samples 0 \
+  --device cuda --batch_size 256 \
+  --output_dir /path/to/eval_outputs/
+```
+
+Drop `--eval_set_size all --recon_max_samples 0` for a quick pass (defaults to 1000 per
+dataset), or set them to a number for something in between:
+
+```bash
+python -m eval.runner --evals signal_reconstruction \
+  --recon_ckpt <ckpt.pt> --nova_data_dir <nova_data> \
+  --eval_set_size 500 --recon_max_samples 500 --no_pdf \
+  --output_dir /path/to/eval_outputs/
+```
+
+#### Relevant flags
+
+```bash
+--recon_max_samples 1000      # per dataset; 0 = no cap (metrics are streamed)
+--eval_set_size all           # load whole splits rather than the per-alias defaults
+--recon_max_figure_samples    # raw signals kept for the figures that plot points (2000)
+--recon_ref_ladder 3,5,...    # reference resolutions; 'none' skips the ladder figure
+--recon_tail_frac 0.05        # what counts as the tail in the failure-anatomy figure
+--recon_worst_keep 64         # worst-error signals kept per head for its trace panel
+--recon_n_examples 6          # sample-level overlay traces
+--recon_seed 42               # which samples get drawn
+--no_recon_component_meta     # skip the manifest scan; treats every dataset as
+                              # single-component, disabling the per-component views
+--no_pdf                      # skip the e-ink PDFs
+```
+
+The coarse reference rungs are load-bearing: `multi_channel` components are near-smooth ramps,
+so without rungs below 9 every head clamps to the floor and the figure reports a bound.
+
+#### Component metadata
+
+`data_loader.parse_component_metadata(dataset_dir, split)` scans the **full** manifest, not the
+drawn subset: `load_manifest_subset` takes contiguous 10-row blocks and the multi-component
+manifests are shuffled, so a subset never holds a whole spectrum. It reports two counts —
+`n_comps` (components of this spectrum across the whole dataset) and `n_comps_in_split` (those
+present in this split), which diverge sharply: `multi_channel/valid.tsv` holds a single
+component for 93k of its 96k spectra while the dataset provides 6 or 10 per spectrum.
+
+It also drops verified byte-identical duplicates: `comp20 ≡ comp14` and `comp21 ≡ comp15` in
+both `multi_channel` and `labeled_data`. Left in, they double-count two components in every
+per-file aggregate. `sampled_data` has none.
+
+#### PDF for an e-ink reader
+
+`--pdf` additionally writes one PDF per page size — the same content, laid out for an
+e-paper device (Onyx BOOX and similar) rather than a monitor:
+
+```bash
+python -m eval.runner ... --evals signal_reconstruction --recon_ckpt <ckpt> --pdf
+python -m eval.runner ... --pdf --pdf_page onyx10        # just the 10.3in size
+python -m eval.runner ... --pdf --pdf_page 9x12          # any WxH in inches
+```
+
+Page size matters most: a page the same physical size as the panel renders 1:1, so the
+presets are the panels' physical dimensions, not their diagonals.
+
+| Preset | Page | Device |
+|---|---|---|
+| `onyx13` | 8.0 × 10.6 in | 13.3in Tab X, Max Lumi |
+| `onyx10` | 6.2 × 8.3 in | 10.3in Note Air, Tab Ultra |
+| `onyx8` | 4.7 × 6.2 in | 7.8in Nova Air |
+
+Default is `onyx13,onyx10`; extra sizes cost one `pdflatex` pass each since they share the
+figures.
+
+| Screen assumption | What changes |
+|---|---|
+| no colour | greyscale palette, heads separated by line style, marker and hatch |
+| no reflow | page sized to the panel |
+| portrait | wide multi-dataset grids are transposed, one dataset per row |
+| slow refresh | on a page ≥ 9.5in tall the figure and its explanation share one page |
+| bitmap text reads badly | the on-image footnote is dropped; explanations are set as type |
+
+Needs `pdflatex`. The TeX install on the eval host is partial — `hyperref` and `fontenc`
+both fail on missing dependencies (`pdftexcmds`, `infwarerr`) — so `report_pdf.py` uses
+only `geometry`, `graphicx`, `longtable`, `array`, `tabularx`, and maps every non-ASCII
+character to a TeX macro rather than relying on an input encoding.
+
+**One caveat:** `--pdf` switches the figure style for the whole run, so the PNGs and the
+HTML report from that run are greyscale too. Run without `--pdf` when you want the colour
+HTML, or run twice.
+
+#### Self-test
+
+```bash
+python -m eval.recon_plots /tmp/recon_selftest
+```
+
+Renders every figure from synthetic data with planted pathologies — one head built from a
+known reference rung, one amplitude-compressed to 50%, one emitting the sample mean, and one
+deliberately bad component — and asserts the metric signatures each must produce. No checkpoint
+or GPU needed; it is the fastest check that a change to the figures still holds.
 
 ### 3. `noise_robustness` — embedding stability under input noise
 
