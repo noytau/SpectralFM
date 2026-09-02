@@ -1116,8 +1116,18 @@ def run(
 
     # Raw signals for the figures that plot individual points — a bounded subsample.
     # `index` maps each kept signal back to its results_df row so metadata can be joined.
-    out["_arrays"] = {"target": kept_target, "preds": kept_preds, "index": fig_idx,
-                      "n_kept": len(kept_target), "n_total": len(target)}
+    # target_phys/preds_phys invert the per-sample z-score back to the RAW signal
+    # (mean, std) recorded before normalization, so figures can show physical amplitude
+    # instead of an internal training representation; equal to target/preds when
+    # normalize=False, since there is nothing to invert.
+    mu = phys_mean.numpy()[kept_raw_idx]
+    sigma = phys_std.numpy()[kept_raw_idx]
+    out["_arrays"] = {
+        "target": kept_target, "preds": kept_preds, "index": fig_idx,
+        "target_phys": kept_target * sigma + mu,
+        "preds_phys": {k: v * sigma + mu for k, v in kept_preds.items()},
+        "n_kept": len(kept_target), "n_total": len(target),
+    }
 
     # Overlay panel: a deterministic pick from the kept samples.
     n_kept = len(kept_target)
