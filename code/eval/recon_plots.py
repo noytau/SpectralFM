@@ -866,19 +866,23 @@ def _plot_error_distribution(by_alias: dict, out_dir: str) -> list:
     # A fine common grid keeps both groupings aligned: each head-panel spans n_aliases
     # of the fine columns, each dataset-panel spans n_heads of them.
     n_h, n_a = len(heads), len(aliases)
-    fine_cols = n_h * n_a
-    # constrained_layout, not the shared _tight()/fig.tight_layout(): a gridspec whose
-    # panels span an uneven number of columns per row is exactly the case plain
-    # tight_layout warns it cannot handle, and it left stray y-axis labels floating
-    # mid-panel here. constrained_layout is built for ragged grids like this one.
-    fig = plt.figure(figsize=(1.35 * fine_cols, 15.5), constrained_layout=True)
-    gs = fig.add_gridspec(4, fine_cols, hspace=0.55, wspace=0.5)
+    # Two separate grids, not one shared grid of n_heads*n_aliases fine columns. The
+    # fine-column version made every row ragged - each panel spanning an uneven number
+    # of columns - and neither layout engine places that correctly: tight_layout warns
+    # it cannot, and constrained_layout packed the panels so tightly that y tick labels
+    # lost their minus sign to the neighbour and axis labels landed on top of the panel
+    # to their left. A log10 axis reading 1.5 where the value is -1.5 is worse than
+    # ugly, so each grouping gets its own regular grid inside its own subfigure.
+    fig = plt.figure(figsize=(4.6 * max(n_h, n_a), 15.5), constrained_layout=True)
+    sf_head, sf_dataset = fig.subfigures(2, 1, hspace=0.03)
+    gs_head = sf_head.add_gridspec(2, n_h)
+    gs_dataset = sf_dataset.add_gridspec(2, n_a)
 
     def head_cell(row, hi):
-        return fig.add_subplot(gs[row, hi * n_a:(hi + 1) * n_a])
+        return sf_head.add_subplot(gs_head[row, hi])
 
     def dataset_cell(row, di):
-        return fig.add_subplot(gs[row, di * n_h:(di + 1) * n_h])
+        return sf_dataset.add_subplot(gs_dataset[row - 2, di])
 
     for c, k in enumerate(heads):
         ax = head_cell(0, c)
