@@ -172,6 +172,14 @@ def _plot_embedding_similarity(results: dict, output_dir: str) -> list:
     return figures
 
 
+def _recon_fig_caption(path: str) -> str:
+    """Short caption for a figure, from the shared recon_plots registry."""
+    from . import recon_plots
+    d = recon_plots.doc_for_figure(path)
+    return d["caption"] if d else os.path.basename(path)
+
+
+
 _RECON_PATHWAY_STYLE = [
     ("fe",   "FE recon",          "#1f77b4"),
     ("proj", "Projection recon",  "#2ca02c"),
@@ -180,37 +188,53 @@ _RECON_PATHWAY_STYLE = [
 
 
 def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
-                         title, subtitle, filename, output_dir) -> tuple:
+                        title, subtitle, filename, output_dir) -> str:
     """
-    Shared per-sample overlay grid: target (black) + one column per pathway
-    present, y-axis fixed to target's own range per row. Used for both the
-    normalized (training-scale) view and the physical ([0, ~1]-scale) view —
-    only target/pathways/title/filename differ between the two calls.
+    Shared per-sample overlay grid: target (black) + one column per pathway present,
+    y-axis fixed to the target's own range per row. Used for both the normalized
+    (training-scale) view and the physical ([0, ~1]-scale) one.
     """
-    n = len(indices)
+    from . import recon_plots
+    eink = recon_plots.is_eink()
+
+    # Eighteen panels across a 6-inch page is nothing but ink; the full set stays in the
+    # HTML, where there is room to scroll.
+    rows = list(range(len(indices)))
+    if eink and len(rows) > 3:
+        rows = [rows[i] for i in np.linspace(0, len(rows) - 1, 3).astype(int)]
+
+    n = len(rows)
     T = target.shape[1]
-    fig, axes = plt.subplots(n, len(pathways), figsize=(6.5 * len(pathways), 1.9 * n),
+    cell_w, cell_h = (2.3, 1.75) if eink else (6.5, 1.9)
+    fs_tick, fs_label, fs_title = (8, 10, 8) if eink else (6, 9, 7)
+    fig, axes = plt.subplots(n, len(pathways),
+                             figsize=(cell_w * len(pathways), cell_h * n),
                              squeeze=False)
-    for r in range(n):
-        tgt = target[r]
+    for r, ri in enumerate(rows):
+        tgt = target[ri]
         pad = 0.1 * max(tgt.max() - tgt.min(), 0.1)
         ylo, yhi = tgt.min() - pad, tgt.max() + pad
-        for c, (pw_label, pred, color, mse_col) in enumerate(pathways):
+        for c, (pw_label, pred, color, ls, mse_col) in enumerate(pathways):
             ax = axes[r, c]
             ax.plot(tgt, color="black", lw=1.6, label="target", alpha=0.9)
-            ax.plot(pred[r], color=color, lw=1.1, label=pw_label, alpha=0.9)
+            ax.plot(pred[ri], color=color, lw=1.3 if eink else 1.1, ls=ls,
+                    label=pw_label, alpha=0.9)
             ax.set_xlim(0, T - 1)
             ax.set_ylim(ylo, yhi)
-            ax.tick_params(labelsize=6, labelleft=(c == 0))
+            ax.tick_params(labelsize=fs_tick, labelleft=(c == 0))
             if c == 0:
-                ax.set_ylabel(f"idx {indices[r]}", fontsize=9, rotation=0, ha="right", labelpad=22)
+                ax.set_ylabel(f"idx {indices[ri]}", fontsize=fs_label, rotation=0,
+                              ha="right", labelpad=22)
             mse_val = ""
             if rdf is not None and mse_col in rdf.columns:
-                mse_val = f"    MSE = {rdf[rdf['index'] == indices[r]][mse_col].iloc[0]:.2e}"
-            title_cell = f"{names[r][-40:]}{mse_val}" if c == 0 else f"{pw_label}{mse_val}"
-            ax.set_title(title_cell, fontsize=7, loc="left")
+                match = rdf[rdf["index"] == indices[ri]]
+                if len(match):
+                    mse_val = f"    MSE = {match[mse_col].iloc[0]:.2e}"
+            title_cell = (f"{names[ri][-40:]}{mse_val}" if c == 0
+                          else f"{pw_label}{mse_val}")
+            ax.set_title(title_cell, fontsize=fs_title, loc="left")
             if r == 0:
-                ax.legend(fontsize=7, loc="upper right")
+                ax.legend(fontsize=fs_title, loc="upper right")
 
     mean_bits = [
         f"{label} mean MSE = {results[f'recon_{key}_mse_mean']:.3e}"
@@ -219,13 +243,10 @@ def _draw_recon_overlay(target, pathways, indices, names, rdf, results,
         for key, label, _ in _RECON_PATHWAY_STYLE
         if f"recon_{key}_mse_mean" in results
     ]
-    fig.suptitle(
-        f"{title}\n" + "   |   ".join(mean_bits) + f"\n{subtitle}",
-        fontsize=9, y=1.0,
-    )
+    fig.suptitle(f"{title}\n" + "   |   ".join(mean_bits) + f"\n{subtitle}",
+                 fontsize=9, y=1.0)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    path = _save_fig(fig, os.path.join(output_dir, filename))
-    return path
+    return _save_fig(fig, os.path.join(output_dir, filename))
 
 
 def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
@@ -248,9 +269,11 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     names   = panel.get("names") or []
     rdf     = results.get("results_df")
 
+    from . import recon_plots
     pathways = [
-        (label, panel[f"pred_{key}"], color, f"{key}_mse")
-        for key, label, color in _RECON_PATHWAY_STYLE
+        (label, panel[f"pred_{key}"], recon_plots._HEAD_COLOR[key],
+         recon_plots._HEAD_LS[key], f"{key}_mse")
+        for key, label, _ in _RECON_PATHWAY_STYLE
         if panel.get(f"pred_{key}") is not None
     ]
     if target is None or not pathways:
@@ -268,8 +291,9 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
     target_phys = panel.get("target_phys")
     if results.get("normalize") and target_phys is not None:
         pathways_phys = [
-            (label, panel[f"pred_phys_{key}"], color, f"{key}_mse")
-            for key, label, color in _RECON_PATHWAY_STYLE
+            (label, panel[f"pred_phys_{key}"], recon_plots._HEAD_COLOR[key],
+             recon_plots._HEAD_LS[key], f"{key}_mse")
+            for key, label, _ in _RECON_PATHWAY_STYLE
             if panel.get(f"pred_phys_{key}") is not None
         ]
         path = _draw_recon_overlay(
@@ -282,16 +306,23 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         figures.append(("Reconstruction overlay — physical [0,~1] scale", path))
 
     # Per-sample MSE bars (log scale), one bar group per pathway present
-    bar_cols = [(label, color, mse_col) for label, _, color, mse_col in pathways
+    eink = recon_plots.is_eink()
+    rows = list(range(len(indices)))
+    if eink and len(rows) > 3:
+        rows = [rows[i] for i in np.linspace(0, len(rows) - 1, 3).astype(int)]
+    bar_cols = [(label, color, mse_col.split("_")[0], mse_col)
+                for label, _, color, _, mse_col in pathways
                 if rdf is not None and mse_col in rdf.columns]
     if bar_cols:
-        sub = rdf[rdf["index"].isin(indices)]
+        sub = rdf[rdf["index"].isin([indices[i] for i in rows])]
         x = np.arange(len(sub))
         w = 0.8 / len(bar_cols)
-        fig, ax = plt.subplots(figsize=(9, 4))
-        for j, (label, color, mse_col) in enumerate(bar_cols):
+        fig, ax = plt.subplots(figsize=(6.4, 4.2) if eink else (9, 4))
+        for j, (label, color, head, mse_col) in enumerate(bar_cols):
             offset = (j - (len(bar_cols) - 1) / 2) * w
             ax.bar(x + offset, sub[mse_col], w, color=color,
+                   hatch=recon_plots._HEAD_HATCH.get(head, ""),
+                   edgecolor="white", linewidth=0.6,
                    label=f"{label}  (mean {rdf[mse_col].mean():.2e})")
         ax.set_xticks(x)
         ax.set_xticklabels([f"idx {i}" for i in sub["index"]], fontsize=8)
@@ -302,7 +333,7 @@ def _plot_signal_reconstruction(results: dict, output_dir: str) -> list:
         ax.set_title("Per-sample reconstruction MSE — per pathway", fontsize=10)
         fig.tight_layout()
         path = _save_fig(fig, os.path.join(output_dir, "recon_mse_bars.png"))
-        figures.append(("Per-sample reconstruction MSE", path))
+        figures.append((_recon_fig_caption(path), path))
 
     return figures
 
@@ -912,6 +943,434 @@ def _plot_struct_sim_all_models(per_cp: dict, output_dir: str, centered: bool = 
     return [(f"Structured similarity — all models ({tag})", path, "")]
 
 
+# ── Reconstruction report block (sample → dataset → across datasets) ──────────
+#
+# Reconstruction is rendered by a dedicated block rather than the generic per-eval
+# loop, because it is the only eval whose figures form a narrative: a reader has to
+# see what one reconstruction looks like before a distribution over thousands of them
+# means anything. The generic loop sorts keys alphabetically and would interleave
+# datasets and granularities.
+
+_RECON_INTRO = [
+    "A **3AE checkpoint** holds one shared data2vec backbone and up to three decoder "
+    "heads. Each head reads the backbone at a different depth and each reconstructs the "
+    "same 245-point input signal, so comparing them asks *how much of the signal "
+    "survives to that depth*:",
+    "",
+    "| Head | Reads | Shape | Decoder |",
+    "|---|---|---|---|",
+    "| **FE decoder** | post-LayerNorm conv feature-extractor output | 47 x 512 | "
+    "`MirrorDecoder`, ~3.7M params |",
+    "| **Projection decoder** | `post_extract_proj`, before the transformer | 47 x 768 | "
+    "`TransformerMirrorDecoder`, ~4.1M params |",
+    "| **Transformer decoder** | transformer encoder output | 47 x 768 | "
+    "`TransformerMirrorDecoder`, ~4.1M params |",
+    "",
+    "> **Comparing heads is confounded.** The FE decoder is a different architecture on a "
+    "narrower input than the other two, so a gap between them mixes encoder information "
+    "content with decoder capacity (TASKS.md T7). Comparing *one head across datasets* is "
+    "clean; comparing heads to each other is not.",
+    "",
+    "**Two kinds of data, never pooled.** `single_channel_*` names one wav per sample. "
+    "`multi_channel`, `sampled_data` and `labeled_data` name one wav per *component*, and "
+    "the physical sample is every wav sharing a `spec` index — so those datasets also get "
+    "a per-spectrum view. In `multi_channel` and `labeled_data` (not `sampled_data`) "
+    "component 20 is a byte-identical copy of component 14 and 21 of 15; both are dropped "
+    "before anything is aggregated, so the sample count for those datasets is lower than "
+    "the number drawn.",
+    "",
+    "The three parts below go from one sample, to one dataset, to all of them. Every "
+    "figure is followed by what it shows, how to read it, what a good result looks like "
+    "and its caveats; the same text is also drawn onto each PNG, so a figure opened on "
+    "its own still explains itself.",
+    "",
+    "The single number worth checking first is **median R²**. It compares the model "
+    "against the trivial predictor that outputs each sample's own mean value as a flat "
+    "line: R² = 0 means the decoder is worth exactly nothing, however small its MSE "
+    "looks. Medians lead throughout, because a handful of outliers pull the mean far "
+    "above the typical sample on the multi-component sets.",
+]
+
+_RECON_SUMMARY_COLUMNS = [
+    ("head_label",       "Head",                  None),
+    ("n",                "n",                     "{:.0f}"),
+    ("mse_median",       "MSE median ↓",          "{:.4g}"),
+    ("mse_mean",         "MSE mean ↓",            "{:.4g}"),
+    ("mse_p90",          "MSE p90 ↓",             "{:.4g}"),
+    ("mae_median",       "MAE median ↓",          "{:.4g}"),
+    ("r2_median",        "R² median ↑",           "{:.3f}"),
+    ("frac_r2_positive", "beats baseline ↑",      "{:.0%}"),
+    ("pearson_median",   "Pearson r median ↑",    "{:.3f}"),
+    ("amp_ratio_median", "amplitude ratio (1 = ideal)", "{:.3f}"),
+    ("peak_err_median",  "peak error (0 = ideal)", "{:.3f}"),
+    ("k_eff_median",     "effective resolution ↑", "{:.1f}"),
+]
+
+
+def _recon_keys(results: dict) -> list:
+    """Reconstruction result keys, single-component datasets first."""
+    keys = [k for k in results
+            if _split_eval_key(k)[0] == "signal_reconstruction"
+            and isinstance(results[k], dict)]
+    return sorted(keys, key=lambda k: (results[k].get("component_group") == "multi", k))
+
+
+def _recon_summary_table(r: dict) -> list:
+    """Per-head summary as a markdown table — richer than the old key/value cards."""
+    sdf = r.get("summary_df")
+    if not isinstance(sdf, pd.DataFrame) or sdf.empty:
+        return []
+    cols = [(c, lbl, fmt) for c, lbl, fmt in _RECON_SUMMARY_COLUMNS if c in sdf.columns]
+    lines = ["| " + " | ".join(lbl for _, lbl, _ in cols) + " |",
+             "|" + "|".join("---" for _ in cols) + "|"]
+    for _, row in sdf.iterrows():
+        cells = []
+        for c, _, fmt in cols:
+            v = row[c]
+            if fmt is None:
+                cells.append(str(v))
+            elif pd.isna(v):
+                cells.append("–")
+            else:
+                cells.append(fmt.format(v))
+        lines.append("| " + " | ".join(cells) + " |")
+    return lines
+
+
+def _recon_dataset_heading(r: dict, alias: str) -> str:
+    group = r.get("component_group", "single")
+    subset = r.get("dataset_subset") or ""
+    n = r.get("n_samples", 0)
+    bits = [alias or "dataset"]
+    if subset:
+        bits.append("`%s`" % os.path.basename(str(subset)))
+    return "%s — %s-component, n = %d" % (" / ".join(bits), group, n)
+
+
+# The four explanation fields, in reading order, with the labels used in the report.
+_EXPLAIN_FIELDS = [("what", "What this shows"), ("read", "How to read it"),
+                   ("good", "A good result"), ("caveats", "Caveats")]
+
+
+def _explain_lines(path: str) -> tuple:
+    """
+    The figure's explanation as (title, [(label, text), ...]), or ("", []) if the figure
+    is not registered.
+
+    The same text is drawn onto the PNG so a figure read on its own still makes sense,
+    but it is far easier to read here, so the report carries it too.
+    """
+    from . import recon_plots
+    from .evaluations.signal_reconstruction import CROSS_HEAD_CAVEAT
+
+    d = recon_plots.doc_for_figure(path)
+    if not d:
+        return "", []
+    out = []
+    for key, label in _EXPLAIN_FIELDS:
+        text = (d.get(key) or "").strip()
+        # Every figure repeats the cross-head confound verbatim. That is right on a
+        # standalone PNG and eighteen-fold repetition in a report that already states it
+        # up front, so here it becomes a pointer.
+        if CROSS_HEAD_CAVEAT.strip() in text:
+            text = text.replace(CROSS_HEAD_CAVEAT.strip(),
+                                "Comparing heads to each other is confounded — see the "
+                                "note at the top of this section.").strip()
+        if not text:
+            continue
+        if key == "read":                     # stored lowercase, mid-sentence
+            text = text[0].upper() + text[1:]
+        if not text.endswith("."):
+            text += "."
+        out.append((label, text))
+    return d.get("title", ""), out
+
+
+def _recon_md_figure(caption: str, path: str, run_dir: str) -> list:
+    """One image, its one-line caption, then the full explanation."""
+    title, explain = _explain_lines(path)
+    # Alt text is the short title, not the caption - the caption is printed right below
+    # the image, and repeating a full sentence twice reads badly in raw markdown.
+    lines = ["", "![%s](%s)" % (title or caption, os.path.relpath(path, run_dir)),
+             "*" + caption + "*", ""]
+    for label, text in explain:
+        lines.append("- **%s.** %s" % (label, text))
+    return lines
+
+
+def _recon_html_figure(caption: str, path: str) -> str:
+    title, explain = _explain_lines(path)
+    body = "".join("<li><strong>%s.</strong> %s</li>" % (label, _md_inline_to_html(text))
+                   for label, text in explain)
+    if body:
+        body = '<ul class="figexplain">%s</ul>' % body
+    return ("<figure>"
+            '<img src="%s" alt="%s">'
+            "<figcaption>%s</figcaption>%s"
+            "</figure>" % (_fig_to_b64(path), title or caption,
+                           _md_inline_to_html(caption), body))
+
+
+# A short legend for the summary tables: readers otherwise have to guess what a dash
+# means and which direction is good.
+_RECON_TABLE_LEGEND = (
+    "Arrows mark the good direction. **amplitude ratio** is "
+    "`std(prediction) / std(target)`: 1 keeps the target's dynamic range, below 1 is "
+    "flatter than the target. **beats baseline** is the share of samples the model "
+    "reconstructs better than a flat line at that sample's own mean. A dash means the "
+    "statistic is undefined — Pearson r has no value when a head emits a constant signal, "
+    "and R² has none when the target itself is constant."
+)
+
+
+def _recon_md_block(results: dict, figures_by_eval: dict, summary_figs: list,
+                    run_dir: str, config=None) -> list:
+    keys = _recon_keys(results)
+    if not keys:
+        return []
+
+    first = results[keys[0]]
+    lines = ["", "---", "", "## Signal Reconstruction (3AE)", ""]
+    model = first.get("_model_name") or ""
+    if model:
+        lines += ["**Checkpoint:** `%s`" % model, ""]
+    lines += ["**Target convention:** `normalize=%s` — %s, matching training."
+              % (first.get("normalize"),
+                 "each target is layer-normed to zero mean and unit variance"
+                 if first.get("normalize") else "targets are the raw signal"), ""]
+    lines += _RECON_INTRO
+
+    # ── 1. Sample level (the pre-existing overlays) ──────────────────────────
+    sample_figs = {key: figures_by_eval.get(key, []) for key in keys}
+    if any(sample_figs.values()):
+        lines += ["", "### 1. Individual reconstructions", "",
+                  "Target against each head's output, per dataset — on the training "
+                  "scale and, when `normalize=True`, mapped back to physical units.", ""]
+        for key in keys:
+            r = results[key]
+            alias = _split_eval_key(key)[1]
+            if r.get("skipped") or not sample_figs.get(key):
+                continue
+            lines += ["#### %s" % _recon_dataset_heading(r, alias), ""]
+            for f in sample_figs[key]:
+                lines += _recon_md_figure(f[0], f[1], run_dir) + [""]
+        lines += ["---", ""]
+
+    # ── 2. Per dataset ───────────────────────────────────────────────────────
+    lines += ["", "### 2. Per dataset", "",
+              "Headline numbers per head, over every sample drawn.", "",
+              _RECON_TABLE_LEGEND, ""]
+    for key in keys:
+        r = results[key]
+        alias = _split_eval_key(key)[1]
+        if r.get("skipped"):
+            lines += ["#### %s" % _recon_dataset_heading(r, alias), "",
+                      "*Skipped — %s.*" % r.get("error", "n/a"), ""]
+            continue
+        lines += ["#### %s" % _recon_dataset_heading(r, alias), ""]
+        table = _recon_summary_table(r)
+        if table:
+            lines += table + [""]
+        spec = r.get("spectrum_df")
+        if isinstance(spec, pd.DataFrame) and not spec.empty:
+            lines += ["Per-spectrum view available: **%d spectra**, aggregating the "
+                      "components of each `(dataset, spec)` key. See `spectrum_df.csv`."
+                      % len(spec), ""]
+
+    # ── 2. Across datasets ───────────────────────────────────────────────────
+    if summary_figs:
+        lines += ["---", "", "### 3. Across datasets", "",
+                  "Every dataset in one view, with single-component and multi-component "
+                  "blocks kept visually separate.", ""]
+        combined = _recon_combined_table(results)
+        if combined:
+            lines += ["#### Summary table — all datasets", ""] + combined + [""]
+        for f in summary_figs:
+            lines += _recon_md_figure(f[0], f[1], run_dir) + [""]
+
+    # Closing read of the numbers. Generated from this run's own values, so it cannot
+    # drift into stock advice that would read the same whatever the results were.
+    try:
+        from . import findings
+        lines += findings.section(results, config)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[Report] findings section FAILED: {type(e).__name__}: {e}")
+        lines += ["", "---", "",
+                  "> **The closing section could not be generated** — "
+                  f"`{type(e).__name__}: {e}`. This is a bug in `findings.py`, not a "
+                  "property of the results; the figures and tables above are unaffected.",
+                  ""]
+
+    # Collapse runs of blank lines. The block is assembled from many small pieces that
+    # each pad themselves, and doubled blanks render as ragged extra space.
+    out = []
+    for ln in lines:
+        if ln == "" and out and out[-1] == "":
+            continue
+        out.append(ln)
+    return out
+
+
+def _recon_combined_table(results: dict) -> list:
+    """One table over every dataset and head, component group as an explicit column."""
+    from . import recon_plots
+    by_alias = {_split_eval_key(k)[1] or "dataset": results[k] for k in _recon_keys(results)}
+    frame = recon_plots.summary_frame(by_alias)
+    if frame.empty:
+        return []
+    cols = ([("dataset", "Dataset", None), ("component_group", "Group", None)]
+            + [(c, lbl, fmt) for c, lbl, fmt in _RECON_SUMMARY_COLUMNS
+               if c in frame.columns and c != "head_label"]
+            )
+    cols.insert(2, ("head_label", "Head", None))
+    lines = ["| " + " | ".join(lbl for _, lbl, _ in cols) + " |",
+             "|" + "|".join("---" for _ in cols) + "|"]
+    for _, row in frame.iterrows():
+        cells = []
+        for c, _, fmt in cols:
+            v = row[c]
+            if fmt is None:
+                cells.append(str(v))
+            elif pd.isna(v):
+                cells.append("–")
+            else:
+                cells.append(fmt.format(v))
+        lines.append("| " + " | ".join(cells) + " |")
+    return lines
+
+
+def _md_inline_to_html(text: str) -> str:
+    """
+    Convert the inline markdown the reconstruction block is written in - `code` and
+    **bold** - into HTML. The same strings feed both the markdown and HTML reports, and
+    previously the HTML path just stripped the markers, so backticks rendered literally.
+    """
+    import html as _html
+    import re as _re
+    out = _html.escape(text, quote=False)
+    out = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
+    out = _re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    return out
+
+
+def _md_to_html_table(lines: list) -> str:
+    """Render the markdown tables built above as HTML, reusing the report's own CSS."""
+    rows = [ln for ln in lines if ln.strip().startswith("|")]
+    if len(rows) < 2:
+        return ""
+    def cells(ln):
+        return [c.strip() for c in ln.strip().strip("|").split("|")]
+    head = cells(rows[0])
+    body = [cells(ln) for ln in rows[2:]]
+    out = (["<table>", "<thead><tr>"]
+           + ["<th>%s</th>" % _md_inline_to_html(h) for h in head]
+           + ["</tr></thead>", "<tbody>"])
+    for row in body:
+        out.append("<tr>" + "".join("<td>%s</td>" % _md_inline_to_html(c)
+                                    for c in row) + "</tr>")
+    out += ["</tbody>", "</table>"]
+    return "\n".join(out)
+
+
+def _recon_html_block(results: dict, figures_by_eval: dict, summary_figs: list,
+                      config=None) -> str:
+    keys = _recon_keys(results)
+    if not keys:
+        return ""
+    first = results[keys[0]]
+
+    def para(text):
+        return "<p>%s</p>" % text
+
+    intro_md = [ln for ln in _RECON_INTRO]
+    intro_html = [_md_to_html_table(intro_md)]
+    for ln in intro_md:
+        s = ln.strip()
+        if not s or s.startswith("|"):
+            continue
+        if s.startswith(">"):
+            intro_html.append("<blockquote><p>%s</p></blockquote>"
+                              % _md_inline_to_html(s.lstrip("> ")))
+        else:
+            intro_html.append(para(_md_inline_to_html(s)))
+
+    parts = ["<section>", "<h2>Signal Reconstruction (3AE)</h2>"]
+    model = first.get("_model_name") or ""
+    if model:
+        parts.append(para("<strong>Checkpoint:</strong> <code>%s</code>" % model))
+    parts.append(para("<strong>Target convention:</strong> <code>normalize=%s</code> — %s, "
+                      "matching training."
+                      % (first.get("normalize"),
+                         "each target is layer-normed to zero mean and unit variance"
+                         if first.get("normalize") else "targets are the raw signal")))
+    parts += intro_html
+
+    if any(figures_by_eval.get(key) for key in keys):
+        parts += ["<h3>1. Individual reconstructions</h3>",
+                  para("Target against each head's output, per dataset — on the training "
+                       "scale and, when <code>normalize=True</code>, mapped back to "
+                       "physical units.")]
+        for key in keys:
+            r = results[key]
+            if r.get("skipped") or not figures_by_eval.get(key):
+                continue
+            parts.append("<h4>%s</h4>" % _md_inline_to_html(
+                _recon_dataset_heading(r, _split_eval_key(key)[1])))
+            for f in figures_by_eval[key]:
+                parts.append(_recon_html_figure(f[0], f[1]))
+
+    parts += ["<h3>2. Per dataset</h3>",
+              para("Headline numbers per head, over every sample drawn."),
+              para(_md_inline_to_html(_RECON_TABLE_LEGEND))]
+    for key in keys:
+        r = results[key]
+        alias = _split_eval_key(key)[1]
+        parts.append("<h4>%s</h4>"
+                     % _md_inline_to_html(_recon_dataset_heading(r, alias)))
+        if r.get("skipped"):
+            parts.append(para("<em>Skipped — %s.</em>" % r.get("error", "n/a")))
+            continue
+        parts.append(_md_to_html_table(_recon_summary_table(r)))
+        spec = r.get("spectrum_df")
+        if isinstance(spec, pd.DataFrame) and not spec.empty:
+            parts.append(para("Per-spectrum view: <strong>%d spectra</strong>, aggregating "
+                              "the components of each <code>(dataset, spec)</code> key."
+                              % len(spec)))
+
+    if summary_figs:
+        parts += ["<h3>3. Across datasets</h3>",
+                  para("Every dataset in one view, with single-component and "
+                       "multi-component blocks kept visually separate.")]
+        combined = _recon_combined_table(results)
+        if combined:
+            parts += ["<h4>Summary table — all datasets</h4>", _md_to_html_table(combined)]
+        for f in summary_figs:
+            parts.append(_recon_html_figure(f[0], f[1]))
+
+    try:
+        from . import findings
+        obs, nxt = findings.observations(results), findings.next_steps(results, config)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[Report] findings section FAILED: {type(e).__name__}: {e}")
+        obs, nxt = [], []
+        parts.append(para("<strong>The closing section could not be generated</strong> — "
+                          "<code>%s: %s</code>. This is a bug in findings.py, not a "
+                          "property of the results." % (type(e).__name__, e)))
+    for heading, items in (("What this run shows", obs), ("What to do next", nxt)):
+        if not items:
+            continue
+        parts.append("<h3>%s</h3>" % heading)
+        parts.append('<ul class="figexplain">%s</ul>'
+                     % "".join("<li>%s</li>"
+                               % _md_inline_to_html(i).replace("\n  - ", "<br>&bull; ")
+                               for i in items))
+
+    parts.append("</section>")
+    return "\n".join(p for p in parts if p)
 _SWEEP_COLORS = ["dimgray", "steelblue", "darkorange", "mediumseagreen", "purple", "crimson"]
 
 
@@ -1163,6 +1622,13 @@ td.bad  { color: #c0392b; font-weight: 600; }
 figure { margin: 1.5rem 0; text-align: center; }
 figure img { max-width: 100%; border-radius: 6px; border: 1px solid #e0e3ea; }
 figcaption { margin-top: .5rem; font-size: .82rem; color: #777; font-style: italic; }
+/* The same explanation is drawn onto the PNG, but it is much easier to read here. */
+ul.figexplain { margin: .7rem 0 .2rem; padding: .8rem 1rem .8rem 2rem;
+                background: #f7f8fa; border-left: 3px solid __ACCENT__;
+                border-radius: 3px; font-size: .82rem; color: #444; line-height: 1.55; }
+ul.figexplain li { margin-bottom: .45rem; }
+ul.figexplain li:last-child { margin-bottom: 0; }
+ul.figexplain strong { color: __DARK__; }
 .cp-section { border-top: 2px dashed #d0d4e0; margin-top: 2rem; padding-top: 1.2rem; }
 .cp-heading { font-size: 1rem; color: __ACCENT__; font-family: monospace;
               margin-bottom: 1rem; font-weight: 600; }
@@ -1242,7 +1708,9 @@ def _html_section_config(config) -> str:
     if config is None:
         return ""
     kv = {k: str(v) for k, v in vars(config).items()}
-    return f"<section>\n<h2>Configuration</h2>\n{_html_kv(kv)}\n</section>"
+    return (f"<section>\n<h2>Appendix — configuration</h2>\n"
+            f"<p>Every parameter this run was launched with.</p>\n"
+            f"{_html_kv(kv)}\n</section>")
 
 
 def _html_section_embedding(results: dict, figures: list) -> str:
@@ -1442,6 +1910,12 @@ def _write_run_info(run_dir: str, ts: str, results: dict, config) -> str:
         "| `comparison/` | Cross-checkpoint figures + comparison CSVs |",
         "| `<checkpoint>/<method>/` | Per-checkpoint figures + CSVs (one dir per eval method) |",
         "| `<method>/` | Standalone-eval figures + CSVs (single-model runs) |",
+        "| `<model>/reconstruction_<dataset>/` | Per-dataset reconstruction figures + "
+        "`recon_df.csv` (per sample), `summary_df.csv` (per head), `spectrum_df.csv` and "
+        "`tail_lift_df.csv` (multi-component datasets only) |",
+        "| `<model>/reconstruction_summary/` | Cross-dataset reconstruction figures, "
+        "`recon_summary_all_datasets.csv`, and `FIGURES.md` explaining every "
+        "reconstruction figure |",
     ]
 
     path = os.path.join(run_dir, "run_info.md")
@@ -1450,11 +1924,61 @@ def _write_run_info(run_dir: str, ts: str, results: dict, config) -> str:
     return path
 
 
-def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, str]:
+def _build_eink_pdfs(results: dict, run_dir: str, config) -> list:
+    """
+    Render a greyscale copy of every figure, then build the PDFs from those.
+
+    The e-ink style is not a colour swap - it changes layouts, drops the on-image
+    footnote and re-shades the heatmap - so the PDF cannot reuse the HTML's figures. It
+    would once have been enough to switch style before the run, but that made the HTML
+    greyscale too. Rendering twice costs a minute of matplotlib and no re-inference, and
+    means one run produces a colour HTML and an e-ink PDF, which is what the pipeline
+    wants by default.
+    """
+    from . import recon_plots, report_pdf
+
+    if not report_pdf.available():
+        print("[Report] pdflatex not found — skipping the e-ink PDF")
+        return []
+
+    eink_dir = os.path.join(run_dir, "eink_figures")
+    os.makedirs(eink_dir, exist_ok=True)
+    recon_plots.set_style("eink")
+    try:
+        figures_by_eval, summary_figs = {}, []
+        for key, r in results.items():
+            if _split_eval_key(key)[0] != "signal_reconstruction":
+                continue
+            if not isinstance(r, dict) or r.get("skipped"):
+                continue
+            alias = _split_eval_key(key)[1] or "dataset"
+            target = os.path.join(eink_dir, _method_dirname("signal_reconstruction", alias))
+            figures_by_eval[key] = _relocate(_plot_signal_reconstruction(r, eink_dir), target)
+
+        recon_keys = _recon_keys(results)
+        if recon_keys:
+            by_alias = {(_split_eval_key(k)[1] or "dataset"): results[k]
+                        for k in recon_keys}
+            summary_figs = recon_plots.plot_recon_across_datasets(
+                by_alias, os.path.join(eink_dir, "reconstruction_summary"))
+
+        return report_pdf.build_pdfs(results, figures_by_eval, summary_figs, run_dir,
+                                     config, pages=getattr(config, "pdf_page", None))
+    finally:
+        # Always restore, or a later report in the same process comes out greyscale.
+        recon_plots.set_style("screen")
+
+
+def generate_report(results: dict, output_dir: str, config=None,
+                    pdf: bool = True) -> tuple[str, str]:
     """
     Generate markdown + self-contained HTML report from eval results.
     Each run gets its own timestamped subdirectory inside output_dir.
     Returns (md_path, html_path).
+
+    pdf=True additionally builds eval_report_eink.pdf — the same content, re-rendered
+    for an e-ink reader: greyscale figures, one per page, with the explanations set as
+    real type. Needs pdflatex; skipped with a message if absent.
     """
     os.makedirs(output_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -1496,6 +2020,27 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             target = os.path.join(run_dir, _method_dirname(base, alias))
         figures_by_eval[key] = _relocate(figs, target)
 
+    # Cross-dataset reconstruction figures need every dataset at once, so they get a
+    # second pass — structurally the same as checkpoint_comparison's.
+    recon_summary_figs = []
+    recon_keys = _recon_keys(results)
+    if recon_keys:
+        from . import recon_plots
+        by_alias = {(_split_eval_key(k)[1] or "dataset"): results[k] for k in recon_keys}
+        model_name = results[recon_keys[0]].get("_model_name") or ""
+        summary_dir = os.path.join(*[p for p in (run_dir, model_name,
+                                                 "reconstruction_summary") if p])
+        try:
+            recon_summary_figs = recon_plots.plot_recon_across_datasets(
+                by_alias, summary_dir)
+            combined = recon_plots.summary_frame(by_alias)
+            if not combined.empty:
+                combined.to_csv(os.path.join(summary_dir, "recon_summary_all_datasets.csv"),
+                                index=False)
+        except Exception as e:
+            print(f"[Report] cross-dataset reconstruction figures failed: "
+                  f"{type(e).__name__}: {e}")
+
     if "checkpoint_comparison" in results:
         figures_by_eval["checkpoint_comparison"] = _plot_checkpoint_comparison(
             results["checkpoint_comparison"], run_dir
@@ -1506,6 +2051,7 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
     for eval_name, figs in figures_by_eval.items():
         for fig in figs:
             all_figures.append(fig[:2])  # just (caption, path) for counting
+    all_figures += [f[:2] for f in recon_summary_figs]
 
     # ── Run info ──────────────────────────────────────────────────────────────
     _write_run_info(run_dir, ts, results, config)
@@ -1518,10 +2064,14 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         f"**Date:** {ts}",
     ]
 
+    # Configuration is reference material, not the story - it is appended at the end.
+    config_lines = []
     if config is not None:
-        lines += ["", "## Configuration", "", "| Parameter | Value |", "|-----------|-------|"]
+        config_lines = ["", "---", "", "## Appendix — configuration", "",
+                        "Every parameter this run was launched with.", "",
+                        "| Parameter | Value |", "|-----------|-------|"]
         for k, v in vars(config).items():
-            lines.append(f"| `{k}` | `{v}` |")
+            config_lines.append(f"| `{k}` | `{v}` |")
 
     _MD_TITLES = {
         "embedding_similarity": "Embedding Similarity (stack query)",
@@ -1562,13 +2112,13 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         return out if len(out) > 2 else []
 
     for key in sorted(figures_by_eval):
-        if key == "checkpoint_comparison":
+        # Reconstruction is rendered by _recon_md_block below, as one narrative running
+        # from a single sample out to the whole dataset.
+        if key == "checkpoint_comparison" or _split_eval_key(key)[0] == "signal_reconstruction":
             continue
         r = results.get(key, {})
         base, alias = _split_eval_key(key)
         title = _MD_TITLES.get(base, base)
-        if base == "signal_reconstruction" and r.get("_model_name"):
-            title += f" — model: {r['_model_name']}"
         if alias:
             title += f" — dataset: {alias}"
         lines += ["", f"## {title}", ""]
@@ -1592,12 +2142,16 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             cap, path = fig[0], fig[1]
             lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
+    lines += _recon_md_block(results, figures_by_eval, recon_summary_figs, run_dir,
+                             config)
+    lines += config_lines
+
     with open(md_path, "w") as f:
         f.write("\n".join(lines))
 
     # ── HTML ──────────────────────────────────────────────────────────────────
     html_path = os.path.join(run_dir, "eval_report.html")
-    sections = [_html_section_config(config)]
+    sections = []
 
     def _html_cards(base, r):
         if base == "embedding_similarity":
@@ -1622,13 +2176,12 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         return {}
 
     for key in sorted(figures_by_eval):
-        if key == "checkpoint_comparison":
+        # Reconstruction is rendered by _recon_html_block below.
+        if key == "checkpoint_comparison" or _split_eval_key(key)[0] == "signal_reconstruction":
             continue
         r = results.get(key, {})
         base, alias = _split_eval_key(key)
         title = _MD_TITLES.get(base, base)
-        if base == "signal_reconstruction" and r.get("_model_name"):
-            title += f" — model: {r['_model_name']}"
         if alias:
             title += f" — dataset: {alias}"
         if r.get("skipped"):
@@ -1638,10 +2191,17 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         sections.append(_html_section_generic(
             title, _html_cards(base, r), figures_by_eval.get(key, [])))
 
+    recon_html = _recon_html_block(results, figures_by_eval, recon_summary_figs, config)
+    if recon_html:
+        sections.append(recon_html)
+
     if "checkpoint_comparison" in results:
         sections.append(_html_section_comparison(
             results, figures_by_eval.get("checkpoint_comparison", [])
         ))
+
+    # Reference material last.
+    sections.append(_html_section_config(config))
 
     with open(html_path, "w") as f:
         f.write(_build_html(results, config, ts, sections))
@@ -1694,6 +2254,12 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
                         f"{base}.csv"), index=False)
 
     total_figs = len(all_figures)
+    if pdf:
+        try:
+            _build_eink_pdfs(results, run_dir, config)
+        except Exception as e:
+            print(f"[Report] PDF build failed: {type(e).__name__}: {e}")
+
     print(f"[Report] Run dir  : {run_dir}")
     print(f"[Report] Markdown : {md_path}")
     print(f"[Report] HTML     : {html_path}")

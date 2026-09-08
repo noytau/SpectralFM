@@ -151,10 +151,16 @@ SpectralFM/
 │   │   ├── evaluations/
 │   │   │   ├── embedding_similarity.py
 │   │   │   ├── signal_completion.py
+│   │   │   ├── signal_reconstruction.py
 │   │   │   ├── noise_robustness.py
 │   │   │   └── checkpoint_comparison.py
+│   │   ├── recon_plots.py     ← dataset-level reconstruction figures
+│   │   ├── recon_analysis.py  ← metrics those figures and findings share
+│   │   ├── signal_features.py
+│   │   ├── findings.py        ← the report's generated closing section
 │   │   ├── runner.py
 │   │   ├── report.py
+│   │   ├── report_pdf.py      ← e-ink PDF build of the reconstruction report
 │   │   └── requirements_eval.txt
 │   ├── train_reconstruction.py   ← standalone autoencoder/reconstruction trainer (requires fairseq)
 │   ├── recon_components.py       ← per-component checkpoint loaders used by both training paths
@@ -184,6 +190,14 @@ See **[`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md)** for full deta
 - **Four evaluations:** embedding similarity, signal completion, noise robustness, checkpoint comparison
 - **Four checkpoint modes:** `hf` (HuggingFace), `file`, `dir`, `multiple` (for comparison across training steps)
 - **Report:** markdown + PNG figures + CSV exports written to `output_dir/`
+- **Reconstruction (3AE)** additionally gets eight dataset-level figures across all four
+  recon datasets, a generated closing section, and an e-ink PDF — see
+  [`EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md#2-signal_reconstruction--true-reconstruction-through-the-pipeline):
+  ```bash
+  python -m eval.runner --evals signal_reconstruction --recon_ckpt <3ae_ckpt.pt> \
+    --nova_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data \
+    --eval_set_size all --recon_max_samples 0 --output_dir <out>/
+  ```
 
 Quick run — compare every checkpoint in a training run's output dir:
 ```bash
