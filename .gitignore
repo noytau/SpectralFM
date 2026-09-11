@@ -63,3 +63,7 @@ wandb/
 fairseq/base_libri.pt
 fairseq/audio_base_ls.pt
 fairseq/base_libri_960h.pt
+
+# Reproducible embedding-feature caches (regenerate via eval.label_probe;
+# multi-GB, not a result — never commit)
+code/eval_outputs/label_probe/*/bank.npz
