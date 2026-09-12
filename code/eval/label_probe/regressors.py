@@ -88,8 +88,7 @@ def make_fewshot_regressor(name: str, seed: int = 42, pca_basis=None):
         ridge = RidgeCV(alphas=np.logspace(-2, 4, 20))
         if pca_basis is not None:
             return Pipeline([("pca", _FrozenPCA(pca_basis, k)), ("ridge", ridge)])
-        from sklearn.decomposition import PCA
-        return Pipeline([("pca", PCA(n_components=k, random_state=seed)), ("ridge", ridge)])
+        return Pipeline([("pca", _SafePCA(k, seed=seed)), ("ridge", ridge)])
 
     if name.startswith("pls"):
         return _PLSWrapper(int(name[len("pls"):]))
@@ -99,6 +98,42 @@ def make_fewshot_regressor(name: str, seed: int = 42, pca_basis=None):
         return KNeighborsRegressor(n_neighbors=int(name[len("knn"):]))
 
     raise ValueError(f"unknown few-shot probe {name!r}")
+
+
+class _SafePCA:
+    """PCA that caps n_components to what the training draw can actually
+    support (min(requested, n_samples, n_features)) at fit time, instead of
+    sklearn's PCA -- which fixes n_components at construction and raises if
+    a later, smaller training draw can't support it. Needed here because the
+    label-efficiency ladder reuses the same probe across n_train from 10 up
+    to the full pool; a probe picked by a large-n screen (e.g. pca64_ridge)
+    would otherwise crash the moment the ladder reaches an n_train below the
+    requested component count."""
+
+    def __init__(self, n_components, seed=42):
+        self.n_components = n_components
+        self.seed = seed
+        self._pca = None
+
+    def fit(self, X, y=None):
+        from sklearn.decomposition import PCA
+        k = max(1, min(self.n_components, X.shape[0], X.shape[1]))
+        self._pca = PCA(n_components=k, random_state=self.seed).fit(X)
+        return self
+
+    def transform(self, X):
+        return self._pca.transform(X)
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X)
+
+    def get_params(self, deep=True):
+        return {"n_components": self.n_components, "seed": self.seed}
+
+    def set_params(self, **p):
+        for key, val in p.items():
+            setattr(self, key, val)
+        return self
 
 
 class _FrozenPCA:

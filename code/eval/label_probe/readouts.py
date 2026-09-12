@@ -6,12 +6,19 @@ token/time axis, per stage, per component. Every (stage, pooling) readout is
 then a cheap CPU subset-concatenation of that bank, so the whole
 layer x pooling grid is explorable from a single GPU pass.
 
-Stages: the two feature-extractor taps (`fe` pre-LayerNorm, `extract_features`
-post-LayerNorm) plus all 13 transformer hidden-state layers (`layer0`..`layer12`,
-where `layer0` is the embedding output before any transformer block and
-`layer12` is the final block's output — the standard "final-layer, mean-pool"
+Stages, in the model's own block vocabulary (FE / Projector / Transformer,
+per ARCHITECTURE.md): `fe` is the FE (conv feature extractor) output,
+pre-LayerNorm; `extract_features` is the FE output post-LayerNorm (this is
+literally "conv FE output (post-LayerNorm)" in ARCHITECTURE.md's FE-decoder
+row — still 512-d, the LayerNorm's own submodule of `feature_projection`,
+not yet through its Linear). `layer0` is what the Transformer actually
+receives as input: FE post-LN, projected 512->768 by the Projector's Linear,
+plus positional conv embedding and the encoder's own pre-block LayerNorm —
+displayed as "Projector" since it is the Projector's contribution to the
+pipeline, immediately before any Transformer block runs. `layer1`..`layer12`
+are Transformer block 1..12 outputs — the standard "final-layer, mean-pool"
 convention used elsewhere in this codebase's eval package is exactly
-(stage="layer12", pooling="mean")).
+(stage="layer12", pooling="mean"), displayed as "Transformer layer 12".
 """
 from __future__ import annotations
 
@@ -34,6 +41,22 @@ POOLINGS = {
 N_TRANSFORMER_LAYERS = 13  # HF hidden_states = embeddings output + 12 blocks
 BANK_STAGES = ("fe", "extract_features") + tuple(
     f"layer{i}" for i in range(N_TRANSFORMER_LAYERS))
+
+# Internal bank keys ("fe", "extract_features", "layer0".."layer12") stay as
+# they are -- they're cache keys, matched against an on-disk bank.npz, and
+# renaming them would invalidate every cached extraction. This maps a key to
+# the model's own block vocabulary for anything user-facing (labels, prints,
+# reports): FE / Projector / Transformer, never "readout" or a bare "layerN".
+STAGE_DISPLAY_NAMES = {
+    "fe": "FE (pre-LN)",
+    "extract_features": "FE (post-LN)",
+    "layer0": "Projector",
+    **{f"layer{i}": f"Transformer layer {i}" for i in range(1, N_TRANSFORMER_LAYERS)},
+}
+
+
+def stage_display_name(stage: str) -> str:
+    return STAGE_DISPLAY_NAMES.get(stage, stage)
 
 
 def build_readout(bank: np.ndarray, comp_idx: list, pooling: str) -> np.ndarray:
