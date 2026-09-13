@@ -40,6 +40,15 @@ def _style_axes(ax, *, grid_axis="both"):
     ax.set_axisbelow(True)
 
 
+def _r2_of(score) -> float:
+    """Search tables hold {r2, repeat_sd, bootstrap_sd} dicts."""
+    return score["r2"] if isinstance(score, dict) else float(score)
+
+
+def _sd_of(score, which="repeat_sd") -> float:
+    return float(score.get(which, 0.0)) if isinstance(score, dict) else 0.0
+
+
 def _n_keys(by_n: dict) -> list:
     """JSON round-trips the n_train keys to strings; sort them numerically
     and hand back the original keys so callers can index straight back in."""
@@ -174,18 +183,57 @@ def _crossing_n(ns, gaps):
     return None
 
 
-def plot_crossover(by_n_comp: dict, output_path: str) -> str:
+def _paired_gaps(ladder, emb_label, raw_label, key):
+    """Per-draw embedding-minus-raw differences at one rung. Both arms are
+    scored on the SAME draws (same seed, same pool), so differencing draw by
+    draw cancels the draw-to-draw variance that dominates at small n -- far
+    tighter, and the right uncertainty for 'is one ahead of the other'."""
+    a = ladder[emb_label][key].get("r2_draws")
+    b = ladder[raw_label][key].get("r2_draws")
+    if a and b and len(a) == len(b):
+        pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
+        if pairs:
+            return np.array([x - y for x, y in pairs], dtype=float)
+    # older runs kept only summary stats: fall back to the median difference,
+    # which has no spread to report
+    return np.array([ladder[emb_label][key]["r2_median"]
+                     - ladder[raw_label][key]["r2_median"]], dtype=float)
+
+
+def _crossing_ci(ns, gap_draws, n_boot=2000, seed=0):
+    """Bootstrap CI for the crossing point: resample draws at every rung,
+    recompute the median-gap curve, re-solve the crossing. Rungs whose draws
+    are a single value (the full pool) resample to themselves."""
+    rng = np.random.default_rng(seed)
+    crossings = []
+    for _ in range(n_boot):
+        med = []
+        for g in gap_draws:
+            idx = rng.integers(0, len(g), len(g))
+            med.append(float(np.median(g[idx])))
+        c = _crossing_n(ns, med)
+        if c is not None:
+            crossings.append(c)
+    if len(crossings) < 0.5 * n_boot:
+        # the curve fails to cross in most resamples -- no stable crossing
+        return None, None, len(crossings) / n_boot
+    lo, hi = np.percentile(crossings, [2.5, 97.5])
+    return float(lo), float(hi), len(crossings) / n_boot
+
+
+def plot_crossover(by_n_comp: dict, output_path: str, n_samples: int = None) -> str:
     """
     The question the ladder exists to answer, stated directly: how far is the
     best embedding recipe from whitened raw input, and does that gap ever
-    reach zero? One line per component count; above zero the embedding is
-    ahead, below it raw input is.
+    reach zero? One line per component count, with the interquartile band of
+    the PAIRED per-draw differences; above zero the embedding is ahead.
     """
-    fig, ax = plt.subplots(figsize=(8.4, 5.2))
+    fig, ax = plt.subplots(figsize=(8.8, 5.4))
     _style_axes(ax)
 
     xmin, xmax = 1e9, 0
     annotated = []
+    summary = []
     for i, n_comp_key in enumerate(sorted(by_n_comp, key=lambda k: int(k))):
         ladder = by_n_comp[n_comp_key]["ladder"]
         raw, emb_best, _ = _series_for(by_n_comp, n_comp_key)
@@ -193,39 +241,52 @@ def plot_crossover(by_n_comp: dict, output_path: str) -> str:
             continue
         keys = _n_keys(ladder[raw])
         ns = [int(k) for k in keys]
-        gaps = [ladder[emb_best][k]["r2_median"] - ladder[raw][k]["r2_median"]
-                for k in keys]
+        gap_draws = [_paired_gaps(ladder, emb_best, raw, k) for k in keys]
+        med = [float(np.median(g)) for g in gap_draws]
+        lo = [float(np.percentile(g, 25)) if len(g) > 1 else float(np.median(g))
+              for g in gap_draws]
+        hi = [float(np.percentile(g, 75)) if len(g) > 1 else float(np.median(g))
+              for g in gap_draws]
+
         color = _PALETTE[i % len(_PALETTE)]
-        ax.plot(ns, gaps, marker="o", markersize=5, linewidth=1.9, color=color,
-                label=f"{n_comp_key} component" + ("s" if n_comp_key != "1" else ""),
-                zorder=3, clip_on=False)
+        label = f"{n_comp_key} component" + ("s" if int(n_comp_key) != 1 else "")
+        ax.plot(ns, med, marker="o", markersize=4.8, linewidth=1.9, color=color,
+                label=label, zorder=3)
+        ax.fill_between(ns, lo, hi, color=color, alpha=0.15, linewidth=0, zorder=1)
         xmin, xmax = min(xmin, min(ns)), max(xmax, max(ns))
-        annotated.append((ns[-1], gaps[-1], n_comp_key, color))
-        cross = _crossing_n(ns, gaps)
+        annotated.append((ns[-1], med[-1], n_comp_key))
+
+        cross = _crossing_n(ns, med)
         if cross is not None:
-            ax.axvline(cross, color=color, linestyle="--", linewidth=1.1, alpha=0.55, zorder=1)
-            ax.annotate(f"crossover\nn ≈ {cross:,.0f}",
-                        xy=(cross, 0), xytext=(cross * 1.06, 0.055),
+            c_lo, c_hi, frac = _crossing_ci(ns, gap_draws)
+            ax.axvline(cross, color=color, linestyle="--", linewidth=1.1,
+                       alpha=0.55, zorder=1)
+            if c_lo is not None:
+                ax.axvspan(c_lo, c_hi, color=color, alpha=0.10, zorder=0)
+                txt = f"crossover\nn ≈ {cross:,.0f}\n[{c_lo:,.0f}–{c_hi:,.0f}]"
+            else:
+                txt = f"crossover\nn ≈ {cross:,.0f}"
+            ax.annotate(txt, xy=(cross, 0), xytext=(cross * 1.08, 0.045),
                         fontsize=8.5, color=_INK, ha="left", va="bottom",
-                        linespacing=1.25)
+                        linespacing=1.3)
+            summary.append((n_comp_key, cross, c_lo, c_hi))
+        else:
+            summary.append((n_comp_key, None, None, None))
 
     ax.axhline(0, color=_INK_2, linewidth=1.4, zorder=2)
-    lo, hi = ax.get_ylim()
-    pad = 0.02 * (hi - lo)
-    # axhspan spans the full width whatever the x-limits end up being, so the
-    # polarity bands don't stop short of the direct labels on the right.
-    ax.axhspan(0, hi, color=_PALETTE[0], alpha=0.05, zorder=0)
-    ax.axhspan(lo, 0, color=_INK_MUTED, alpha=0.07, zorder=0)
-    ax.set_ylim(lo, hi)
-    ax.set_xlim(xmin, xmax * 1.35)
+    lo_y, hi_y = ax.get_ylim()
+    pad = 0.02 * (hi_y - lo_y)
+    ax.axhspan(0, hi_y, color=_PALETTE[0], alpha=0.05, zorder=0)
+    ax.axhspan(lo_y, 0, color=_INK_MUTED, alpha=0.07, zorder=0)
+    ax.set_ylim(lo_y, hi_y)
+    ax.set_xlim(xmin, xmax * 1.45)
 
-    ax.text(xmin * 1.08, hi - pad, "embedding ahead", fontsize=8.5,
+    ax.text(xmin * 1.08, hi_y - pad, "embedding ahead", fontsize=8.5,
             color=_INK_2, va="top", ha="left")
-    ax.text(xmin * 1.08, lo + pad, "raw input ahead", fontsize=8.5,
+    ax.text(xmin * 1.08, lo_y + pad, "raw input ahead", fontsize=8.5,
             color=_INK_2, va="bottom", ha="left")
 
-    # Direct labels in ink; the line's own end marker beside them carries identity.
-    for x, y, key, _c in annotated:
+    for x, y, key in annotated:
         ax.annotate(f"{key}-comp", xy=(x, y), xytext=(6, 0),
                     textcoords="offset points", fontsize=8.5, color=_INK_2,
                     va="center", ha="left")
@@ -234,38 +295,70 @@ def plot_crossover(by_n_comp: dict, output_path: str) -> str:
     ax.set_xlabel("labeled training samples (n_train)", fontsize=9.5, color=_INK_2)
     ax.set_ylabel("Δ R²   (best embedding recipe − whitened raw input)",
                   fontsize=9.5, color=_INK_2)
+    pool = f"  ·  pool n={n_samples:,}" if n_samples else ""
     ax.set_title("Does the embedding ever overtake raw input?",
                  fontsize=12.5, color=_INK, fontweight="600", loc="left", pad=12)
+    ax.annotate("median of paired per-draw differences; band = IQR across draws; "
+                "bracket = 95% bootstrap CI on the crossing" + pool,
+                xy=(0.0, -0.135), xycoords="axes fraction", fontsize=8,
+                color=_INK_MUTED, ha="left", va="top")
     leg = ax.legend(fontsize=8.5, frameon=False, loc="lower right")
     for t in leg.get_texts():
         t.set_color(_INK_2)
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)
+    for key, c, cl, ch in summary:
+        if c is None:
+            print(f"[plots] crossover {key}-comp: never crosses", flush=True)
+        else:
+            ci = f" [95% CI {cl:,.0f}-{ch:,.0f}]" if cl is not None else ""
+            print(f"[plots] crossover {key}-comp: n≈{c:,.0f}{ci}", flush=True)
     return output_path
 
 
 def plot_depth_profile(stage_scores: dict, output_path: str,
                         raw_reference: float = None,
-                        display_name=None) -> str:
+                        display_name=None, n_comp: int = 1,
+                        n_samples: int = None, n_repeats: int = None) -> str:
     """
     The block scoreboard as a shape: label signal against pipeline depth,
     FE through the final Transformer layer, one line per normalizer.
+    Error bars are the split-assignment SD across repeated shuffled 5-fold
+    splits -- the uncertainty that decides whether one block really beats
+    the next one on this data.
     """
+    n_txt = f", n={n_samples:,}" if n_samples else ""
+    rep_txt = f"{n_repeats} repeated 5-fold splits; " if n_repeats else ""
+    # kept short: a long y-label runs off the left edge of the canvas
+    y_label = (f"R²   ({n_comp} component{'s' if n_comp != 1 else ''}"
+               f"{n_txt})")
+    foot = (f"mean-pooled, RidgeCV, full pool; {rep_txt}"
+            f"error bars: ±1 SD across repeated splits")
     order = ["fe", "extract_features", "layer0"] + [f"layer{i}" for i in range(1, 13)]
     present = [s for s in order if any(k.startswith(s + "|") for k in stage_scores)]
 
     def score(stage, norm):
         return stage_scores.get(f"{stage}|mean|{norm}")
 
+    def val(stage, norm):
+        sc = score(stage, norm)
+        return _r2_of(sc) if sc is not None else None
+
+    def err(stage, norm):
+        sc = score(stage, norm)
+        return _sd_of(sc) if sc is not None else 0.0
+
     xs = list(range(len(present)))
     fig, ax = plt.subplots(figsize=(9, 5))
     _style_axes(ax, grid_axis="y")
 
     for i, norm in enumerate(("standardize", "whiten")):
-        ys = [score(s, norm) for s in present]
-        ax.plot(xs, ys, marker="o", markersize=5, linewidth=1.9,
-                color=_PALETTE[i], label=norm, zorder=3)
+        ys = [val(s, norm) for s in present]
+        es = [err(s, norm) for s in present]
+        ax.errorbar(xs, ys, yerr=es, marker="o", markersize=5, linewidth=1.9,
+                    color=_PALETTE[i], label=norm, zorder=3,
+                    elinewidth=1.2, capsize=3, ecolor=_PALETTE[i])
 
     if raw_reference is not None:
         ax.axhline(raw_reference, color=_INK_2, linestyle="--", linewidth=1.2, zorder=2)
@@ -274,7 +367,7 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
                     textcoords="offset points", fontsize=8.5, color=_INK_2,
                     ha="right", va="bottom")
 
-    std = [score(s, "standardize") for s in present]
+    std = [val(s, "standardize") for s in present]
     best_i = int(np.argmax([v if v is not None else -9 for v in std]))
     ax.annotate(f"best · {std[best_i]:.3f}", xy=(xs[best_i], std[best_i]),
                 xytext=(0, 10), textcoords="offset points", fontsize=9,
@@ -289,10 +382,11 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
     ax.set_xticks(xs)
     ax.set_xticklabels(names, rotation=38, ha="right", fontsize=8)
     ax.set_xlabel("")
-    ax.set_ylabel("R²   (1 component, full pool, mean-pooled, RidgeCV)",
-                  fontsize=9.5, color=_INK_2)
+    ax.set_ylabel(y_label, fontsize=9.5, color=_INK_2)
     ax.set_title("Where the label signal lives",
                  fontsize=12.5, color=_INK, fontweight="600", loc="left", pad=12)
+    ax.annotate(foot, xy=(0.0, -0.34), xycoords="axes fraction", fontsize=8,
+                color=_INK_MUTED, ha="left", va="top")
     leg = ax.legend(fontsize=8.5, frameon=False, title="normalizer")
     leg.get_title().set_fontsize(8.5)
     leg.get_title().set_color(_INK_MUTED)
@@ -304,7 +398,8 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
     return output_path
 
 
-def plot_ladder_panels(by_n_comp: dict, output_path: str) -> str:
+def plot_ladder_panels(by_n_comp: dict, output_path: str,
+                        n_samples: int = None) -> str:
     """
     Small multiples, one column per component count: held-out R² on top,
     and underneath the number that actually decides a few-shot deployment --
@@ -343,10 +438,14 @@ def plot_ladder_panels(by_n_comp: dict, output_path: str) -> str:
                                   [ladder[lab][keys[j]]["r2_p25"] for j in multi],
                                   [ladder[lab][keys[j]]["r2_p75"] for j in multi],
                                   color=color, alpha=0.14, linewidth=0, zorder=1)
-            # hollow final marker: single draw, no spread behind it
-            top.plot(ns[-1], med[-1], marker="o", markersize=6.5,
-                     markerfacecolor=_SURFACE, markeredgecolor=color,
-                     markeredgewidth=1.6, zorder=4)
+            # The full-pool rung has one draw (there is only one way to take
+            # every row), so an IQR there would be fiction -- show the
+            # bootstrap SD, which is the uncertainty that does apply.
+            boot = ladder[lab][keys[-1]].get("r2_bootstrap_sd")
+            top.errorbar(ns[-1], med[-1], yerr=boot, marker="o", markersize=6.5,
+                         markerfacecolor=_SURFACE, markeredgecolor=color,
+                         markeredgewidth=1.6, ecolor=color, elinewidth=1.2,
+                         capsize=3, zorder=4, linestyle="none")
 
             fpos_x = [int(k) for k in keys if ladder[lab][k]["n_draws"] > 1]
             fpos_y = [ladder[lab][k]["frac_positive_r2"] for k in keys
@@ -359,28 +458,37 @@ def plot_ladder_panels(by_n_comp: dict, output_path: str) -> str:
         top.set_xscale("log")
         bot.set_xscale("log")
         bot.set_ylim(-0.03, 1.05)
-        label = f"{n_comp_key} component" + ("s" if n_comp_key != "1" else "")
+        label = f"{n_comp_key} component" + ("s" if int(n_comp_key) != 1 else "")
         top.set_title(label, fontsize=10.5, color=_INK, fontweight="600", pad=8)
-        bot.set_xlabel("n_train", fontsize=9.5, color=_INK_2)
+        bot.set_xlabel("n_train  (labeled training samples)", fontsize=9.5,
+                        color=_INK_2)
         if c == 0:
-            top.set_ylabel("held-out R²  (median, IQR)", fontsize=9.5, color=_INK_2)
-            bot.set_ylabel("draws beating the mean", fontsize=9.5, color=_INK_2)
+            top.set_ylabel("held-out R²  (median, IQR band over draws)",
+                            fontsize=9.5, color=_INK_2)
+            bot.set_ylabel("fraction of draws beating the mean",
+                            fontsize=9.5, color=_INK_2)
             handles, _lbls = top.get_legend_handles_labels()
 
     if handles:
         leg = fig.legend(handles, series_names, fontsize=9, frameon=False,
-                         loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.005))
+                         loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.028))
         for t in leg.get_texts():
             t.set_color(_INK_2)
-    fig.suptitle("Label efficiency, by component count",
+    pool = f"  ·  pool n={n_samples:,}" if n_samples else ""
+    fig.suptitle("Label efficiency, by component count" + pool,
                  fontsize=12.5, color=_INK, fontweight="600", x=0.01, ha="left")
-    fig.tight_layout(rect=[0, 0.045, 1, 0.97])
+    fig.text(0.5, 0.004,
+             "bands = IQR across repeated draws  ·  hollow final marker = full pool "
+             "(single draw; error bar is the bootstrap SD)  ·  dashed line = 50% of draws",
+             fontsize=8, color=_INK_MUTED, ha="center")
+    fig.tight_layout(rect=[0, 0.075, 1, 0.97])
     fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)
     return output_path
 
 
-def plot_search_bars(embedding_search: dict, output_path: str) -> str:
+def plot_search_bars(embedding_search: dict, output_path: str,
+                      n_comp: int = 1, n_samples: int = None) -> str:
     """
     What the recipe search actually bought, and what it ruled out: pooling
     schemes on the winning block, and probes on the winning readout.
@@ -393,19 +501,23 @@ def plot_search_bars(embedding_search: dict, output_path: str) -> str:
                               gridspec_kw={"width_ratios": [1, 1.15]})
 
     def bars(ax, scores, title, relabel):
-        items = sorted(scores.items(), key=lambda kv: kv[1])
+        items = sorted(scores.items(), key=lambda kv: _r2_of(kv[1]))
         names = [relabel(k) for k, _ in items]
-        vals = [v for _, v in items]
+        vals = [_r2_of(v) for _, v in items]
+        errs = [_sd_of(v) for _, v in items]
         best = max(range(len(vals)), key=lambda i: vals[i])
         colors = [_PALETTE[0] if i == best else "#c9c9c5" for i in range(len(vals))]
-        ax.barh(range(len(vals)), vals, color=colors, height=0.62, zorder=3)
+        ax.barh(range(len(vals)), vals, color=colors, height=0.62, zorder=3,
+                xerr=errs, error_kw=dict(elinewidth=1.1, capsize=2.5,
+                                          ecolor=_INK_2, zorder=4))
         ax.set_yticks(range(len(vals)))
         ax.set_yticklabels(names, fontsize=8.5)
         _style_axes(ax, grid_axis="x")
-        ax.set_xlim(min(0, min(vals)) - 0.02, max(vals) * 1.18)
+        ax.set_xlim(min(0, min(vals)) - 0.02, max(vals) * 1.30)
         for i, v in enumerate(vals):
-            ax.annotate(f"{v:.3f}", xy=(v, i), xytext=(4, 0),
-                        textcoords="offset points", va="center", fontsize=8.5,
+            lbl = f"{v:.3f} ±{errs[i]:.3f}" if errs[i] else f"{v:.3f}"
+            ax.annotate(lbl, xy=(v + errs[i], i), xytext=(5, 0),
+                        textcoords="offset points", va="center", fontsize=8,
                         color=_INK if i == best else _INK_2,
                         fontweight="600" if i == best else "normal")
         ax.set_title(title, fontsize=10.5, color=_INK, fontweight="600",
@@ -414,8 +526,11 @@ def plot_search_bars(embedding_search: dict, output_path: str) -> str:
     bars(axes[0], pooling, "Pooling scheme  (winning block, standardized)",
          lambda k: k.split("|")[1])
     bars(axes[1], probes, "Probe  (winning block + pooling)", lambda k: k)
+    n_txt = f", n={n_samples:,}" if n_samples else ""
     for ax in axes:
-        ax.set_xlabel("R²  (1 component, full pool)", fontsize=9.5, color=_INK_2)
+        ax.set_xlabel(f"R²  ({n_comp} component{'s' if n_comp != 1 else ''}, "
+                      f"full pool{n_txt}; ±1 SD across repeated splits)",
+                      fontsize=9, color=_INK_2)
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)

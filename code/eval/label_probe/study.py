@@ -101,10 +101,32 @@ def _build_concat_matrix(bank: dict, stages: tuple, comp_idx: list, pooling: str
     return np.concatenate(blocks, axis=1)
 
 
-def _screen_one(X: np.ndarray, y: np.ndarray, probe: str, seed: int) -> float:
+# Repeats for every search-phase score. A single 5-fold pass gives a bare
+# point estimate with no error bar, which is not enough to say one recipe
+# beats another; 3 repeated shuffled splits give a usable spread at 3x the
+# cost, and the bootstrap SD on top costs nothing (it resamples predictions
+# that have already been computed).
+SCREEN_REPEATS = 3
+
+
+def _screen_one(X: np.ndarray, y: np.ndarray, probe: str, seed: int,
+                 n_repeats: int = SCREEN_REPEATS) -> dict:
+    """R² with BOTH uncertainties, never a bare number:
+      repeat_sd    -- split-assignment noise, for "does A beat B on this data"
+      bootstrap_sd -- resampling spectra, for "does this generalize"
+    They answer different questions and must not be conflated."""
     res = run_primary(lambda: _make_any_regressor(probe, seed=seed), X, y,
-                       n_repeats=1, n_folds=5, seed0=seed)
-    return res.r2_mean
+                       n_repeats=n_repeats, n_folds=5, seed0=seed)
+    return {"r2": res.r2_mean,
+            "repeat_sd": res.r2_repeat_sd,
+            "bootstrap_sd": res.r2_bootstrap_sd,
+            "n_repeats": n_repeats}
+
+
+def _r2_of(score) -> float:
+    """Search tables hold {r2, repeat_sd, ...} dicts; older runs held a bare
+    float. Read either."""
+    return score["r2"] if isinstance(score, dict) else float(score)
 
 
 def screen_embedding_readouts(bank: dict, y: np.ndarray, n_comp: int = 1,
@@ -115,12 +137,14 @@ def screen_embedding_readouts(bank: dict, y: np.ndarray, n_comp: int = 1,
     scores = {}
     for stage, pooling, normalizer in SCREEN_CANDIDATES:
         X = _build_matrix(bank[stage], ci, pooling, normalizer, seed=seed)
-        r2_mean = _screen_one(X, y, "ridgecv", seed)
+        sc = _screen_one(X, y, "ridgecv", seed)
         key = f"{stage}|{pooling}|{normalizer}"
-        scores[key] = r2_mean
+        scores[key] = sc
         display = f"{ro.stage_display_name(stage)}|{pooling}|{normalizer}"
-        print(f"[label_probe] screen {display:<36} R2={r2_mean:+.4f}", flush=True)
-    best_key = max(scores, key=scores.get)
+        print(f"[label_probe] screen {display:<36} "
+              f"R2={sc['r2']:+.4f} ±{sc['repeat_sd']:.4f} (split) "
+              f"±{sc['bootstrap_sd']:.4f} (boot)", flush=True)
+    best_key = max(scores, key=lambda k: _r2_of(scores[k]))
     best = tuple(best_key.split("|"))
     return {"scores": scores, "best": best}
 
@@ -145,14 +169,16 @@ def search_best_embedding_recipe(bank: dict, y: np.ndarray, n_comp: int = 1,
     for stage in ro.BANK_STAGES:
         for normalizer in ("whiten", "standardize"):
             X = _build_matrix(bank[stage], ci, "mean", normalizer, seed=seed)
-            r2_mean = _screen_one(X, y, "ridgecv", seed)
+            sc = _screen_one(X, y, "ridgecv", seed)
             key = f"{stage}|mean|{normalizer}"
-            stage_scores[key] = r2_mean
+            stage_scores[key] = sc
             display = f"{ro.stage_display_name(stage)}|mean|{normalizer}"
-            print(f"[label_probe] search-A {display:<36} R2={r2_mean:+.4f}", flush=True)
+            print(f"[label_probe] search-A {display:<36} "
+                  f"R2={sc['r2']:+.4f} ±{sc['repeat_sd']:.4f}", flush=True)
     ranked_stages = sorted(
         {k.split("|")[0] for k in stage_scores},
-        key=lambda s: max(v for k, v in stage_scores.items() if k.split("|")[0] == s),
+        key=lambda s: max(_r2_of(v) for k, v in stage_scores.items()
+                          if k.split("|")[0] == s),
         reverse=True)
     best_stage = ranked_stages[0]
     top2_stages = tuple(ranked_stages[:2])
@@ -162,11 +188,12 @@ def search_best_embedding_recipe(bank: dict, y: np.ndarray, n_comp: int = 1,
     for pooling in POOLINGS_TO_SWEEP:
         for normalizer in ("whiten", "standardize"):
             X = _build_matrix(bank[best_stage], ci, pooling, normalizer, seed=seed)
-            r2_mean = _screen_one(X, y, "ridgecv", seed)
+            sc = _screen_one(X, y, "ridgecv", seed)
             key = f"{best_stage}|{pooling}|{normalizer}"
-            pooling_scores[key] = r2_mean
+            pooling_scores[key] = sc
             display = f"{ro.stage_display_name(best_stage)}|{pooling}|{normalizer}"
-            print(f"[label_probe] search-B {display:<36} R2={r2_mean:+.4f}", flush=True)
+            print(f"[label_probe] search-B {display:<36} "
+                  f"R2={sc['r2']:+.4f} ±{sc['repeat_sd']:.4f}", flush=True)
 
     # Phase C: does concatenating the top-2 stages (mean pooling) beat the
     # best single stage found so far?
@@ -175,14 +202,15 @@ def search_best_embedding_recipe(bank: dict, y: np.ndarray, n_comp: int = 1,
         concat_display_name = "+".join(ro.stage_display_name(s) for s in top2_stages)
         for normalizer in ("whiten", "standardize"):
             X = _build_concat_matrix(bank, top2_stages, ci, "mean", normalizer, seed=seed)
-            r2_mean = _screen_one(X, y, "ridgecv", seed)
+            sc = _screen_one(X, y, "ridgecv", seed)
             key = f"concat({'+'.join(top2_stages)})|mean|{normalizer}"
-            concat_scores[key] = r2_mean
+            concat_scores[key] = sc
             display = f"concat({concat_display_name})|mean|{normalizer}"
-            print(f"[label_probe] search-C {display:<36} R2={r2_mean:+.4f}", flush=True)
+            print(f"[label_probe] search-C {display:<36} "
+                  f"R2={sc['r2']:+.4f} ±{sc['repeat_sd']:.4f}", flush=True)
 
     all_readout_scores = {**stage_scores, **pooling_scores, **concat_scores}
-    best_readout_key = max(all_readout_scores, key=all_readout_scores.get)
+    best_readout_key = max(all_readout_scores, key=lambda k: _r2_of(all_readout_scores[k]))
 
     if best_readout_key.startswith("concat("):
         readout_kind = "concat"
@@ -198,17 +226,21 @@ def search_best_embedding_recipe(bank: dict, y: np.ndarray, n_comp: int = 1,
     # Phase D: which probe, for the winning readout.
     probe_scores = {}
     for probe in EMBEDDING_PROBE_CANDIDATES:
-        r2_mean = _screen_one(X_best, y, probe, seed)
-        probe_scores[probe] = r2_mean
-        print(f"[label_probe] search-D probe={probe:<14} R2={r2_mean:+.4f}", flush=True)
-    best_probe = max(probe_scores, key=probe_scores.get)
+        sc = _screen_one(X_best, y, probe, seed)
+        probe_scores[probe] = sc
+        print(f"[label_probe] search-D probe={probe:<14} "
+              f"R2={sc['r2']:+.4f} ±{sc['repeat_sd']:.4f}", flush=True)
+    best_probe = max(probe_scores, key=lambda k: _r2_of(probe_scores[k]))
 
     return {
         "stage_scores": stage_scores, "pooling_scores": pooling_scores,
         "concat_scores": concat_scores, "probe_scores": probe_scores,
         "best_readout_kind": readout_kind, "best_readout_spec": readout_spec,
         "best_probe": best_probe,
-        "best_r2": probe_scores[best_probe],
+        "best_r2": _r2_of(probe_scores[best_probe]),
+        "best_score": probe_scores[best_probe],
+        "n_comp_searched": n_comp,
+        "n_samples": int(len(y)),
     }
 
 
@@ -283,9 +315,13 @@ def run_ladder_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
 
         res = run_primary(lambda probe=probe: _make_any_regressor(probe, seed=seed),
                            X, y, n_repeats=2, seed0=seed)
-        full_pool[label] = {"r2_mean": res.r2_mean, "r2_repeat_sd": res.r2_repeat_sd,
+        full_pool[label] = {"r2_mean": res.r2_mean,
+                            "r2_repeat_sd": res.r2_repeat_sd,
+                            "r2_bootstrap_sd": res.r2_bootstrap_sd,
+                            "n_repeats": 2, "n_samples": int(len(y)),
                             "oof_predictions": res.oof_predictions.tolist()}
-        print(f"[label_probe] full-pool {label}: R2={res.r2_mean:+.4f}", flush=True)
+        print(f"[label_probe] full-pool {label}: R2={res.r2_mean:+.4f} "
+              f"±{res.r2_bootstrap_sd:.4f} (boot)", flush=True)
 
         # fold the full-pool point into the ladder at n_train=len(y), so
         # plots drawn from `ladder` alone (label_efficiency.png) show the
@@ -294,6 +330,10 @@ def run_ladder_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
         ladder_results[label][len(y)] = {
             "n_train": len(y), "n_draws": 1,
             "r2_median": res.r2_mean, "r2_p25": res.r2_mean, "r2_p75": res.r2_mean,
+            # no draw-to-draw spread exists at the full pool (there is only one
+            # way to take every row), so the bootstrap SD is the uncertainty
+            # that means anything here -- plots should show THAT, not an IQR.
+            "r2_bootstrap_sd": res.r2_bootstrap_sd,
             "frac_positive_r2": float(res.r2_mean > 0),
         }
 
@@ -343,11 +383,14 @@ def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> N
 
     by_n_comp = all_results["by_n_comp"]
     first_comp = sorted(by_n_comp, key=lambda k: int(k))[0]
+    n_samples = (all_results.get("meta") or {}).get("n")
 
     plots.plot_label_efficiency(by_n_comp[first_comp]["ladder"],
                                  os.path.join(out_dir, "label_efficiency.png"))
-    plots.plot_crossover(by_n_comp, os.path.join(out_dir, "crossover.png"))
-    plots.plot_ladder_panels(by_n_comp, os.path.join(out_dir, "ladder_panels.png"))
+    plots.plot_crossover(by_n_comp, os.path.join(out_dir, "crossover.png"),
+                          n_samples=n_samples)
+    plots.plot_ladder_panels(by_n_comp, os.path.join(out_dir, "ladder_panels.png"),
+                              n_samples=n_samples)
 
     search = all_results.get("embedding_search", {})
     if search.get("stage_scores"):
@@ -355,11 +398,15 @@ def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> N
         for label, v in by_n_comp[first_comp]["full_pool"].items():
             if "raw input (whitened)" in label:
                 raw_ref = v["r2_mean"]
+        searched_comp = search.get("n_comp_searched", int(first_comp))
         plots.plot_depth_profile(search["stage_scores"],
                                   os.path.join(out_dir, "depth_profile.png"),
                                   raw_reference=raw_ref,
-                                  display_name=ro.stage_display_name)
-        plots.plot_search_bars(search, os.path.join(out_dir, "recipe_search.png"))
+                                  display_name=ro.stage_display_name,
+                                  n_comp=searched_comp, n_samples=n_samples,
+                                  n_repeats=SCREEN_REPEATS)
+        plots.plot_search_bars(search, os.path.join(out_dir, "recipe_search.png"),
+                                n_comp=searched_comp, n_samples=n_samples)
 
     # The true-vs-predicted grid needs per-sample predictions, which are too
     # bulky to keep in the results JSON -- it can only be drawn on a full run.

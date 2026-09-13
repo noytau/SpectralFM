@@ -66,6 +66,12 @@ def score_readout(X: np.ndarray, y: np.ndarray, probe_fn, eval_idx: np.ndarray,
         out[n_train] = {
             "n_train": n_train,
             "n_draws": len(arr),
+            # Every draw's score, kept so a caller can difference two readouts
+            # DRAW BY DRAW. Draws are shared across readouts at a given rung
+            # (same seed, same pool), so the paired difference is the honest
+            # uncertainty on "how far apart are these two" -- differencing the
+            # two medians instead would throw the pairing away.
+            "r2_draws": [float(v) if np.isfinite(v) else None for v in arr],
             "r2_median": float(np.median(fin)) if fin.size else float("nan"),
             "r2_p25": float(np.percentile(fin, 25)) if fin.size else float("nan"),
             "r2_p75": float(np.percentile(fin, 75)) if fin.size else float("nan"),
