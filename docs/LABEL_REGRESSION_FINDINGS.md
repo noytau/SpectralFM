@@ -191,11 +191,55 @@ RidgeCV.**
 (Full numeric results, every rung and every raw-input variant: see the JSON
 linked below.)
 
+### Does the gap ever close?
+
+![Embedding minus raw-input gap vs. label budget](../code/eval_outputs/label_probe/run_2026-09-11/crossover.png)
+
+The ladder's question stated directly: the gap between the best embedding
+recipe and whitened raw input, per component count. Above zero the
+embedding is ahead. **Only the 1-component curve ever crosses, at a
+measured n≈1,191**; the 2- and 3-component curves rise but stay negative
+all the way to the full pool (final gaps −0.037 and −0.059). The dip
+between n=20 and n=100 is real, not noise: raw input's advantage is widest
+exactly in the regime a few-shot probe would operate in.
+
+### Where the signal lives
+
+![R² by pipeline block, FE through the final Transformer layer](../code/eval_outputs/label_probe/run_2026-09-11/depth_profile.png)
+
+The block scoreboard as a shape. Two things this makes obvious that the
+table does not: the sharp jump from FE to the Projector (the FE taps are
+the weakest in the whole model), and that **only three of fifteen blocks —
+the Projector and Transformer layers 1 and 2 — clear the whitened
+raw-input reference line at all**. From layer 3 onward, depth costs label
+signal monotonically.
+
+### Label efficiency, by component count
+
+![Label-efficiency and reliability panels for 1, 2 and 3 components](../code/eval_outputs/label_probe/run_2026-09-11/ladder_panels.png)
+
+Top row: held-out R² with IQR bands (the hollow final marker is the
+single-draw full-pool point, which has no spread behind it). Bottom row:
+the number that actually decides a few-shot deployment — **how often a
+draw beats simply predicting the mean**. Whitened raw input clears 50% of
+draws by n=10–20 at every component count; the embedding needs n≈50–100 to
+get there. That reliability gap, not the median R², is the strongest
+argument against the embedding as a few-shot substrate.
+
+### What the recipe search bought
+
+![Pooling-scheme and probe comparison bars](../code/eval_outputs/label_probe/run_2026-09-11/recipe_search.png)
+
+Left: pooling schemes on the winning block. Right: probes on the winning
+block+pooling. Plain RidgeCV beat every alternative probe, and
+four-segment pooling was worth +0.060 R² over plain mean-pooling — the
+single largest gain the embedding-side search produced.
+
 Full results:
 [`code/eval_outputs/label_probe/run_2026-09-11/label_probe_results.json`](../code/eval_outputs/label_probe/run_2026-09-11/label_probe_results.json).
-Plots:
+Also plotted:
 [`label_efficiency.png`](../code/eval_outputs/label_probe/run_2026-09-11/label_efficiency.png)
-(label-efficiency curves with IQR bands) and
+(all five recipes on one axis, 1-component) and
 [`true_vs_pred_grid.png`](../code/eval_outputs/label_probe/run_2026-09-11/true_vs_pred_grid.png)
 (true-vs-predicted scatter, axes fixed to the same range across every panel
 so cells are directly, visually comparable).
@@ -211,7 +255,8 @@ positive in every case; shuffled R² is consistently ≈0 (between −0.06 and
 
 **Pushed as hard as this search pushed it, the embedding's best showing is
 at 1-component: it overtakes raw input once there is enough labeled data
-(roughly n≥1,500), and by a clear margin at the full pool (0.92 vs. 0.83).**
+(the measured crossover is n≈1,200), and by a clear margin at the
+full pool (0.92 vs. 0.83).**
 This is a real result, not a tie — it survived the leak canary and used a
 recipe (Projector, four-segment pooling, standardized, plain RidgeCV) found
 by a systematic search across 15 blocks, 5 pooling schemes, and 10 probes.
@@ -234,7 +279,7 @@ n) is real but not a few-shot result.
 
 ## Recommendations
 
-1. **If deploying a probe on this backbone at 1-component with ≥1,500
+1. **If deploying a probe on this backbone at 1-component with ≥1,200
    labeled examples available, use the embedding** — specifically the
    Projector's output, four-segment pooled, standardized, with plain
    RidgeCV. This is the one regime where the search found a genuine,
@@ -271,6 +316,14 @@ cd code
   --data /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \
   --out_dir eval_outputs/label_probe/<run_name> \
   --device cuda --comps 1 2 3
+```
+
+To redraw every figure from a finished run's JSON, without repeating the
+search and the ladders (seconds, no checkpoint or GPU needed):
+
+```bash
+python3 -m eval.label_probe --plots_only \
+  eval_outputs/label_probe/<run_name>/label_probe_results.json
 ```
 
 The embedding-feature bank (`bank.npz`, several GB) is cached in `out_dir`

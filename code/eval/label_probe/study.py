@@ -335,6 +335,50 @@ def build_true_vs_pred_cells(readouts: dict, y: np.ndarray, seed: int = 42) -> d
     return cells
 
 
+def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> None:
+    """Every figure that can be drawn from `label_probe_results.json` alone.
+    Split out from run_study so `replot_from_results` can redraw them without
+    re-running the search and the ladders."""
+    from . import plots
+
+    by_n_comp = all_results["by_n_comp"]
+    first_comp = sorted(by_n_comp, key=lambda k: int(k))[0]
+
+    plots.plot_label_efficiency(by_n_comp[first_comp]["ladder"],
+                                 os.path.join(out_dir, "label_efficiency.png"))
+    plots.plot_crossover(by_n_comp, os.path.join(out_dir, "crossover.png"))
+    plots.plot_ladder_panels(by_n_comp, os.path.join(out_dir, "ladder_panels.png"))
+
+    search = all_results.get("embedding_search", {})
+    if search.get("stage_scores"):
+        raw_ref = None
+        for label, v in by_n_comp[first_comp]["full_pool"].items():
+            if "raw input (whitened)" in label:
+                raw_ref = v["r2_mean"]
+        plots.plot_depth_profile(search["stage_scores"],
+                                  os.path.join(out_dir, "depth_profile.png"),
+                                  raw_reference=raw_ref,
+                                  display_name=ro.stage_display_name)
+        plots.plot_search_bars(search, os.path.join(out_dir, "recipe_search.png"))
+
+    # The true-vs-predicted grid needs per-sample predictions, which are too
+    # bulky to keep in the results JSON -- it can only be drawn on a full run.
+    if cells_all:
+        plots.plot_true_vs_pred_grid(cells_all,
+                                      os.path.join(out_dir, "true_vs_pred_grid.png"))
+
+
+def replot_from_results(results_path: str, out_dir: str = None) -> str:
+    """Redraw the figures from a finished run's JSON. Cheap (seconds), so
+    figure changes never cost a re-run of the search and ladders."""
+    out_dir = out_dir or os.path.dirname(results_path)
+    with open(results_path) as f:
+        all_results = json.load(f)
+    _write_figures(all_results, out_dir)
+    print(f"[label_probe] redrew figures in {out_dir}", flush=True)
+    return out_dir
+
+
 def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
               device: str = "cpu", comps_for_ladder=(1, 2, 3), seed: int = 42) -> dict:
     os.makedirs(out_dir, exist_ok=True)
@@ -373,12 +417,7 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
         json.dump(all_results, f, indent=2, default=str)
     print(f"[label_probe] wrote {results_path}", flush=True)
 
-    from . import plots
-    ladder_1comp = all_results["by_n_comp"][comps_for_ladder[0]]["ladder"]
-    plots.plot_label_efficiency(ladder_1comp,
-                                 os.path.join(out_dir, "label_efficiency.png"))
-    plots.plot_true_vs_pred_grid(cells_all,
-                                  os.path.join(out_dir, "true_vs_pred_grid.png"))
+    _write_figures(all_results, out_dir, cells_all=cells_all)
     print(f"[label_probe] wrote plots to {out_dir}", flush=True)
 
     return all_results
