@@ -386,7 +386,8 @@ def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> N
     n_samples = (all_results.get("meta") or {}).get("n")
 
     plots.plot_label_efficiency(by_n_comp[first_comp]["ladder"],
-                                 os.path.join(out_dir, "label_efficiency.png"))
+                                 os.path.join(out_dir, "label_efficiency.png"),
+                                 n_comp=int(first_comp), n_samples=n_samples)
     plots.plot_crossover(by_n_comp, os.path.join(out_dir, "crossover.png"),
                           n_samples=n_samples)
     plots.plot_ladder_panels(by_n_comp, os.path.join(out_dir, "ladder_panels.png"),

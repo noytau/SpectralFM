@@ -55,92 +55,194 @@ def _n_keys(by_n: dict) -> list:
     return sorted(by_n, key=lambda k: int(k))
 
 
-def plot_label_efficiency(ladder_results: dict, output_path: str) -> str:
+def _short_label(label: str) -> str:
+    """Legend labels: keep the recipe identity, drop the probe boilerplate."""
+    return (label.replace("embedding: ", "emb ")
+                 .replace(" (standardize, conventional), RidgeCV", " (conventional)")
+                 .replace(" (standardize), ridgecv", "")
+                 .replace(", RidgeCV", "")
+                 .replace("raw input", "raw"))
+
+
+def plot_label_efficiency(ladder_results: dict, output_path: str,
+                           n_comp: int = 1, n_samples: int = None,
+                           ylim=(-1.05, 1.02)) -> str:
     """
-    ladder_results: {readout_label: {n_train: {r2_median, r2_p25, r2_p75, ...}}}
-    x = n_train (log), y = median held-out R2 with an IQR band, one line per
-    readout.
+    Every recipe on one axis for a single component count -- including the
+    raw-input baselines the headline comparison does not show. Median R² per
+    rung with the interquartile band across draws.
+
+    The y-axis is clipped: PLS-64 reaches -4.7 at n_train=20 (it needs more
+    samples than it has components), and letting that set the scale squashes
+    every other curve into a band a few pixels tall. Curves leaving the view
+    are marked at the edge rather than silently dropped.
     """
-    fig, ax = plt.subplots(figsize=(8, 5.5))
+    fig, ax = plt.subplots(figsize=(8.6, 5.4))
+    _style_axes(ax)
+
+    off_scale = []
     for i, (label, by_n) in enumerate(ladder_results.items()):
-        n_trains = sorted(by_n)
-        med = [by_n[n]["r2_median"] for n in n_trains]
-        lo = [by_n[n]["r2_p25"] for n in n_trains]
-        hi = [by_n[n]["r2_p75"] for n in n_trains]
+        keys = _n_keys(by_n)                      # numeric order: JSON gives strings
+        ns = [int(k) for k in keys]
+        med = [by_n[k]["r2_median"] for k in keys]
+        lo = [by_n[k]["r2_p25"] for k in keys]
+        hi = [by_n[k]["r2_p75"] for k in keys]
         color = _PALETTE[i % len(_PALETTE)]
-        ax.plot(n_trains, med, marker="o", label=label, color=color)
-        ax.fill_between(n_trains, lo, hi, color=color, alpha=0.15)
-    ax.axhline(0, color="black", linestyle=":", alpha=0.4)
+
+        ax.plot(ns, med, marker="o", markersize=4.5, linewidth=1.8, color=color,
+                label=_short_label(label), zorder=3)
+        multi = [j for j, k in enumerate(keys) if by_n[k]["n_draws"] > 1]
+        if multi:
+            ax.fill_between([ns[j] for j in multi],
+                            [max(lo[j], ylim[0]) for j in multi],
+                            [min(hi[j], ylim[1]) for j in multi],
+                            color=color, alpha=0.13, linewidth=0, zorder=1)
+        boot = by_n[keys[-1]].get("r2_bootstrap_sd")
+        ax.errorbar(ns[-1], med[-1], yerr=boot, marker="o", markersize=6.5,
+                    markerfacecolor=_SURFACE, markeredgecolor=color,
+                    markeredgewidth=1.6, ecolor=color, elinewidth=1.2,
+                    capsize=3, zorder=4, linestyle="none")
+
+        for j, v in enumerate(med):
+            if v < ylim[0]:
+                off_scale.append((ns[j], v, color))
+
+    for x, v, color in off_scale:
+        ax.annotate("▼", xy=(x, ylim[0]), xytext=(0, 7), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=8, color=color, zorder=5)
+
+    ax.axhline(0, color=_INK_2, linewidth=1.2, zorder=2)
     ax.set_xscale("log")
-    ax.set_xlabel("labeled training samples (n_train)")
-    ax.set_ylabel("held-out R² (median, IQR band)")
-    ax.set_title("Label efficiency: raw input vs. embedding readouts")
-    ax.legend(fontsize=9)
-    ax.grid(alpha=0.3)
+    ax.set_ylim(*ylim)
+    ax.set_xlabel("n_train  (labeled training samples, log scale)", fontsize=9.5,
+                  color=_INK_2)
+    ax.set_ylabel("held-out R²  (median, IQR band over draws)", fontsize=9.5,
+                  color=_INK_2)
+    pool = f"  ·  pool n={n_samples:,}" if n_samples else ""
+    ax.set_title(f"Every recipe at {n_comp} component{'s' if n_comp != 1 else ''}{pool}",
+                 fontsize=12.5, color=_INK, fontweight="600", loc="left", pad=12)
+    note = ("hollow final marker = full pool (single draw; error bar is the "
+            "bootstrap SD)")
+    if off_scale:
+        note += "  ·  ▼ marks a curve below the visible range"
+    ax.annotate(note, xy=(0.0, -0.135), xycoords="axes fraction", fontsize=8,
+                color=_INK_MUTED, ha="left", va="top")
+    leg = ax.legend(fontsize=8.5, frameon=False, loc="lower right")
+    for t in leg.get_texts():
+        t.set_color(_INK_2)
     fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", dpi=150)
+    fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)
     return output_path
 
 
-def _scatter_cell(ax, y_true, y_pred, color, title, axis_limits, is_best):
-    r2 = 1.0 - np.sum((y_true - y_pred) ** 2) / (np.sum((y_true - y_true.mean()) ** 2) + 1e-12)
-    ax.scatter(y_true, y_pred, s=3, alpha=0.2, color=color, rasterized=True)
+def _scatter_cell(ax, y_true, y_pred, color, axis_limits, is_best, r2):
     lo, hi = axis_limits
-    ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.2)
+    ax.scatter(y_true, y_pred, s=3, alpha=0.18, color=color, rasterized=True,
+               linewidths=0)
+    ax.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1.1, color=_INK_2,
+            zorder=3)
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
-    best_tag = "★ BEST  " if is_best else ""
-    ax.set_title(f"{best_tag}{title}\nR²={r2:.3f}", fontsize=8.5,
-                 fontweight="bold" if is_best else "normal",
-                 color="darkgreen" if is_best else "black")
+    ax.set_aspect("equal", adjustable="box")
+    _style_axes(ax)
+    ax.tick_params(labelsize=7)
+    ax.annotate(f"R² = {r2:.3f}", xy=(0.045, 0.955), xycoords="axes fraction",
+                fontsize=9, color=_INK, ha="left", va="top",
+                fontweight="700" if is_best else "600",
+                bbox=dict(boxstyle="round,pad=0.28", facecolor=_SURFACE,
+                          edgecolor=_GRID, linewidth=0.7))
     if is_best:
-        for spine in ax.spines.values():
-            spine.set_edgecolor("gold")
-            spine.set_linewidth(3)
-        ax.patch.set_facecolor("#fffff0")
-    ax.set_xlabel("True", fontsize=7)
-    ax.set_ylabel("Pred", fontsize=7)
-    ax.grid(True, alpha=0.2)
-    ax.tick_params(labelsize=6)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(_PALETTE[0])
+            ax.spines[side].set_linewidth(1.8)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(True)
+            ax.spines[side].set_color(_PALETTE[0])
+            ax.spines[side].set_linewidth(1.8)
 
 
 def plot_true_vs_pred_grid(cells: dict, output_path: str,
-                            axis_limits=(-2.0, 2.0)) -> str:
+                            axis_limits=(-2.0, 2.0), n_samples: int = None) -> str:
     """
     cells: {(row_label, col_label): {"y_true": arr, "y_pred": arr}}.
 
-    Every panel shares the SAME axis limits (default [-2, 2]) so panels are
-    directly, visually comparable — a badly-scaled tight cloud cannot look
-    as good as a properly-scaled fit here. Points outside `axis_limits` are
-    clipped from view rather than silently rescaling the frame.
+    One column per benchmark, one row per component count. Every panel shares
+    the SAME axis limits (default [-2, 2]) and an equal aspect, so a
+    badly-scaled tight cloud cannot pass for a good fit; points outside the
+    limits are clipped from view rather than silently rescaling the frame.
+    The best cell WITHIN EACH ROW is outlined -- comparing across rows would
+    be comparing different component counts, which is not a like-for-like
+    contest.
     """
-    row_labels = sorted({r for r, _ in cells})
-    col_labels = list(dict.fromkeys(c for _, c in cells))  # preserve insertion order
+    import textwrap
 
+    row_labels = sorted({r for r, _ in cells})
+    col_labels = list(dict.fromkeys(c for _, c in cells))
     n_rows, n_cols = len(row_labels), len(col_labels)
+
     r2s = {k: 1.0 - np.sum((v["y_true"] - v["y_pred"]) ** 2) /
            (np.sum((v["y_true"] - v["y_true"].mean()) ** 2) + 1e-12)
            for k, v in cells.items()}
-    best_key = max(r2s, key=r2s.get)
+    best_in_row = {}
+    for r in row_labels:
+        here = {k: v for k, v in r2s.items() if k[0] == r}
+        if here:
+            best_in_row[r] = max(here, key=here.get)
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.4 * n_cols, 3.6 * n_rows),
-                              squeeze=False)
-    fig.suptitle("Label regression — true vs. predicted (axes fixed across all panels)",
-                 fontsize=13, fontweight="bold")
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(2.95 * n_cols, 3.05 * n_rows + 1.5),
+                             squeeze=False)
     for i, row in enumerate(row_labels):
         for j, col in enumerate(col_labels):
-            key = (row, col)
             ax = axes[i][j]
+            key = (row, col)
             if key not in cells:
                 ax.axis("off")
                 continue
-            color = _PALETTE[j % len(_PALETTE)]
-            title = f"{col}\n{row}" if i == 0 else row
-            _scatter_cell(ax, cells[key]["y_true"], cells[key]["y_pred"], color,
-                          title, axis_limits, is_best=(key == best_key))
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(output_path, bbox_inches="tight", dpi=150)
+            _scatter_cell(ax, cells[key]["y_true"], cells[key]["y_pred"],
+                          _PALETTE[j % len(_PALETTE)], axis_limits,
+                          is_best=(best_in_row.get(row) == key), r2=r2s[key])
+            # axis labels only on the outer edge -- repeating them on 15 panels
+            # is clutter, and every panel shares the same scale anyway
+            ax.set_xlabel("true" if i == n_rows - 1 else "", fontsize=8.5,
+                          color=_INK_2)
+            ax.set_ylabel("predicted" if j == 0 else "", fontsize=8.5,
+                          color=_INK_2)
+            if i < n_rows - 1:
+                ax.set_xticklabels([])
+            if j > 0:
+                ax.set_yticklabels([])
+
+    fig.tight_layout(rect=[0.035, 0.035, 1, 0.88])
+
+    # Column headers go ABOVE the grid, wrapped, so long recipe names cannot
+    # collide with their neighbours the way per-axes titles did.
+    for j, col in enumerate(col_labels):
+        box = axes[0][j].get_position()
+        fig.text(box.x0 + box.width / 2, 0.895,
+                 textwrap.fill(col.replace("embedding: ", "embedding\n"), 30),
+                 ha="center", va="bottom", fontsize=8.5, color=_INK,
+                 fontweight="600", linespacing=1.35)
+
+    # Row labels once, down the left-hand side.
+    for i, row in enumerate(row_labels):
+        box = axes[i][0].get_position()
+        fig.text(0.012, box.y0 + box.height / 2, row, rotation=90,
+                 ha="left", va="center", fontsize=10, color=_INK,
+                 fontweight="600")
+
+    pool = f"  ·  n={n_samples:,}" if n_samples else ""
+    fig.suptitle("Label regression — true vs. predicted" + pool,
+                 fontsize=13, color=_INK, fontweight="600", x=0.012, ha="left",
+                 y=0.985)
+    fig.text(0.012, 0.008,
+             f"every panel fixed to [{axis_limits[0]:.0f}, {axis_limits[1]:.0f}] "
+             "on both axes, equal aspect · dashed line is y=x · points outside "
+             "the limits are clipped, not rescaled · outlined panel is the best "
+             "benchmark within that row",
+             fontsize=8, color=_INK_MUTED, ha="left")
+    fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)
     return output_path
 
