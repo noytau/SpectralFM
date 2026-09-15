@@ -3,6 +3,8 @@ import pytest
 
 from .. import features as feat
 from .. import ladder as laddermod
+from .. import readouts as ro
+from .. import study
 from ..canary import shuffled_label_canary
 from ..normalize import fit_normalizer
 from ..protocol import r2
@@ -99,3 +101,79 @@ def test_ladder_score_readout_returns_expected_shape():
                                    eval_idx=eval_idx, n_trains=[20, 50])
     assert set(out.keys()) == {20, 50}
     assert out[50]["r2_median"] > out[20]["r2_median"] - 0.5  # sanity, not a tight bound
+
+
+# ---------------------------------------------------------------------------
+# Backbone-generality: readouts.py must never assume THIS backbone's shape
+# (13 hidden_states layers, feature_extractor/feature_projection submodules)
+# -- a different Transformer, tried by a different user, has neither.
+# ---------------------------------------------------------------------------
+
+class _FakeOutput:
+    def __init__(self, hidden_states):
+        self.hidden_states = hidden_states
+
+
+class _FakeBackboneNoFE:
+    """A minimal stand-in for a Transformer encoder that has NEITHER
+    `feature_extractor` nor `feature_projection` (unlike this repo's
+    data2vec-audio backbone) and a layer count that is deliberately not 13,
+    so a hardcoded assumption about either would fail loudly."""
+
+    def __init__(self, n_layers=4, seq_len=6, d=8):
+        self.n_layers = n_layers
+        self.seq_len = seq_len
+        self.d = d
+
+    def eval(self):
+        return self
+
+    def to(self, device):
+        return self
+
+    def __call__(self, input_values, output_hidden_states=True):
+        base = input_values[:, :self.d].unsqueeze(1).repeat(1, self.seq_len, 1)
+        hs = tuple(base + 0.1 * i for i in range(self.n_layers))
+        return _FakeOutput(hs)
+
+
+def test_extract_bank_has_no_fe_taps_without_the_submodules():
+    pytest.importorskip("torch")
+    rng = np.random.default_rng(0)
+    model = _FakeBackboneNoFE(n_layers=4)
+    signals = rng.normal(size=(20, 245)).astype(np.float32)
+    bank = ro.extract_bank(model, signals, device="cpu", batch_size=8)
+    assert "fe" not in bank and "extract_features" not in bank
+    assert set(bank) == {f"layer{i}" for i in range(4)}
+
+
+def test_extract_bank_layer_count_is_whatever_the_backbone_has():
+    pytest.importorskip("torch")
+    rng = np.random.default_rng(0)
+    model = _FakeBackboneNoFE(n_layers=7)
+    signals = rng.normal(size=(20, 245)).astype(np.float32)
+    bank = ro.extract_bank(model, signals, device="cpu", batch_size=8)
+    assert set(bank) == {f"layer{i}" for i in range(7)}
+
+
+def test_final_layer_stage_picks_the_actual_final_layer():
+    """The conventional-tap reference must never hardcode a layer index --
+    a different Transformer has a different depth."""
+    bank = {"layer0": None, "layer1": None, "layer2": None}
+    assert study._final_layer_stage(bank) == "layer2"
+
+    bank_with_fe = {"fe": None, "extract_features": None, "layer0": None,
+                    "layer1": None, "layer2": None, "layer3": None, "layer4": None}
+    assert study._final_layer_stage(bank_with_fe) == "layer4"
+
+
+def test_stage_display_name_is_backbone_general():
+    # "layer0" is special-cased to "Projector" for THIS backbone (it's the
+    # Transformer's input, not a block output -- see KNOWN_STAGE_DISPLAY_NAMES).
+    # Every other layer index, including ones this backbone doesn't have (a
+    # different Transformer might), must render generically, not KeyError.
+    assert ro.stage_display_name("layer0") == "Projector"
+    assert ro.stage_display_name("layer6") == "Transformer layer 6"
+    assert ro.stage_display_name("layer99") == "Transformer layer 99"
+    assert ro.stage_display_name("fe") == "FE (pre-LN)"
+    assert ro.stage_display_name("some_unknown_stage") == "some_unknown_stage"

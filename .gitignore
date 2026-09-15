@@ -67,3 +67,7 @@ fairseq/base_libri_960h.pt
 # Reproducible embedding-feature caches (regenerate via eval.label_probe;
 # multi-GB, not a result — never commit)
 code/eval_outputs/label_probe/*/bank.npz
+
+# Local working notes (rolling-status / daily-log skills) — never commit
+rolling_status.md
+rolling_status.html

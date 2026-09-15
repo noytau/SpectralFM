@@ -1,10 +1,15 @@
 """
-Figures for the label probe: label-efficiency ladders, the embedding-vs-raw
-crossover, the per-block depth profile, the recipe-search bars, and the
-axis-fixed true-vs-predicted grid.
+Figures for the search side of the label probe (from `label_probe_results.
+json`, drawn by `study._write_figures`): the per-block depth profile, the
+recipe-search bars, the probe-choice grid, and the axis-fixed
+true-vs-predicted grid. The per-n_train honest crossover lives in
+panel_plots.py instead, over `recipe_panel.json` -- see that module's
+docstring for why it's a separate concern.
 
 Every figure renders on a light surface (the HTML report frames them in a
-card), so the light column of the palette is the one in use.
+card), so the light column of the palette is the one in use. `_style_axes`,
+`_r2_of`, `_sd_of`, `_n_keys`, `_crossing_n` and the palette constants are
+shared with panel_plots.py, which imports them from here.
 """
 from __future__ import annotations
 
@@ -53,87 +58,6 @@ def _n_keys(by_n: dict) -> list:
     """JSON round-trips the n_train keys to strings; sort them numerically
     and hand back the original keys so callers can index straight back in."""
     return sorted(by_n, key=lambda k: int(k))
-
-
-def _short_label(label: str) -> str:
-    """Legend labels: keep the recipe identity, drop the probe boilerplate."""
-    return (label.replace("embedding: ", "emb ")
-                 .replace(" (standardize, conventional), RidgeCV", " (conventional)")
-                 .replace(" (standardize), ridgecv", "")
-                 .replace(", RidgeCV", "")
-                 .replace("raw input", "raw"))
-
-
-def plot_label_efficiency(ladder_results: dict, output_path: str,
-                           n_comp: int = 1, n_samples: int = None,
-                           ylim=(-1.05, 1.02)) -> str:
-    """
-    Every recipe on one axis for a single component count -- including the
-    raw-input baselines the headline comparison does not show. Median R² per
-    rung with the interquartile band across draws.
-
-    The y-axis is clipped: PLS-64 reaches -4.7 at n_train=20 (it needs more
-    samples than it has components), and letting that set the scale squashes
-    every other curve into a band a few pixels tall. Curves leaving the view
-    are marked at the edge rather than silently dropped.
-    """
-    fig, ax = plt.subplots(figsize=(8.6, 5.4))
-    _style_axes(ax)
-
-    off_scale = []
-    for i, (label, by_n) in enumerate(ladder_results.items()):
-        keys = _n_keys(by_n)                      # numeric order: JSON gives strings
-        ns = [int(k) for k in keys]
-        med = [by_n[k]["r2_median"] for k in keys]
-        lo = [by_n[k]["r2_p25"] for k in keys]
-        hi = [by_n[k]["r2_p75"] for k in keys]
-        color = _PALETTE[i % len(_PALETTE)]
-
-        ax.plot(ns, med, marker="o", markersize=4.5, linewidth=1.8, color=color,
-                label=_short_label(label), zorder=3)
-        multi = [j for j, k in enumerate(keys) if by_n[k]["n_draws"] > 1]
-        if multi:
-            ax.fill_between([ns[j] for j in multi],
-                            [max(lo[j], ylim[0]) for j in multi],
-                            [min(hi[j], ylim[1]) for j in multi],
-                            color=color, alpha=0.13, linewidth=0, zorder=1)
-        boot = by_n[keys[-1]].get("r2_bootstrap_sd")
-        ax.errorbar(ns[-1], med[-1], yerr=boot, marker="o", markersize=6.5,
-                    markerfacecolor=_SURFACE, markeredgecolor=color,
-                    markeredgewidth=1.6, ecolor=color, elinewidth=1.2,
-                    capsize=3, zorder=4, linestyle="none")
-
-        for j, v in enumerate(med):
-            if v < ylim[0]:
-                off_scale.append((ns[j], v, color))
-
-    for x, v, color in off_scale:
-        ax.annotate("▼", xy=(x, ylim[0]), xytext=(0, 7), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=8, color=color, zorder=5)
-
-    ax.axhline(0, color=_INK_2, linewidth=1.2, zorder=2)
-    ax.set_xscale("log")
-    ax.set_ylim(*ylim)
-    ax.set_xlabel("n_train  (labeled training samples, log scale)", fontsize=9.5,
-                  color=_INK_2)
-    ax.set_ylabel("held-out R²  (median, IQR band over draws)", fontsize=9.5,
-                  color=_INK_2)
-    pool = f"  ·  pool n={n_samples:,}" if n_samples else ""
-    ax.set_title(f"Every recipe at {n_comp} component{'s' if n_comp != 1 else ''}{pool}",
-                 fontsize=12.5, color=_INK, fontweight="600", loc="left", pad=12)
-    note = ("hollow final marker = full pool (single draw; error bar is the "
-            "bootstrap SD)")
-    if off_scale:
-        note += "  ·  ▼ marks a curve below the visible range"
-    ax.annotate(note, xy=(0.0, -0.135), xycoords="axes fraction", fontsize=8,
-                color=_INK_MUTED, ha="left", va="top")
-    leg = ax.legend(fontsize=8.5, frameon=False, loc="lower right")
-    for t in leg.get_texts():
-        t.set_color(_INK_2)
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
-    plt.close(fig)
-    return output_path
 
 
 def _scatter_cell(ax, y_true, y_pred, color, axis_limits, is_best, r2):
@@ -249,30 +173,6 @@ def plot_true_vs_pred_grid(cells: dict, output_path: str,
 
 # ── labels shared by the comparison figures ───────────────────────────────
 
-RAW_WHITENED = "raw input (whitened), RidgeCV"
-
-
-def _find(labels, *needles, exclude=()):
-    """Ladder/full-pool dicts are keyed by the human-readable recipe label,
-    which embeds the winning block name and so is not knowable up front.
-    Match on substrings instead of hard-coding the whole string."""
-    for lab in labels:
-        low = lab.lower()
-        if all(n.lower() in low for n in needles) and not any(
-                x.lower() in low for x in exclude):
-            return lab
-    return None
-
-
-def _series_for(by_n_comp: dict, n_comp_key: str):
-    """(raw, embedding-best, embedding-conventional) labels for one n_comp."""
-    ladder = by_n_comp[n_comp_key]["ladder"]
-    raw = _find(ladder, "raw input (whitened)") or RAW_WHITENED
-    emb_conv = _find(ladder, "embedding", "conventional")
-    emb_best = _find(ladder, "embedding", exclude=("conventional",))
-    return raw, emb_best, emb_conv
-
-
 def _crossing_n(ns, gaps):
     """Log-linear interpolation of the first upward zero crossing of the
     gap curve. Returns None when the gap never reaches zero -- which is the
@@ -283,140 +183,6 @@ def _crossing_n(ns, gaps):
             f = -g0 / (g1 - g0)
             return float(10 ** (np.log10(ns[i]) + f * (np.log10(ns[i + 1]) - np.log10(ns[i]))))
     return None
-
-
-def _paired_gaps(ladder, emb_label, raw_label, key):
-    """Per-draw embedding-minus-raw differences at one rung. Both arms are
-    scored on the SAME draws (same seed, same pool), so differencing draw by
-    draw cancels the draw-to-draw variance that dominates at small n -- far
-    tighter, and the right uncertainty for 'is one ahead of the other'."""
-    a = ladder[emb_label][key].get("r2_draws")
-    b = ladder[raw_label][key].get("r2_draws")
-    if a and b and len(a) == len(b):
-        pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
-        if pairs:
-            return np.array([x - y for x, y in pairs], dtype=float)
-    # older runs kept only summary stats: fall back to the median difference,
-    # which has no spread to report
-    return np.array([ladder[emb_label][key]["r2_median"]
-                     - ladder[raw_label][key]["r2_median"]], dtype=float)
-
-
-def _crossing_ci(ns, gap_draws, n_boot=2000, seed=0):
-    """Bootstrap CI for the crossing point: resample draws at every rung,
-    recompute the median-gap curve, re-solve the crossing. Rungs whose draws
-    are a single value (the full pool) resample to themselves."""
-    rng = np.random.default_rng(seed)
-    crossings = []
-    for _ in range(n_boot):
-        med = []
-        for g in gap_draws:
-            idx = rng.integers(0, len(g), len(g))
-            med.append(float(np.median(g[idx])))
-        c = _crossing_n(ns, med)
-        if c is not None:
-            crossings.append(c)
-    if len(crossings) < 0.5 * n_boot:
-        # the curve fails to cross in most resamples -- no stable crossing
-        return None, None, len(crossings) / n_boot
-    lo, hi = np.percentile(crossings, [2.5, 97.5])
-    return float(lo), float(hi), len(crossings) / n_boot
-
-
-def plot_crossover(by_n_comp: dict, output_path: str, n_samples: int = None) -> str:
-    """
-    The question the ladder exists to answer, stated directly: how far is the
-    best embedding recipe from whitened raw input, and does that gap ever
-    reach zero? One line per component count, with the interquartile band of
-    the PAIRED per-draw differences; above zero the embedding is ahead.
-    """
-    fig, ax = plt.subplots(figsize=(8.8, 5.4))
-    _style_axes(ax)
-
-    xmin, xmax = 1e9, 0
-    annotated = []
-    summary = []
-    for i, n_comp_key in enumerate(sorted(by_n_comp, key=lambda k: int(k))):
-        ladder = by_n_comp[n_comp_key]["ladder"]
-        raw, emb_best, _ = _series_for(by_n_comp, n_comp_key)
-        if emb_best is None:
-            continue
-        keys = _n_keys(ladder[raw])
-        ns = [int(k) for k in keys]
-        gap_draws = [_paired_gaps(ladder, emb_best, raw, k) for k in keys]
-        med = [float(np.median(g)) for g in gap_draws]
-        lo = [float(np.percentile(g, 25)) if len(g) > 1 else float(np.median(g))
-              for g in gap_draws]
-        hi = [float(np.percentile(g, 75)) if len(g) > 1 else float(np.median(g))
-              for g in gap_draws]
-
-        color = _PALETTE[i % len(_PALETTE)]
-        label = f"{n_comp_key} component" + ("s" if int(n_comp_key) != 1 else "")
-        ax.plot(ns, med, marker="o", markersize=4.8, linewidth=1.9, color=color,
-                label=label, zorder=3)
-        ax.fill_between(ns, lo, hi, color=color, alpha=0.15, linewidth=0, zorder=1)
-        xmin, xmax = min(xmin, min(ns)), max(xmax, max(ns))
-        annotated.append((ns[-1], med[-1], n_comp_key))
-
-        cross = _crossing_n(ns, med)
-        if cross is not None:
-            c_lo, c_hi, frac = _crossing_ci(ns, gap_draws)
-            ax.axvline(cross, color=color, linestyle="--", linewidth=1.1,
-                       alpha=0.55, zorder=1)
-            if c_lo is not None:
-                ax.axvspan(c_lo, c_hi, color=color, alpha=0.10, zorder=0)
-                txt = f"crossover\nn ≈ {cross:,.0f}\n[{c_lo:,.0f}–{c_hi:,.0f}]"
-            else:
-                txt = f"crossover\nn ≈ {cross:,.0f}"
-            ax.annotate(txt, xy=(cross, 0), xytext=(cross * 1.08, 0.045),
-                        fontsize=8.5, color=_INK, ha="left", va="bottom",
-                        linespacing=1.3)
-            summary.append((n_comp_key, cross, c_lo, c_hi))
-        else:
-            summary.append((n_comp_key, None, None, None))
-
-    ax.axhline(0, color=_INK_2, linewidth=1.4, zorder=2)
-    lo_y, hi_y = ax.get_ylim()
-    pad = 0.02 * (hi_y - lo_y)
-    ax.axhspan(0, hi_y, color=_PALETTE[0], alpha=0.05, zorder=0)
-    ax.axhspan(lo_y, 0, color=_INK_MUTED, alpha=0.07, zorder=0)
-    ax.set_ylim(lo_y, hi_y)
-    ax.set_xlim(xmin, xmax * 1.45)
-
-    ax.text(xmin * 1.08, hi_y - pad, "embedding ahead", fontsize=8.5,
-            color=_INK_2, va="top", ha="left")
-    ax.text(xmin * 1.08, lo_y + pad, "raw input ahead", fontsize=8.5,
-            color=_INK_2, va="bottom", ha="left")
-
-    for x, y, key in annotated:
-        ax.annotate(f"{key}-comp", xy=(x, y), xytext=(6, 0),
-                    textcoords="offset points", fontsize=8.5, color=_INK_2,
-                    va="center", ha="left")
-
-    ax.set_xscale("log")
-    ax.set_xlabel("labeled training samples (n_train)", fontsize=9.5, color=_INK_2)
-    ax.set_ylabel("Δ R²   (best embedding recipe − whitened raw input)",
-                  fontsize=9.5, color=_INK_2)
-    pool = f"  ·  pool n={n_samples:,}" if n_samples else ""
-    ax.set_title("Does the embedding ever overtake raw input?",
-                 fontsize=12.5, color=_INK, fontweight="600", loc="left", pad=12)
-    ax.annotate("median of paired per-draw differences; band = IQR across draws; "
-                "bracket = 95% bootstrap CI on the crossing" + pool,
-                xy=(0.0, -0.135), xycoords="axes fraction", fontsize=8,
-                color=_INK_MUTED, ha="left", va="top")
-    leg = ax.legend(fontsize=8.5, frameon=False, loc="lower right")
-    for t in leg.get_texts():
-        t.set_color(_INK_2)
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
-    plt.close(fig)
-    for key, c, cl, ch in summary:
-        if c is None:
-            print(f"[plots] crossover {key}-comp: never crosses", flush=True)
-        else:
-            ci = f" [95% CI {cl:,.0f}-{ch:,.0f}]" if cl is not None else ""
-            print(f"[plots] crossover {key}-comp: n≈{c:,.0f}{ci}", flush=True)
-    return output_path
 
 
 def plot_depth_profile(stage_scores: dict, output_path: str,
@@ -437,7 +203,13 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
                f"{n_txt})")
     foot = (f"mean-pooled, RidgeCV, full pool; {rep_txt}"
             f"error bars: ±1 SD across repeated splits")
-    order = ["fe", "extract_features", "layer0"] + [f"layer{i}" for i in range(1, 13)]
+    # Depth order from whatever stages this backbone actually has -- never a
+    # hardcoded layer count, which a different Transformer won't match.
+    all_stages = {k.split("|")[0] for k in stage_scores}
+    layer_stages = sorted((s for s in all_stages if s.startswith("layer") and s[5:].isdigit()),
+                          key=lambda s: int(s[5:]))
+    fe_stages = [s for s in ("fe", "extract_features") if s in all_stages]
+    order = fe_stages + layer_stages
     present = [s for s in order if any(k.startswith(s + "|") for k in stage_scores)]
 
     def score(stage, norm):
@@ -474,8 +246,8 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
     ax.annotate(f"best · {std[best_i]:.3f}", xy=(xs[best_i], std[best_i]),
                 xytext=(0, 10), textcoords="offset points", fontsize=9,
                 color=_INK, ha="center", fontweight="600")
-    if "layer12" in present:
-        j = present.index("layer12")
+    if layer_stages and layer_stages[-1] in present:
+        j = present.index(layer_stages[-1])  # final Transformer block, whatever its index
         ax.annotate(f"conventional tap · {std[j]:.3f}", xy=(xs[j], std[j]),
                     xytext=(-6, -14), textcoords="offset points", fontsize=8.5,
                     color=_INK, ha="right", va="top")
@@ -495,95 +267,6 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
     for t in leg.get_texts():
         t.set_color(_INK_2)
     fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
-    plt.close(fig)
-    return output_path
-
-
-def plot_ladder_panels(by_n_comp: dict, output_path: str,
-                        n_samples: int = None) -> str:
-    """
-    Small multiples, one column per component count: held-out R² on top,
-    and underneath the number that actually decides a few-shot deployment --
-    how often a draw beats predicting the mean at all.
-    """
-    comps = sorted(by_n_comp, key=lambda k: int(k))
-    fig, axes = plt.subplots(2, len(comps), figsize=(4.1 * len(comps), 7.2),
-                              sharex="col", sharey="row")
-    if len(comps) == 1:
-        axes = axes.reshape(2, 1)
-
-    series_names = ("whitened raw input", "best embedding recipe",
-                    "embedding, conventional tap")
-    handles = None
-    for c, n_comp_key in enumerate(comps):
-        ladder = by_n_comp[n_comp_key]["ladder"]
-        raw, emb_best, emb_conv = _series_for(by_n_comp, n_comp_key)
-        top, bot = axes[0][c], axes[1][c]
-        _style_axes(top)
-        _style_axes(bot)
-
-        for i, lab in enumerate([raw, emb_best, emb_conv]):
-            if lab is None:
-                continue
-            color = _PALETTE[i]
-            keys = _n_keys(ladder[lab])
-            ns = [int(k) for k in keys]
-            med = [ladder[lab][k]["r2_median"] for k in keys]
-            # IQR is only meaningful where more than one draw was taken; the
-            # full-pool rung is a single draw, so its band would be a lie.
-            multi = [j for j, k in enumerate(keys) if ladder[lab][k]["n_draws"] > 1]
-            top.plot(ns, med, marker="o", markersize=4.5, linewidth=1.8,
-                     color=color, label=series_names[i], zorder=3)
-            if multi:
-                top.fill_between([ns[j] for j in multi],
-                                  [ladder[lab][keys[j]]["r2_p25"] for j in multi],
-                                  [ladder[lab][keys[j]]["r2_p75"] for j in multi],
-                                  color=color, alpha=0.14, linewidth=0, zorder=1)
-            # The full-pool rung has one draw (there is only one way to take
-            # every row), so an IQR there would be fiction -- show the
-            # bootstrap SD, which is the uncertainty that does apply.
-            boot = ladder[lab][keys[-1]].get("r2_bootstrap_sd")
-            top.errorbar(ns[-1], med[-1], yerr=boot, marker="o", markersize=6.5,
-                         markerfacecolor=_SURFACE, markeredgecolor=color,
-                         markeredgewidth=1.6, ecolor=color, elinewidth=1.2,
-                         capsize=3, zorder=4, linestyle="none")
-
-            fpos_x = [int(k) for k in keys if ladder[lab][k]["n_draws"] > 1]
-            fpos_y = [ladder[lab][k]["frac_positive_r2"] for k in keys
-                      if ladder[lab][k]["n_draws"] > 1]
-            bot.plot(fpos_x, fpos_y, marker="o", markersize=4.5, linewidth=1.8,
-                     color=color, zorder=3)
-
-        top.axhline(0, color=_INK_2, linewidth=1.1, zorder=2)
-        bot.axhline(0.5, color=_INK_2, linestyle="--", linewidth=1.1, zorder=2)
-        top.set_xscale("log")
-        bot.set_xscale("log")
-        bot.set_ylim(-0.03, 1.05)
-        label = f"{n_comp_key} component" + ("s" if int(n_comp_key) != 1 else "")
-        top.set_title(label, fontsize=10.5, color=_INK, fontweight="600", pad=8)
-        bot.set_xlabel("n_train  (labeled training samples)", fontsize=9.5,
-                        color=_INK_2)
-        if c == 0:
-            top.set_ylabel("held-out R²  (median, IQR band over draws)",
-                            fontsize=9.5, color=_INK_2)
-            bot.set_ylabel("fraction of draws beating the mean",
-                            fontsize=9.5, color=_INK_2)
-            handles, _lbls = top.get_legend_handles_labels()
-
-    if handles:
-        leg = fig.legend(handles, series_names, fontsize=9, frameon=False,
-                         loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.028))
-        for t in leg.get_texts():
-            t.set_color(_INK_2)
-    pool = f"  ·  pool n={n_samples:,}" if n_samples else ""
-    fig.suptitle("Label efficiency, by component count" + pool,
-                 fontsize=12.5, color=_INK, fontweight="600", x=0.01, ha="left")
-    fig.text(0.5, 0.004,
-             "bands = IQR across repeated draws  ·  hollow final marker = full pool "
-             "(single draw; error bar is the bootstrap SD)  ·  dashed line = 50% of draws",
-             fontsize=8, color=_INK_MUTED, ha="center")
-    fig.tight_layout(rect=[0, 0.075, 1, 0.97])
     fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)
     return output_path
@@ -634,6 +317,78 @@ def plot_search_bars(embedding_search: dict, output_path: str,
                       f"full pool{n_txt}; ±1 SD across repeated splits)",
                       fontsize=9, color=_INK_2)
     fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
+    plt.close(fig)
+    return output_path
+
+
+_PROBE_LABEL = {"ridgecv": "RidgeCV", "ols": "OLS"}
+_PROBE_ORDER = ("ridgecv", "ols")
+
+
+def plot_probe_comparison(probe_grid: dict, output_path: str, n_comp: int = 1,
+                           n_samples: int = None) -> str:
+    """
+    RidgeCV vs OLS, at every normalizer each was actually run with, on raw
+    input and on every embedding ARM in `probe_grid` -- plain single-layer
+    readouts, never a pooling-squeezed recipe, so this figure never
+    conflates "which embedding" with "which pooling scheme". One panel per
+    arm, arm identity always in its title. A negative OLS score is omitted
+    rather than plotted or clipped -- it carries no information beyond
+    "unusable here", and would otherwise force every other bar's axis down
+    to accommodate it.
+    """
+    arms = list(dict.fromkeys(v["arm"] for v in probe_grid.values()))
+    any_omitted = False
+
+    fig, axes = plt.subplots(1, len(arms), figsize=(4.6 * len(arms), 4.6), squeeze=False)
+    axes = axes[0]
+    for ax, arm in zip(axes, arms):
+        rows = {}
+        for v in probe_grid.values():
+            if v["arm"] != arm:
+                continue
+            rows.setdefault(v["normalizer"], {})[v["probe"]] = v["r2_mean"]
+        norms = sorted(rows, key=lambda nm: -max(rows[nm].values()))
+        probes = sorted({p for r in rows.values() for p in r},
+                        key=lambda p: _PROBE_ORDER.index(p) if p in _PROBE_ORDER else 9)
+        x = np.arange(len(norms))
+        width = 0.8 / max(1, len(probes))
+        ymax = 0.05
+        for i, probe in enumerate(probes):
+            vals = [rows[nm].get(probe) for nm in norms]
+            xs = x + (i - (len(probes) - 1) / 2) * width
+            present = [(xx, v) for xx, v in zip(xs, vals) if v is not None and v >= 0]
+            any_omitted = any_omitted or any(v is not None and v < 0 for v in vals)
+            if not present:
+                continue
+            ymax = max(ymax, max(v for _, v in present))
+            ax.bar([p[0] for p in present], [v for _, v in present], width=width * 0.92,
+                   color=_PALETTE[i % len(_PALETTE)],
+                   label=_PROBE_LABEL.get(probe, probe), zorder=3)
+            for xx, v in present:
+                ax.annotate(f"{v:.2f}", xy=(xx, v), xytext=(0, 3),
+                           textcoords="offset points", ha="center", va="bottom",
+                           fontsize=7.6, color=_INK)
+        _style_axes(ax, grid_axis="y")
+        ax.set_xticks(x)
+        ax.set_xticklabels(norms, fontsize=8, rotation=20, ha="right")
+        ax.set_ylim(0, ymax * 1.15)
+        ax.set_title(arm, fontsize=9.5, color=_INK, fontweight="600", loc="left",
+                    wrap=True)
+        ax.set_ylabel("R²", fontsize=9, color=_INK_2)
+        leg = ax.legend(fontsize=8.2, frameon=False)
+        for t in leg.get_texts():
+            t.set_color(_INK_2)
+
+    n_txt = f", n={n_samples:,}" if n_samples else ""
+    fig.suptitle(f"Probe choice by normalizer and embedding · {n_comp} component"
+                 f"{'s' if n_comp != 1 else ''}, full pool{n_txt}",
+                 fontsize=12, color=_INK, fontweight="600", x=0.01, ha="left")
+    if any_omitted:
+        fig.text(0.01, -0.02, "bars with R² < 0 omitted", fontsize=7.6,
+                 color=_INK_MUTED, ha="left")
+    fig.tight_layout(rect=[0, 0.03, 1, 0.90])
     fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor=_SURFACE)
     plt.close(fig)
     return output_path

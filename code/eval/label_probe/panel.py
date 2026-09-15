@@ -29,7 +29,6 @@ import numpy as np
 
 from . import features as feat
 from . import ladder as laddermod
-from . import readouts as ro
 from .normalize import fit_normalizer
 
 # Recipes for the raw-input arm. The whitenK rungs are the point: they trace
@@ -41,7 +40,20 @@ RAW_PANEL = [
     ("whiten8", "ridgecv"),
     ("whiten32", "ridgecv"),
     ("whiten128", "ridgecv"),
-    ("standardize", "pls64"),
+    # Unregularised OLS, at three normalizers -- traces the float32/
+    # ill-conditioning trap documented in "Setting the baseline" (cond ~1e9,
+    # OLS ~0.40 vs the true ~0.82 ceiling). "none" and "standardize" are both
+    # ill-conditioned (per-feature scaling doesn't decorrelate); "whiten"
+    # removes the collinearity a rotation can fix, so OLS should recover there.
+    ("none", "ols"),
+    ("standardize", "ols"),
+    ("whiten", "ols"),
+    # No PLS anywhere in this panel: it is a SUPERVISED preprocessing step
+    # (it rotates using the labels, not just the features), a leak risk that
+    # needs careful fold-internal discipline to use safely at all (see the
+    # leak demonstration in "Setting the baseline"). Whitening is unsupervised
+    # by construction and carries no such risk -- every recipe here is
+    # unsupervised-preprocessing + a probe that sees labels only at fit time.
 ]
 
 # Same normalizer ladder on the embedding side, on the block the full-pool
@@ -52,6 +64,8 @@ EMB_PANEL = [
     ("whiten8", "ridgecv"),
     ("whiten32", "ridgecv"),
     ("whiten128", "ridgecv"),
+    ("standardize", "ols"),
+    ("whiten", "ols"),
 ]
 
 
@@ -125,3 +139,25 @@ def run_panel(bank, input_raw, y, n_comp, emb_spec, n_trains, seed=42,
         selected[arm] = per_n
     return {"panel": panel, "selected": selected,
             "n_eval_select": len(eval_select), "n_eval_report": len(eval_report)}
+
+
+def write_panel_figures(recipe_panel_path: str, out_dir: str = None) -> str:
+    """Redraw the panel-derived figure (crossover_panel.png) from a finished
+    recipe_panel.json. Cheap: seconds, no recompute -- mirrors
+    study.replot_from_results for the main run. probe_comparison.png is a
+    full-pool figure now, drawn by study._write_figures instead -- see that
+    function's docstring."""
+    import json
+    import os
+
+    from . import panel_plots as pp
+
+    with open(recipe_panel_path) as f:
+        d = json.load(f)
+    out_dir = out_dir or os.path.dirname(recipe_panel_path)
+    n_pool = d["meta"].get("n")
+    n_eval_report = next(iter(d["by_n_comp"].values())).get("n_eval_report")
+    pp.plot_crossover_panel(d["by_n_comp"], os.path.join(out_dir, "crossover_panel.png"),
+                            n_eval_report=n_eval_report, n_pool=n_pool)
+    print(f"[panel] redrew figures in {out_dir}", flush=True)
+    return out_dir

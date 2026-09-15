@@ -1,19 +1,26 @@
 """
-Orchestration: does raw input or a frozen embedding tap (FE / Projector /
-Transformer layer N -- see readouts.py's STAGE_DISPLAY_NAMES) support
-few-shot regression of `parameter_0` (labeled_data) better?
+Orchestration: does raw input or a frozen embedding tap support few-shot
+regression of a scalar label better? Backbone-general -- see readouts.py for
+what makes that true (hidden_states-only extraction works on any Transformer
+encoder).
 
-Pipeline:
-  1. Extract a moment bank (FE, Projector, all 12 Transformer layers) once.
-  2. Search for the strongest embedding tap+pooling+probe combination
-     (fold-internal, no label leak -- this uses labels only to rank
-     candidates, exactly as any model-selection step would).
-  3. Whitened raw input vs. the best embedding recipe found vs. the
-     conventional final-Transformer-layer/mean-pool tap, compared on a
-     shared label-efficiency ladder (n_train small -> full pool), paired
-     draws.
-  4. A shuffled-label canary at a couple of rungs.
-  5. A true-vs-predicted grid at the full pool, axes fixed across panels.
+`run_study` is the one entry point and covers the whole pipeline:
+  1. Extract a moment bank once (every hidden_states layer this backbone
+     has, plus any FE-specific taps it happens to expose).
+  2. SEARCH for the strongest embedding tap+pooling+probe combination
+     (fold-internal, no label leak) -- writes label_probe_results.json,
+     depth_profile.png, recipe_search.png.
+  3. Full-pool-only diagnostics: a shuffled-label canary and a
+     true-vs-predicted grid, for raw input and the winning embedding recipe
+     -- also in label_probe_results.json, plus true_vs_pred_grid.png.
+  4. The honest per-n_train PANEL (see panel.py for why this is a separate
+     step from #2: the best recipe is n_train-dependent, so a single fixed
+     recipe held across every label budget is not a fair comparison) --
+     writes recipe_panel.json, crossover_panel.png, probe_comparison.png.
+
+Both JSONs carry `meta.backbone` (the model's class name, auto-derived) so
+runs against different backbones can be told apart later -- see compare.py
+to line several runs up side by side.
 """
 from __future__ import annotations
 
@@ -23,11 +30,10 @@ import os
 import numpy as np
 
 from . import features as feat
-from . import ladder as laddermod
 from . import readouts as ro
 from .canary import shuffled_label_canary
 from .normalize import fit_normalizer
-from .protocol import r2, run_primary
+from .protocol import run_primary
 from .regressors import make_fewshot_regressor, make_regressor
 
 
@@ -41,25 +47,29 @@ def _make_any_regressor(name: str, seed: int = 42):
     except ValueError:
         return make_fewshot_regressor(name, seed=seed)
 
-N_TRAINS = (10, 20, 50, 100, 200, 500, 1000, 2000)
+# Default label-efficiency ladder for the per-rung panel (see panel.py). The
+# full pool (len(y)) is appended at call time -- it isn't known until the
+# bank is loaded, since it depends on how many labeled rows exist.
+PANEL_N_TRAINS = (10, 20, 50, 100, 200, 500, 1000, 2000)
 
-# Candidate embedding taps to screen -- see readouts.py's module docstring
-# for exactly what each bank key is in the model's own block vocabulary
-# (FE pre-LN, FE post-LN, Projector, Transformer layer 1-12). Pooling fixed
-# to "mean" here: RidgeCV's efficient LOOCV path (used throughout) is
-# O(n*d^2), so this keeps every screen candidate and every ladder rung
-# tractable at this dataset's size (n=4,716) instead of sweeping the full
-# pooling axis, which would multiply the cost several-fold for a dimension
-# this study's scope doesn't need to resolve.
-SCREEN_CANDIDATES = [
-    (stage, "mean", normalizer)
-    for stage in ("fe", "extract_features", "layer0", "layer1", "layer2", "layer3", "layer12")
-    for normalizer in ("whiten", "standardize")
-]
 
-# The conventional tap used elsewhere in this codebase's eval package:
-# Transformer layer 12 (the final block), mean-pooled.
-NAIVE_EMBEDDING_READOUT = ("layer12", "mean", "standardize")
+def _final_layer_stage(bank: dict) -> str:
+    """The final Transformer block's hidden-states key, whatever this
+    backbone's depth is -- NEVER hardcode a layer count; a different
+    Transformer has a different number of blocks."""
+    layer_stages = [s for s in bank if s.startswith("layer") and s[5:].isdigit()]
+    return max(layer_stages, key=lambda s: int(s[5:]))
+
+
+def _ranked_stages(embedding_search: dict) -> list:
+    """Every block from phase A, ranked by the better of its two normalizers
+    -- the same ranking search_best_embedding_recipe uses to pick its
+    top-2 stages for phase C."""
+    sc = embedding_search["stage_scores"]
+    return sorted(
+        {k.split("|")[0] for k in sc},
+        key=lambda s: max(_r2_of(v) for k, v in sc.items() if k.split("|")[0] == s),
+        reverse=True)
 
 # Phase B: pooling schemes tried only on the single winning stage from phase
 # A (not swept across every stage -- segment4/mean_max_min quadruple/triple
@@ -70,12 +80,13 @@ NAIVE_EMBEDDING_READOUT = ("layer12", "mean", "standardize")
 POOLINGS_TO_SWEEP = ("mean", "mean_std", "mean_max_min", "segment4", "first_last")
 
 # Phase D: alternative probes tried on the winning readout from A-C, looking
-# specifically for anything that beats RidgeCV on the EMBEDDING side (this
-# search deliberately does not extend this far on the raw-input side, which
-# was already well covered by whitening/z-score/PLS-64 in _readout_table).
+# for anything that beats RidgeCV on the embedding side. No PLS candidates:
+# it is a supervised preprocessing step (fits on labels, not just features),
+# and every recipe this module searches over is deliberately
+# unsupervised-preprocessing + a probe -- see panel.py's RAW_PANEL comment
+# for the full reasoning.
 EMBEDDING_PROBE_CANDIDATES = (
-    "ridgecv", "pls8", "pls16", "pls32", "pls64",
-    "pca10_ridge", "pca32_ridge", "pca64_ridge", "hgb", "knn5",
+    "ridgecv", "pca10_ridge", "pca32_ridge", "pca64_ridge", "hgb", "knn5",
 )
 
 
@@ -129,32 +140,12 @@ def _r2_of(score) -> float:
     return score["r2"] if isinstance(score, dict) else float(score)
 
 
-def screen_embedding_readouts(bank: dict, y: np.ndarray, n_comp: int = 1,
-                               seed: int = 42) -> dict:
-    """Large-n RidgeCV screen over SCREEN_CANDIDATES; returns every score
-    plus the best (stage, pooling, normalizer) tuple."""
-    ci = _comp_idx(n_comp)
-    scores = {}
-    for stage, pooling, normalizer in SCREEN_CANDIDATES:
-        X = _build_matrix(bank[stage], ci, pooling, normalizer, seed=seed)
-        sc = _screen_one(X, y, "ridgecv", seed)
-        key = f"{stage}|{pooling}|{normalizer}"
-        scores[key] = sc
-        display = f"{ro.stage_display_name(stage)}|{pooling}|{normalizer}"
-        print(f"[label_probe] screen {display:<36} "
-              f"R2={sc['r2']:+.4f} ±{sc['repeat_sd']:.4f} (split) "
-              f"±{sc['bootstrap_sd']:.4f} (boot)", flush=True)
-    best_key = max(scores, key=lambda k: _r2_of(scores[k]))
-    best = tuple(best_key.split("|"))
-    return {"scores": scores, "best": best}
-
-
 def search_best_embedding_recipe(bank: dict, y: np.ndarray, n_comp: int = 1,
                                   seed: int = 42) -> dict:
     """
     Staged search for the strongest embedding readout+probe, deliberately
-    deeper than the raw-input side (which whitening/z-score/PLS-64 already
-    cover well): (A) which stage, mean-pooled; (B) which pooling, for the
+    deeper than the raw-input side (which whitening/z-score already cover
+    well): (A) which stage, mean-pooled; (B) which pooling, for the
     phase-A winner only; (C) does concatenating the top-2 phase-A stages
     beat any single stage; (D) which probe, for the phase A-C winner.
     Every phase's full score table is kept (for transparency/reproducing),
@@ -164,9 +155,12 @@ def search_best_embedding_recipe(bank: dict, y: np.ndarray, n_comp: int = 1,
     """
     ci = _comp_idx(n_comp)
 
-    # Phase A: which stage (mean pooling, both normalizers).
+    # Phase A: which stage (mean pooling, both normalizers). Stages come from
+    # whatever this particular bank actually has -- backbone-dependent (a
+    # different Transformer has a different layer count, and may lack the
+    # FE-specific taps entirely), never a hardcoded list.
     stage_scores = {}
-    for stage in ro.BANK_STAGES:
+    for stage in sorted(bank):
         for normalizer in ("whiten", "standardize"):
             X = _build_matrix(bank[stage], ci, "mean", normalizer, seed=seed)
             sc = _screen_one(X, y, "ridgecv", seed)
@@ -263,56 +257,42 @@ def _readout_label(kind: str, spec: tuple) -> str:
     return f"embedding: {ro.stage_display_name(stage)}/{pooling} ({normalizer})"
 
 
-def _readout_table(bank: dict, input_raw: np.ndarray, ci: list,
-                    embedding_search: dict, seed: int) -> dict:
-    """label -> (X, probe_name). Raw input gets three checked baselines
-    (whitened/z-scored/PLS-64 on z-scored -- see normalize.py's module
-    docstring for why RidgeCV alone can understate raw input's signal). The
-    embedding gets the WINNER of `search_best_embedding_recipe` (best
-    stage-or-concat, best pooling, best probe -- see that function's
-    docstring for the search), plus the conventional final-layer/mean-pool
-    reference for context on how much the search actually bought.
+def _full_pool_readouts(bank: dict, input_raw: np.ndarray, ci: list,
+                         embedding_search: dict, seed: int) -> dict:
+    """label -> (X, probe_name), for the full-pool-only diagnostics (canary,
+    true-vs-predicted, probe grid). Three embedding columns, each a plain
+    mean-pooled single-layer readout -- never the search's pooling-squeezed
+    recipe, so a block is never conflated with a pooling choice here: the
+    winning block, the runner-up, and the conventional final layer, all
+    whitened (the adopted normalizer) with RidgeCV. NOT used for any
+    per-n_train comparison -- see panel.py's module docstring for why a
+    fixed recipe is only fair at a single point, not across a ladder.
     """
     X_raw = feat.make_wide(input_raw, ci)
     X_raw_white = fit_normalizer("whiten", X_raw, seed=seed).transform(X_raw)
     X_raw_z = fit_normalizer("standardize", X_raw, seed=seed).transform(X_raw)
 
-    kind, spec = embedding_search["best_readout_kind"], embedding_search["best_readout_spec"]
-    probe = embedding_search["best_probe"]
-    X_emb_best = _build_from_spec(bank, kind, spec, ci, seed=seed)
-    emb_label = _readout_label(kind, spec)
+    ranked = _ranked_stages(embedding_search)
+    stages = list(dict.fromkeys([ranked[0], ranked[1], _final_layer_stage(bank)]))
 
-    n_stage, n_pooling, n_normalizer = NAIVE_EMBEDDING_READOUT
-    X_emb_naive = _build_matrix(bank[n_stage], ci, n_pooling, n_normalizer, seed=seed)
-    naive_label = (f"embedding: {ro.stage_display_name(n_stage)}/{n_pooling} "
-                   f"({n_normalizer}, conventional), RidgeCV")
-
-    return {
+    out = {
         "raw input (whitened), RidgeCV": (X_raw_white, "ridgecv"),
         "raw input (z-scored), RidgeCV": (X_raw_z, "ridgecv"),
-        "raw input (z-scored), PLS-64": (X_raw_z, "pls"),
-        f"{emb_label}, {probe}": (X_emb_best, probe),
-        naive_label: (X_emb_naive, "ridgecv"),
     }
+    for stage in stages:
+        X = _build_matrix(bank[stage], ci, "mean", "whiten", seed=seed)
+        out[f"embedding: {ro.stage_display_name(stage)}/mean, RidgeCV"] = (X, "ridgecv")
+    return out
 
 
-def run_ladder_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
-                           n_comp: int, embedding_search: dict,
-                           seed: int = 42) -> dict:
+def run_full_pool_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
+                              n_comp: int, embedding_search: dict,
+                              seed: int = 42) -> dict:
     ci = _comp_idx(n_comp)
-    readouts = _readout_table(bank, input_raw, ci, embedding_search, seed)
+    readouts = _full_pool_readouts(bank, input_raw, ci, embedding_search, seed)
 
-    rng = np.random.default_rng(seed)
-    eval_idx = rng.choice(len(y), size=min(500, len(y) // 4), replace=False)
-
-    ladder_results = {}
     full_pool = {}
     for label, (X, probe) in readouts.items():
-        ladder_results[label] = laddermod.score_readout(
-            X, y, probe_fn=lambda probe=probe: _make_any_regressor(probe, seed=seed),
-            eval_idx=eval_idx, n_trains=list(N_TRAINS), seed=seed)
-        print(f"[label_probe] ladder done: {label}", flush=True)
-
         res = run_primary(lambda probe=probe: _make_any_regressor(probe, seed=seed),
                            X, y, n_repeats=2, seed0=seed)
         full_pool[label] = {"r2_mean": res.r2_mean,
@@ -323,22 +303,56 @@ def run_ladder_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
         print(f"[label_probe] full-pool {label}: R2={res.r2_mean:+.4f} "
               f"±{res.r2_bootstrap_sd:.4f} (boot)", flush=True)
 
-        # fold the full-pool point into the ladder at n_train=len(y), so
-        # plots drawn from `ladder` alone (label_efficiency.png) show the
-        # complete curve including any crossover that only appears once all
-        # labeled data is used -- the 1-comp embedding does exactly this.
-        ladder_results[label][len(y)] = {
-            "n_train": len(y), "n_draws": 1,
-            "r2_median": res.r2_mean, "r2_p25": res.r2_mean, "r2_p75": res.r2_mean,
-            # no draw-to-draw spread exists at the full pool (there is only one
-            # way to take every row), so the bootstrap SD is the uncertainty
-            # that means anything here -- plots should show THAT, not an IQR.
-            "r2_bootstrap_sd": res.r2_bootstrap_sd,
-            "frac_positive_r2": float(res.r2_mean > 0),
-        }
+    return {"full_pool": full_pool, "readout_matrices": readouts}
 
-    return {"ladder": ladder_results, "full_pool": full_pool,
-            "readout_matrices": readouts}
+
+# Normalizers/probes for the probe-choice grid. Every arm x normalizer here
+# is tried with BOTH probes -- unlike the search phases above (which fix
+# probe=ridgecv while comparing blocks/pooling) this grid exists specifically
+# to answer "does OLS behave differently from RidgeCV", so it must never
+# leave a normalizer covered by only one of them.
+PROBE_GRID_NORMALIZERS = ("none", "standardize", "whiten", "whiten8", "whiten32", "whiten128")
+PROBE_GRID_PROBES = ("ridgecv", "ols")
+
+
+def run_probe_grid(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int,
+                    embedding_search: dict, seed: int = 42) -> dict:
+    """
+    Every normalizer x {RidgeCV, OLS}, full pool, on raw input and on three
+    plain mean-pooled single-layer embedding readouts -- the winning block,
+    the runner-up, and the conventional final layer (same three as
+    `_full_pool_readouts`) -- never the search's pooling-squeezed recipe, so
+    probe behavior is never confounded with pooling choice. "none" is
+    raw-input-only (see the baseline section this feeds: it exists to show
+    the naive failure mode, not as a real embedding candidate).
+    """
+    ci = _comp_idx(n_comp)
+    X_raw = feat.make_wide(input_raw, ci)
+
+    ranked = _ranked_stages(embedding_search)
+    stages = list(dict.fromkeys([ranked[0], ranked[1], _final_layer_stage(bank)]))
+
+    arms = {"raw input": X_raw}
+    for stage in stages:
+        label = f"embedding: {ro.stage_display_name(stage)}/mean"
+        arms[label] = ro.build_readout(bank[stage], ci, "mean")
+
+    grid = {}
+    for arm_label, X_arm in arms.items():
+        for norm in PROBE_GRID_NORMALIZERS:
+            if norm == "none" and arm_label != "raw input":
+                continue
+            X = fit_normalizer(norm, X_arm, seed=seed).transform(X_arm)
+            for probe in PROBE_GRID_PROBES:
+                res = run_primary(lambda probe=probe: _make_any_regressor(probe, seed=seed),
+                                   X, y, n_repeats=2, seed0=seed)
+                grid[f"{arm_label} | {norm} + {probe}"] = {
+                    "arm": arm_label, "normalizer": norm, "probe": probe,
+                    "r2_mean": res.r2_mean, "r2_bootstrap_sd": res.r2_bootstrap_sd,
+                }
+                print(f"[label_probe] probe-grid {arm_label:<55} {norm:<12} {probe:<8} "
+                      f"R2={res.r2_mean:+.4f}", flush=True)
+    return grid
 
 
 def run_canary_checks(readouts: dict, y: np.ndarray, seed: int = 42) -> dict:
@@ -376,22 +390,16 @@ def build_true_vs_pred_cells(readouts: dict, y: np.ndarray, seed: int = 42) -> d
 
 
 def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> None:
-    """Every figure that can be drawn from `label_probe_results.json` alone.
-    Split out from run_study so `replot_from_results` can redraw them without
-    re-running the search and the ladders."""
+    """Search-derived figures only (depth profile, recipe search, probe
+    choice, true-vs-predicted) -- everything drawable from
+    `label_probe_results.json` alone. The per-n_train honest crossover lives
+    in panel.py/panel_plots.py, over `recipe_panel.json`, and is written
+    separately by `write_panel_figures`."""
     from . import plots
 
     by_n_comp = all_results["by_n_comp"]
     first_comp = sorted(by_n_comp, key=lambda k: int(k))[0]
     n_samples = (all_results.get("meta") or {}).get("n")
-
-    plots.plot_label_efficiency(by_n_comp[first_comp]["ladder"],
-                                 os.path.join(out_dir, "label_efficiency.png"),
-                                 n_comp=int(first_comp), n_samples=n_samples)
-    plots.plot_crossover(by_n_comp, os.path.join(out_dir, "crossover.png"),
-                          n_samples=n_samples)
-    plots.plot_ladder_panels(by_n_comp, os.path.join(out_dir, "ladder_panels.png"),
-                              n_samples=n_samples)
 
     search = all_results.get("embedding_search", {})
     if search.get("stage_scores"):
@@ -409,6 +417,12 @@ def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> N
         plots.plot_search_bars(search, os.path.join(out_dir, "recipe_search.png"),
                                 n_comp=searched_comp, n_samples=n_samples)
 
+    if all_results.get("probe_grid"):
+        plots.plot_probe_comparison(all_results["probe_grid"],
+                                     os.path.join(out_dir, "probe_comparison.png"),
+                                     n_comp=search.get("n_comp_searched", 1),
+                                     n_samples=n_samples)
+
     # The true-vs-predicted grid needs per-sample predictions, which are too
     # bulky to keep in the results JSON -- it can only be drawn on a full run.
     if cells_all:
@@ -417,8 +431,11 @@ def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> N
 
 
 def replot_from_results(results_path: str, out_dir: str = None) -> str:
-    """Redraw the figures from a finished run's JSON. Cheap (seconds), so
-    figure changes never cost a re-run of the search and ladders."""
+    """Redraw the search-derived figures from a finished run's JSON. Cheap
+    (seconds); doesn't cover the panel figures -- see
+    `panel.write_panel_figures` for those. cells_all (needed for the
+    true-vs-predicted grid) is not persisted in the JSON, so that one figure
+    is only redrawn if it already exists; this never regenerates it."""
     out_dir = out_dir or os.path.dirname(results_path)
     with open(results_path) as f:
         all_results = json.load(f)
@@ -429,11 +446,23 @@ def replot_from_results(results_path: str, out_dir: str = None) -> str:
 
 def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
               device: str = "cpu", comps_for_ladder=(1, 2, 3), seed: int = 42) -> dict:
+    """The whole pipeline, one call, for any backbone: extract -> search for
+    the best embedding recipe -> a full-pool probe-choice grid (every
+    normalizer x {RidgeCV, OLS}, on raw input and on two named embedding
+    arms) -> full-pool diagnostics (canary, true-vs-predicted) -> the honest
+    per-n_train panel (panel.py) across every component count. Writes
+    label_probe_results.json + recipe_panel.json and every figure; both
+    JSONs carry `meta.backbone` (auto-derived from the model class) so runs
+    from different backbones can be told apart and compared later (see
+    compare.py)."""
+    from . import panel as pnl
+
     os.makedirs(out_dir, exist_ok=True)
     bank_path = ro.build_bank_cache(checkpoint_path, labeled_data_dir, out_dir,
                                      comps=tuple(range(3)), device=device, seed=seed)
     bank, input_raw, input_z, y, meta = ro.load_bank_cache(bank_path)
-    print(f"[label_probe] bank loaded: n={len(y)}, stages={list(bank)}", flush=True)
+    print(f"[label_probe] bank loaded: n={len(y)}, "
+          f"backbone={meta.get('backbone')}, stages={list(bank)}", flush=True)
 
     embedding_search = search_best_embedding_recipe(bank, y, n_comp=1, seed=seed)
     best_label = _readout_label(embedding_search["best_readout_kind"],
@@ -442,21 +471,31 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
           f"+ {embedding_search['best_probe']} (R2={embedding_search['best_r2']:+.4f})",
           flush=True)
 
-    all_results = {"meta": meta, "embedding_search": embedding_search, "by_n_comp": {}}
+    probe_grid = run_probe_grid(bank, input_raw, y, 1, embedding_search, seed=seed)
+
+    all_results = {"meta": meta, "embedding_search": embedding_search,
+                   "probe_grid": probe_grid, "by_n_comp": {}}
     canary_all = {}
     cells_all = {}
+    emb_spec = (embedding_search["best_readout_kind"], embedding_search["best_readout_spec"])
+    panel_results = {"meta": meta, "emb_spec": list(map(str, emb_spec)),
+                     "raw_panel": pnl.RAW_PANEL, "emb_panel": pnl.EMB_PANEL,
+                     "by_n_comp": {}}
+    n_trains = list(PANEL_N_TRAINS) + [len(y)]
+
     for n_comp in comps_for_ladder:
-        comparison = run_ladder_comparison(bank, input_raw, y, n_comp,
-                                            embedding_search, seed=seed)
-        all_results["by_n_comp"][n_comp] = {
-            "ladder": comparison["ladder"], "full_pool": {
-                k: {kk: vv for kk, vv in v.items() if kk != "oof_predictions"}
-                for k, v in comparison["full_pool"].items()}}
-        canary_all[n_comp] = run_canary_checks(comparison["readout_matrices"], y, seed=seed)
+        fp = run_full_pool_comparison(bank, input_raw, y, n_comp, embedding_search, seed=seed)
+        all_results["by_n_comp"][n_comp] = {"full_pool": {
+            k: {kk: vv for kk, vv in v.items() if kk != "oof_predictions"}
+            for k, v in fp["full_pool"].items()}}
+        canary_all[n_comp] = run_canary_checks(fp["readout_matrices"], y, seed=seed)
         if n_comp <= 3:
-            cells = build_true_vs_pred_cells(comparison["readout_matrices"], y, seed=seed)
+            cells = build_true_vs_pred_cells(fp["readout_matrices"], y, seed=seed)
             for label, cell in cells.items():
                 cells_all[(f"{n_comp}-comp", label)] = cell
+
+        panel_results["by_n_comp"][str(n_comp)] = pnl.run_panel(
+            bank, input_raw, y, n_comp, emb_spec, n_trains, seed=seed)
 
     all_results["canary"] = canary_all
 
@@ -465,7 +504,13 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
         json.dump(all_results, f, indent=2, default=str)
     print(f"[label_probe] wrote {results_path}", flush=True)
 
+    panel_path = os.path.join(out_dir, "recipe_panel.json")
+    with open(panel_path, "w") as f:
+        json.dump(panel_results, f, indent=2, default=str)
+    print(f"[label_probe] wrote {panel_path}", flush=True)
+
     _write_figures(all_results, out_dir, cells_all=cells_all)
+    pnl.write_panel_figures(panel_path, out_dir)
     print(f"[label_probe] wrote plots to {out_dir}", flush=True)
 
-    return all_results
+    return {"results": all_results, "panel": panel_results}

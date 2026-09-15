@@ -45,12 +45,14 @@ LEAK_DEMO = [
 ]
 
 FIGURES = [
-    ("depth_profile.png", "R² by pipeline block · 1 component, n_train=4,716 · error bars ±1 split SD"),
-    ("recipe_search.png", "Pooling schemes and probes on the winning block · 1 component, n_train=4,716"),
-    ("label_efficiency.png", "Every recipe at 1 component · median R², IQR band"),
-    ("ladder_panels.png", "Label efficiency and reliability · 1, 2 and 3 components"),
-    ("crossover.png", "Embedding − raw gap vs label budget · paired per-draw differences"),
-    ("true_vs_pred_grid.png", "True vs predicted · n_train=4,716 · axes fixed to [−2, 2]"),
+    ("depth_profile.png", "R² by pipeline block · 1 component, full pool · error bars ±1 split SD"),
+    ("recipe_search.png",
+     "Pooling schemes and probes on the winning block · 1 component, full pool"),
+    ("crossover_panel.png", "Honest per-rung crossover: absolute R² and the embedding − raw gap, "
+                            "best recipe chosen per label budget on a disjoint selection split"),
+    ("probe_comparison.png", "RidgeCV vs OLS at every normalizer · raw input, Projector, "
+                             "layer 2, layer 12 (all plain mean-pooled) · 1 component, full pool"),
+    ("true_vs_pred_grid.png", "True vs predicted · full pool · axes fixed to [−2, 2]"),
 ]
 
 
@@ -183,36 +185,39 @@ def build(run_dir: str) -> str:
     for c in comps:
         fp = d["by_n_comp"][c]["full_pool"]
         best = max(fp, key=lambda k: fp[k]["r2_mean"])
-        cells = [c] + [(f'<strong>{_pm(fp[l]["r2_mean"], fp[l]["r2_bootstrap_sd"])}</strong>'
-                        if l == best else _pm(fp[l]["r2_mean"], fp[l]["r2_bootstrap_sd"]))
-                       for l in labels]
+        cells = [c] + [(f'<strong>{_pm(fp[lb]["r2_mean"], fp[lb]["r2_bootstrap_sd"])}</strong>'
+                        if lb == best else _pm(fp[lb]["r2_mean"], fp[lb]["r2_bootstrap_sd"]))
+                       for lb in labels]
         rows.append(cells + ["__win__"])
-    out.append(_table(["n-comp"] + [_e(l) for l in labels], rows,
+    out.append(_table(["n-comp"] + [_e(lb) for lb in labels], rows,
                       ["num"] + ["num"] * len(labels)))
     out.append("</section>")
 
-    # ── ladders ──────────────────────────────────────────────────────────
-    h2("Label efficiency", "05")
-    for c in comps:
-        lad = d["by_n_comp"][c]["ladder"]
-        keys = sorted(next(iter(lad.values())), key=int)
-        h3(f"{c} component{'s' if c != '1' else ''} — median R² [IQR]")
-        rows = []
-        for k in keys:
-            row = [f"{int(k):,}"]
-            best = max(lad, key=lambda l: lad[l][k]["r2_median"])
-            for l in lad:
-                e = lad[l][k]
-                txt = f'{e["r2_median"]:.3f}'
-                if e["n_draws"] > 1:
-                    txt += f' <span class="pm">[{e["r2_p25"]:.2f}, {e["r2_p75"]:.2f}]</span>'
-                elif e.get("r2_bootstrap_sd") is not None:
-                    txt += f' <span class="pm">±{e["r2_bootstrap_sd"]:.3f}</span>'
-                row.append(f"<strong>{txt}</strong>" if l == best else txt)
-            rows.append(row)
-        out.append(_table(["n_train"] + [_e(l) for l in lad], rows,
-                          ["num"] + ["num"] * len(lad)))
-    out.append("</section>")
+    # ── label efficiency, honest per-rung selection ─────────────────────────
+    panel_path = os.path.join(run_dir, "recipe_panel.json")
+    if os.path.exists(panel_path):
+        with open(panel_path) as f:
+            pd = json.load(f)
+        h2("Label efficiency — honest per-rung selection", "05")
+        for c in sorted(pd["by_n_comp"], key=int):
+            sel = pd["by_n_comp"][c]["selected"]
+            keys = sorted(sel["raw"], key=int)
+            h3(f"{c} component{'s' if c != '1' else ''} — best recipe chosen per budget on a "
+               "disjoint selection split, median R² [IQR]")
+            rows = []
+            for k in keys:
+                r, e = sel["raw"][k], sel["embedding"][k]
+
+                def cell(v, is_best):
+                    txt = (f'{v["r2_median"]:.3f} <span class="pm">'
+                           f'[{v["r2_p25"]:.2f}, {v["r2_p75"]:.2f}] · {_e(v["recipe"])}</span>')
+                    return f"<strong>{txt}</strong>" if is_best else txt
+
+                e_better = e["r2_median"] >= r["r2_median"]
+                rows.append([f"{int(k):,}", cell(r, not e_better), cell(e, e_better)])
+            out.append(_table(["n_train", "raw (best)", "embedding (best)"], rows,
+                              ["num", "left", "left"]))
+        out.append("</section>")
 
     # ── canary ───────────────────────────────────────────────────────────
     if d.get("canary"):

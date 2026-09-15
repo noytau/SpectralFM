@@ -6,19 +6,23 @@ token/time axis, per stage, per component. Every (stage, pooling) readout is
 then a cheap CPU subset-concatenation of that bank, so the whole
 layer x pooling grid is explorable from a single GPU pass.
 
-Stages, in the model's own block vocabulary (FE / Projector / Transformer,
-per ARCHITECTURE.md): `fe` is the FE (conv feature extractor) output,
-pre-LayerNorm; `extract_features` is the FE output post-LayerNorm (this is
-literally "conv FE output (post-LayerNorm)" in ARCHITECTURE.md's FE-decoder
-row — still 512-d, the LayerNorm's own submodule of `feature_projection`,
-not yet through its Linear). `layer0` is what the Transformer actually
-receives as input: FE post-LN, projected 512->768 by the Projector's Linear,
-plus positional conv embedding and the encoder's own pre-block LayerNorm —
-displayed as "Projector" since it is the Projector's contribution to the
-pipeline, immediately before any Transformer block runs. `layer1`..`layer12`
-are Transformer block 1..12 outputs — the standard "final-layer, mean-pool"
-convention used elsewhere in this codebase's eval package is exactly
-(stage="layer12", pooling="mean"), displayed as "Transformer layer 12".
+BACKBONE-GENERAL BY DESIGN. Two stage families, so a new backbone drops in
+with zero code changes:
+
+  - `layer0`..`layerN` — every entry of `model(...).hidden_states`. This is
+    the only extraction HuggingFace guarantees on any `output_hidden_states`
+    model, so it works unmodified for any Transformer encoder, not just the
+    one this repo was built against.
+  - `fe` / `extract_features` — the conv-feature-extractor taps this repo's
+    specific data2vec-audio backbone happens to expose
+    (`model.feature_extractor`, `model.feature_projection.layer_norm`).
+    Extracted via `hasattr` and silently skipped for a backbone that has
+    neither submodule, rather than assumed.
+
+Display names follow the same split: `layerN` always renders as
+"Transformer layer N" (backbone-agnostic). The FE/Projector names below are
+this specific backbone's own block vocabulary (see ARCHITECTURE.md) and only
+ever apply to stages that were actually extracted.
 """
 from __future__ import annotations
 
@@ -38,25 +42,31 @@ POOLINGS = {
     "first_last": ("first", "last"),
 }
 
-N_TRANSFORMER_LAYERS = 13  # HF hidden_states = embeddings output + 12 blocks
-BANK_STAGES = ("fe", "extract_features") + tuple(
-    f"layer{i}" for i in range(N_TRANSFORMER_LAYERS))
+# This backbone's own extra taps, before the Transformer stack: `fe` is the
+# raw conv output, `extract_features` is the same output post-LayerNorm (via
+# `feature_projection.layer_norm`, not yet through its Linear). Named after
+# the attributes they read, so `extract_bank` can hasattr-guard them without
+# a backbone-specific branch.
+FE_STAGE_ATTRS = {"fe": "feature_extractor", "extract_features": "feature_projection"}
 
-# Internal bank keys ("fe", "extract_features", "layer0".."layer12") stay as
-# they are -- they're cache keys, matched against an on-disk bank.npz, and
-# renaming them would invalidate every cached extraction. This maps a key to
-# the model's own block vocabulary for anything user-facing (labels, prints,
-# reports): FE / Projector / Transformer, never "readout" or a bare "layerN".
-STAGE_DISPLAY_NAMES = {
+# `layer0` is what the Transformer stack receives as input for THIS backbone
+# (FE post-LN, projected 512->768, plus positional embedding) -- the
+# Projector's contribution, before any Transformer block runs. Shown here
+# only for context; nothing downstream depends on this being layer0
+# specifically vs. any other hidden_states index.
+KNOWN_STAGE_DISPLAY_NAMES = {
     "fe": "FE (pre-LN)",
     "extract_features": "FE (post-LN)",
     "layer0": "Projector",
-    **{f"layer{i}": f"Transformer layer {i}" for i in range(1, N_TRANSFORMER_LAYERS)},
 }
 
 
 def stage_display_name(stage: str) -> str:
-    return STAGE_DISPLAY_NAMES.get(stage, stage)
+    if stage in KNOWN_STAGE_DISPLAY_NAMES:
+        return KNOWN_STAGE_DISPLAY_NAMES[stage]
+    if stage.startswith("layer") and stage[len("layer"):].isdigit():
+        return f"Transformer layer {stage[len('layer'):]}"
+    return stage
 
 
 def build_readout(bank: np.ndarray, comp_idx: list, pooling: str) -> np.ndarray:
@@ -73,7 +83,7 @@ def build_readout(bank: np.ndarray, comp_idx: list, pooling: str) -> np.ndarray:
     return np.ascontiguousarray(sel.reshape(n, -1), dtype=np.float32)
 
 
-def _bank_stats_from_seq(seq) -> "torch.Tensor":
+def _bank_stats_from_seq(seq):
     """seq: [B, T, D] time-major. Returns [B, 10, D] in POOL_STATS order."""
     import torch
     T = seq.shape[1]
@@ -89,20 +99,29 @@ def _bank_stats_from_seq(seq) -> "torch.Tensor":
     return torch.stack([parts[s] for s in POOL_STATS], dim=1)
 
 
+def _backbone_name(model) -> str:
+    """Auto-derived, no per-backbone config: the class name is enough to
+    label a run in a cross-backbone comparison, and works for any model."""
+    return type(model).__name__
+
+
 def extract_bank(model, signals_z: np.ndarray, device: str = "cuda",
                   batch_size: int = 64) -> dict:
     """
     signals_z: [M, 245] float32, ALREADY z-scored (features.normalize_like_fairseq).
-    Returns {stage: [M, 10, D]} float32 for every stage in BANK_STAGES.
-    One forward pass per batch with output_hidden_states=True yields all 13
-    transformer taps; the two FE stages come from the same pass's submodules.
+    Returns {stage: [M, 10, D]} float32. `layer0..layerN` come from
+    `output_hidden_states=True`, present on any HF encoder -- this is the
+    only extraction a new backbone needs to support to work here at all.
+    `fe` / `extract_features` are extracted only if the model exposes the
+    named submodules (see FE_STAGE_ATTRS); silently absent otherwise.
     """
     import torch
 
     model.eval()
     model.to(device)
     t = torch.from_numpy(np.asarray(signals_z, dtype=np.float32))
-    out = {s: [] for s in BANK_STAGES}
+    has_fe = all(hasattr(model, a) for a in FE_STAGE_ATTRS.values())
+    out = None  # stage list is only known after the first forward pass
 
     with torch.no_grad():
         for i in range(0, len(t), batch_size):
@@ -110,17 +129,26 @@ def extract_bank(model, signals_z: np.ndarray, device: str = "cuda",
             if batch.dim() == 1:
                 batch = batch.unsqueeze(0)
 
-            fe_out = model.feature_extractor(batch)  # [B, 512, T]
-            fe_t = fe_out.transpose(1, 2)  # [B, T, 512]
-            out["fe"].append(_bank_stats_from_seq(fe_t).cpu().numpy())
-
-            ef = model.feature_projection.layer_norm(fe_t)  # post-LN
-            out["extract_features"].append(_bank_stats_from_seq(ef).cpu().numpy())
+            fe_t = None
+            if has_fe:
+                fe_out = model.feature_extractor(batch)  # [B, 512, T]
+                fe_t = fe_out.transpose(1, 2)  # [B, T, 512]
 
             hs = model(input_values=batch, output_hidden_states=True).hidden_states
-            if len(hs) != N_TRANSFORMER_LAYERS:
+            if out is None:
+                stages = (["fe", "extract_features"] if has_fe else []) + \
+                    [f"layer{li}" for li in range(len(hs))]
+                out = {s: [] for s in stages}
+
+            if has_fe:
+                out["fe"].append(_bank_stats_from_seq(fe_t).cpu().numpy())
+                ef = model.feature_projection.layer_norm(fe_t)  # post-LN
+                out["extract_features"].append(_bank_stats_from_seq(ef).cpu().numpy())
+
+            if len(hs) != len(out) - (2 if has_fe else 0):
                 raise RuntimeError(
-                    f"expected {N_TRANSFORMER_LAYERS} hidden states, got {len(hs)}")
+                    f"hidden_states length changed mid-run: {len(hs)} vs "
+                    f"{len(out) - (2 if has_fe else 0)} on the first batch")
             for li, h in enumerate(hs):
                 out[f"layer{li}"].append(_bank_stats_from_seq(h).cpu().numpy())
 
@@ -153,9 +181,11 @@ def build_bank_cache(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     flat_z = feat.normalize_like_fairseq(flat_raw)
 
     model = CheckpointLoader.from_file(checkpoint_path)
+    backbone = _backbone_name(model)
     t0 = time.time()
     bank = extract_bank(model, flat_z, device=device, batch_size=batch_size)
-    print(f"[label_probe] extracted in {time.time() - t0:.1f}s", flush=True)
+    print(f"[label_probe] extracted in {time.time() - t0:.1f}s "
+          f"(backbone={backbone}, stages={sorted(bank)})", flush=True)
 
     payload = {f"bank__{s}": arr.reshape(n, k, len(POOL_STATS), arr.shape[-1])
                for s, arr in bank.items()}
@@ -163,9 +193,9 @@ def build_bank_cache(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     payload["input_z"] = flat_z.reshape(n, k, L)
     payload["y"] = y
     payload["_meta"] = np.array([repr({
-        "checkpoint": checkpoint_path, "comps": comps, "n": int(n),
-        "max_samples": max_samples, "seed": seed,
-        "pool_stats": POOL_STATS, "stages": BANK_STAGES})])
+        "checkpoint": checkpoint_path, "backbone": backbone, "comps": comps,
+        "n": int(n), "max_samples": max_samples, "seed": seed,
+        "pool_stats": POOL_STATS, "stages": sorted(bank)})])
 
     # Atomic write: a killed run (OOM, preemption) must never leave a
     # truncated bank.npz behind, since the idempotency check above is a
