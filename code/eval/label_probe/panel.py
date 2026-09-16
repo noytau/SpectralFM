@@ -1,10 +1,12 @@
 """
-Per-rung recipe panel: score EVERY recipe at EVERY label budget, then let each
-arm pick its own best recipe per budget.
+Per-rung label-efficiency curves: raw input via an honest recipe search,
+named embedding layers via one fixed recipe.
 
-Why this exists. Fixing one recipe per arm across the whole ladder guarantees
-an unfair comparison at one end of it, because the best recipe is
-n_train-dependent. Measured on raw input, 1 component:
+Raw input (`run_panel`): score every recipe in RAW_PANEL at every label
+budget, then let the SELECTED best recipe vary by budget -- fixing one
+recipe across the whole ladder guarantees an unfair comparison at one end of
+it, because the best normalizer is itself n_train-dependent. Measured on raw
+input, 1 component:
 
     n_train      whitened (full rank)     z-scored
     50                          0.096        0.126
@@ -13,14 +15,18 @@ n_train-dependent. Measured on raw input, 1 component:
 
 Full-rank whitening equalises ~235 near-zero-variance directions. With 4,716
 labels a probe can work out which of them carry signal; with 50 it cannot, and
-overfits amplified noise. So "whiten vs standardize" has no single winner, and
-a study that picks one and holds it fixed is measuring its own choice as much
-as the representation.
+overfits amplified noise.
 
-Two outputs, from one pass:
-  * `panel`     -- every recipe at every rung (report it all, hide nothing)
-  * `selected`  -- the best recipe per arm per rung, chosen on a SELECTION
-                   eval split and scored on a disjoint REPORT split, so the
+Embedding layers (`run_layer_curves`): one fixed recipe (LAYER_RECIPE) per
+named, plain mean-pooled layer -- no per-layer recipe search, and never the
+recipe search's pooling-squeezed readout (that squeeze is a one-off finding
+reported once, in the search itself, not a generalizing representation to
+carry across every figure).
+
+`run_panel` returns two things:
+  * `panel`     -- every raw recipe at every rung (report it all, hide nothing)
+  * `selected`  -- the best raw recipe per rung, chosen on a SELECTION eval
+                   split and scored on a disjoint REPORT split, so the
                    per-rung choice cannot inflate the number it reports.
 """
 from __future__ import annotations
@@ -56,17 +62,15 @@ RAW_PANEL = [
     # unsupervised-preprocessing + a probe that sees labels only at fit time.
 ]
 
-# Same normalizer ladder on the embedding side, on the block the full-pool
-# search selected, so neither arm is handed an advantage the other is denied.
-EMB_PANEL = [
-    ("standardize", "ridgecv"),
-    ("whiten", "ridgecv"),
-    ("whiten8", "ridgecv"),
-    ("whiten32", "ridgecv"),
-    ("whiten128", "ridgecv"),
-    ("standardize", "ols"),
-    ("whiten", "ols"),
-]
+# Single fixed recipe for the per-layer embedding curves below: the
+# normalizer/probe adopted everywhere else in the report (whitened,
+# RidgeCV). Deliberately NOT the recipe search's pooling-squeezed readout
+# (four-segment pooling etc.) -- that squeeze is a one-off finding reported
+# once, in the recipe search itself, not a generalizing representation to
+# repeat across every figure. Every embedding curve here is a plain
+# mean-pooled single layer, so "the embedding" is always a specific,
+# nameable block.
+LAYER_RECIPE = ("whiten", "ridgecv")
 
 
 def _probe(name, seed=42):
@@ -74,46 +78,44 @@ def _probe(name, seed=42):
     return _make_any_regressor(name, seed=seed)
 
 
-def build_arms(bank, input_raw, ci, emb_spec, seed=42):
-    """(arm, recipe_label) -> feature matrix, for every recipe in both panels."""
-    from .study import _build_from_spec
-
+def build_raw_arms(input_raw, ci, seed=42):
+    """recipe_label -> feature matrix, for every raw-input recipe."""
     X_raw = feat.make_wide(input_raw, ci)
-    kind, spec = emb_spec
-    X_emb = _build_from_spec(bank, kind, spec, ci, seed=seed)
-
-    arms = {}
-    for norm, probe in RAW_PANEL:
-        X = fit_normalizer(norm, X_raw, seed=seed).transform(X_raw)
-        arms[("raw", f"{norm} + {probe}")] = (X, probe)
-    for norm, probe in EMB_PANEL:
-        X = fit_normalizer(norm, X_emb, seed=seed).transform(X_emb)
-        arms[("embedding", f"{norm} + {probe}")] = (X, probe)
-    return arms
+    return {f"{norm} + {probe}": (fit_normalizer(norm, X_raw, seed=seed).transform(X_raw), probe)
+            for norm, probe in RAW_PANEL}
 
 
-def run_panel(bank, input_raw, y, n_comp, emb_spec, n_trains, seed=42,
-              n_eval=500):
-    ci = [feat.UNIQUE_COMPS.index(c) for c in feat.COMP_LADDER[n_comp]]
-    arms = build_arms(bank, input_raw, ci, emb_spec, seed=seed)
-
-    # Two disjoint held-out sets: one to CHOOSE the per-rung recipe, one to
-    # REPORT it. Selecting and reporting on the same rows would let the choice
-    # chase that split's noise and hand back an inflated number.
+def _eval_split(y, seed=42, n_eval=500):
+    """Two disjoint held-out sets: one to CHOOSE a per-rung recipe, one to
+    REPORT it. Shared by run_panel and run_layer_curves so every curve in a
+    run is scored against the identical held-out rows."""
     rng = np.random.default_rng(seed)
     held = rng.choice(len(y), size=min(2 * n_eval, len(y) // 2), replace=False)
-    eval_select, eval_report = held[:len(held) // 2], held[len(held) // 2:]
+    return held[:len(held) // 2], held[len(held) // 2:]
+
+
+def run_panel(bank, input_raw, y, n_comp, n_trains, seed=42, n_eval=500):
+    """Honest per-rung selection, raw input only -- score every recipe in
+    RAW_PANEL at every rung, choose the best per rung on a selection split,
+    report it on a disjoint split. See run_layer_curves for the embedding
+    side, which uses one fixed recipe per named layer instead: the best
+    normalizer for raw input is itself n_train-dependent (why this function
+    exists at all), but this report does not carry that same search onto
+    every embedding layer -- see this module's docstring."""
+    ci = [feat.UNIQUE_COMPS.index(c) for c in feat.COMP_LADDER[n_comp]]
+    arms = build_raw_arms(input_raw, ci, seed=seed)
+    eval_select, eval_report = _eval_split(y, seed=seed, n_eval=n_eval)
 
     panel = {}
-    for (arm, label), (X, probe) in arms.items():
+    for label, (X, probe) in arms.items():
         res_sel = laddermod.score_readout(
             X, y, probe_fn=lambda p=probe: _probe(p, seed), eval_idx=eval_select,
             n_trains=list(n_trains), seed=seed)
         res_rep = laddermod.score_readout(
             X, y, probe_fn=lambda p=probe: _probe(p, seed), eval_idx=eval_report,
             n_trains=list(n_trains), seed=seed)
-        panel[f"{arm} | {label}"] = {
-            "arm": arm, "recipe": label,
+        panel[label] = {
+            "recipe": label,
             "select": {str(k): v["r2_median"] for k, v in res_sel.items()},
             "report": {str(k): {"r2_median": v["r2_median"],
                                  "r2_p25": v["r2_p25"], "r2_p75": v["r2_p75"],
@@ -121,24 +123,50 @@ def run_panel(bank, input_raw, y, n_comp, emb_spec, n_trains, seed=42,
                                  "r2_draws": v["r2_draws"]}
                         for k, v in res_rep.items()},
         }
-        print(f"[panel] {n_comp}-comp  {arm:<9} {label:<26} "
+        print(f"[panel] {n_comp}-comp  raw  {label:<26} "
               f"n=50:{res_rep[50]['r2_median']:+.3f}  "
               f"full:{res_rep[max(n_trains)]['r2_median']:+.3f}", flush=True)
 
     selected = {}
-    for arm in ("raw", "embedding"):
-        here = {k: v for k, v in panel.items() if v["arm"] == arm}
-        per_n = {}
-        for n in n_trains:
-            key = max(here, key=lambda k: here[k]["select"][str(n)])
-            rep = here[key]["report"][str(n)]
-            per_n[str(n)] = {"recipe": here[key]["recipe"],
-                              "r2_median": rep["r2_median"],
-                              "r2_p25": rep["r2_p25"], "r2_p75": rep["r2_p75"],
-                              "r2_draws": rep["r2_draws"]}
-        selected[arm] = per_n
+    for n in n_trains:
+        key = max(panel, key=lambda k: panel[k]["select"][str(n)])
+        rep = panel[key]["report"][str(n)]
+        selected[str(n)] = {"recipe": panel[key]["recipe"],
+                             "r2_median": rep["r2_median"],
+                             "r2_p25": rep["r2_p25"], "r2_p75": rep["r2_p75"],
+                             "r2_draws": rep["r2_draws"]}
     return {"panel": panel, "selected": selected,
             "n_eval_select": len(eval_select), "n_eval_report": len(eval_report)}
+
+
+def run_layer_curves(bank, input_raw, y, n_comp, layer_stages, n_trains, seed=42,
+                      n_eval=500):
+    """One curve per named layer in `layer_stages` ({display_name: stage_key}),
+    plain mean-pooled, LAYER_RECIPE only -- no per-layer recipe search. Scored
+    on the same report split `run_panel` uses, so every curve in a run sits on
+    the same held-out rows and can be paired draw-by-draw with the raw curve.
+    """
+    from . import readouts as ro
+
+    ci = [feat.UNIQUE_COMPS.index(c) for c in feat.COMP_LADDER[n_comp]]
+    _, eval_report = _eval_split(y, seed=seed, n_eval=n_eval)
+    norm, probe = LAYER_RECIPE
+
+    curves = {}
+    for name, stage in layer_stages.items():
+        X_raw_layer = ro.build_readout(bank[stage], ci, "mean")
+        X = fit_normalizer(norm, X_raw_layer, seed=seed).transform(X_raw_layer)
+        res = laddermod.score_readout(
+            X, y, probe_fn=lambda p=probe: _probe(p, seed), eval_idx=eval_report,
+            n_trains=list(n_trains), seed=seed)
+        curves[name] = {str(k): {"r2_median": v["r2_median"],
+                                  "r2_p25": v["r2_p25"], "r2_p75": v["r2_p75"],
+                                  "n_draws": v["n_draws"], "r2_draws": v["r2_draws"]}
+                        for k, v in res.items()}
+        print(f"[panel] {n_comp}-comp  layer  {name:<24} "
+              f"n=50:{res[50]['r2_median']:+.3f}  "
+              f"full:{res[max(n_trains)]['r2_median']:+.3f}", flush=True)
+    return curves
 
 
 def write_panel_figures(recipe_panel_path: str, out_dir: str = None) -> str:

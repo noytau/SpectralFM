@@ -48,8 +48,8 @@ FIGURES = [
     ("depth_profile.png", "R² by pipeline block · 1 component, full pool · error bars ±1 split SD"),
     ("recipe_search.png",
      "Pooling schemes and probes on the winning block · 1 component, full pool"),
-    ("crossover_panel.png", "Honest per-rung crossover: absolute R² and the embedding − raw gap, "
-                            "best recipe chosen per label budget on a disjoint selection split"),
+    ("crossover_panel.png", "Raw input (best recipe re-chosen at each label budget) vs. "
+                            "Projector, layer 2, layer 12 (each one fixed recipe)"),
     ("probe_comparison.png", "RidgeCV vs OLS at every normalizer · raw input, Projector, "
                              "layer 2, layer 12 (all plain mean-pooled) · 1 component, full pool"),
     ("true_vs_pred_grid.png", "True vs predicted · full pool · axes fixed to [−2, 2]"),
@@ -193,30 +193,41 @@ def build(run_dir: str) -> str:
                       ["num"] + ["num"] * len(labels)))
     out.append("</section>")
 
-    # ── label efficiency, honest per-rung selection ─────────────────────────
+    # ── label efficiency: best recipe re-chosen at each label budget ────────
     panel_path = os.path.join(run_dir, "recipe_panel.json")
     if os.path.exists(panel_path):
         with open(panel_path) as f:
             pd = json.load(f)
-        h2("Label efficiency — honest per-rung selection", "05")
+        h2("Label efficiency — best recipe re-chosen at each label budget", "05")
         for c in sorted(pd["by_n_comp"], key=int):
-            sel = pd["by_n_comp"][c]["selected"]
-            keys = sorted(sel["raw"], key=int)
-            h3(f"{c} component{'s' if c != '1' else ''} — best recipe chosen per budget on a "
-               "disjoint selection split, median R² [IQR]")
+            by_c = pd["by_n_comp"][c]
+            sel, layer_curves = by_c["selected"], by_c["layer_curves"]
+            layer_names = list(layer_curves)
+            keys = sorted(sel, key=int)
+            h3(f"{c} component{'s' if c != '1' else ''} — raw's best recipe chosen per budget "
+               "on a disjoint selection split; each layer is one fixed recipe. Median R² [IQR]")
             rows = []
             for k in keys:
-                r, e = sel["raw"][k], sel["embedding"][k]
+                r = sel[k]
+                by_layer = {name: layer_curves[name][k] for name in layer_names}
+                best_name = max(by_layer, key=lambda n: by_layer[n]["r2_median"])
+                r_best = r["r2_median"] >= by_layer[best_name]["r2_median"]
 
-                def cell(v, is_best):
+                def raw_cell(v, is_best):
                     txt = (f'{v["r2_median"]:.3f} <span class="pm">'
                            f'[{v["r2_p25"]:.2f}, {v["r2_p75"]:.2f}] · {_e(v["recipe"])}</span>')
                     return f"<strong>{txt}</strong>" if is_best else txt
 
-                e_better = e["r2_median"] >= r["r2_median"]
-                rows.append([f"{int(k):,}", cell(r, not e_better), cell(e, e_better)])
-            out.append(_table(["n_train", "raw (best)", "embedding (best)"], rows,
-                              ["num", "left", "left"]))
+                def layer_cell(v, is_best):
+                    txt = f'{v["r2_median"]:.3f} <span class="pm">[{v["r2_p25"]:.2f}, {v["r2_p75"]:.2f}]</span>'
+                    return f"<strong>{txt}</strong>" if is_best else txt
+
+                row = [f"{int(k):,}", raw_cell(r, r_best)]
+                for name in layer_names:
+                    row.append(layer_cell(by_layer[name], not r_best and name == best_name))
+                rows.append(row)
+            out.append(_table(["n_train", "raw (best)"] + [_e(n) for n in layer_names], rows,
+                              ["num", "left"] + ["left"] * len(layer_names)))
         out.append("</section>")
 
     # ── canary ───────────────────────────────────────────────────────────

@@ -322,6 +322,37 @@ Raw channels are concatenated; embeddings are extracted per component then conca
 - **Figures:** `label_reg_true_vs_pred[_<ckpt>].png` — true-vs-predicted scatter per probe;
   `label_regression_comparison.png` — R² + ΔR² bars across checkpoints.
 
+#### Going deeper — the `label_probe/` study
+
+The eval above answers "embedding or raw?" with one fixed recipe at the full label
+pool. `code/eval/label_probe/` answers it properly: every pipeline block, a search
+over pooling/normalizer/probe, and a label-efficiency ladder down to n_train=10.
+Findings: [`docs/LABEL_REGRESSION_FINDINGS.md`](../../docs/LABEL_REGRESSION_FINDINGS.md).
+
+It is a separate entry point, not a `--evals` method, and is backbone-general — it
+reads `hidden_states` from any HF-style Transformer, so the number and naming of
+blocks come from the model itself, never a hardcoded layer count.
+
+```bash
+python -m eval.label_probe \
+  --checkpoint <ckpt> --data <labeled_data_dir> --out_dir <dir> \
+  [--device cuda] [--comps 1 2 3]
+```
+
+**Running it on a different backbone** is exactly this command with a new
+`--checkpoint` and a fresh `--out_dir` — nothing else changes. Each run records its
+own `meta.backbone` and `meta.checkpoint`, so runs stay self-identifying and can be
+lined up afterwards:
+
+```bash
+python -m eval.label_probe.compare <out_dir_1> <out_dir_2> ... [-o compare.html]
+```
+
+Outputs per run: `label_probe_results.json` (search + full-pool diagnostics),
+`recipe_panel.json` (label-efficiency ladder), five figures, and a cached
+`bank.npz` (~6 GB, gitignored, reused on rerun). A tables-only HTML view of one run:
+`python -m eval.label_probe.tables_report <out_dir> -o data.html`.
+
 ### 6. `structured_similarity` — canonical 100-sample panel
 
 **Question:** How does similarity structure evolve through the pipeline stages?

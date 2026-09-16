@@ -1,7 +1,7 @@
 """
 One command, any HuggingFace-style Transformer backbone (see readouts.py's
 module docstring for what "any" covers): extraction, the recipe search, and
-the honest per-n_train panel, all in one run -- writes both
+the label-efficiency panel, all in one run -- writes both
 label_probe_results.json and recipe_panel.json, plus every figure.
 
   python -m eval.label_probe --checkpoint <path> --data <labeled_data_dir> \
@@ -37,7 +37,7 @@ def main():
                     help="redraw figures from a finished run's results JSON "
                          "and exit; no checkpoint or data needed")
     ap.add_argument("--panel_plots_only", metavar="RECIPE_PANEL_JSON",
-                    help="redraw the per-rung recipe panel's figure "
+                    help="redraw the label-efficiency panel's figure "
                          "(crossover_panel.png) and exit")
     ap.add_argument("--checkpoint")
     ap.add_argument("--data", help="labeled_data directory")

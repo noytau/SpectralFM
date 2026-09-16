@@ -473,14 +473,20 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
 
     probe_grid = run_probe_grid(bank, input_raw, y, 1, embedding_search, seed=seed)
 
+    # Same three plain layers as run_probe_grid / _full_pool_readouts, named
+    # once here and reused everywhere below -- winning block, runner-up,
+    # conventional final layer.
+    ranked = _ranked_stages(embedding_search)
+    layer_keys = list(dict.fromkeys([ranked[0], ranked[1], _final_layer_stage(bank)]))
+    layer_stages = {ro.stage_display_name(s): s for s in layer_keys}
+
     all_results = {"meta": meta, "embedding_search": embedding_search,
                    "probe_grid": probe_grid, "by_n_comp": {}}
     canary_all = {}
     cells_all = {}
-    emb_spec = (embedding_search["best_readout_kind"], embedding_search["best_readout_spec"])
-    panel_results = {"meta": meta, "emb_spec": list(map(str, emb_spec)),
-                     "raw_panel": pnl.RAW_PANEL, "emb_panel": pnl.EMB_PANEL,
-                     "by_n_comp": {}}
+    panel_results = {"meta": meta, "raw_panel": pnl.RAW_PANEL,
+                     "layer_recipe": list(pnl.LAYER_RECIPE),
+                     "layer_stages": layer_stages, "by_n_comp": {}}
     n_trains = list(PANEL_N_TRAINS) + [len(y)]
 
     for n_comp in comps_for_ladder:
@@ -494,8 +500,10 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
             for label, cell in cells.items():
                 cells_all[(f"{n_comp}-comp", label)] = cell
 
-        panel_results["by_n_comp"][str(n_comp)] = pnl.run_panel(
-            bank, input_raw, y, n_comp, emb_spec, n_trains, seed=seed)
+        rung = pnl.run_panel(bank, input_raw, y, n_comp, n_trains, seed=seed)
+        rung["layer_curves"] = pnl.run_layer_curves(
+            bank, input_raw, y, n_comp, layer_stages, n_trains, seed=seed)
+        panel_results["by_n_comp"][str(n_comp)] = rung
 
     all_results["canary"] = canary_all
 

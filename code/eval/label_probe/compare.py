@@ -44,15 +44,18 @@ def _load(run_dir: str) -> dict:
 def _crossing_summary(panel: dict, n_comp: str) -> str:
     """Reads the crossing off the panel's per-draw data directly, rather
     than re-deriving it -- keeps this tool from silently drifting out of
-    sync with whatever crossing definition panel_plots.py uses."""
+    sync with whatever crossing definition panel_plots.py uses. "Crosses"
+    means the best of the named embedding layers overtakes raw input's own
+    best recipe at that label budget."""
     if panel is None or n_comp not in panel.get("by_n_comp", {}):
         return "—"
     from . import panel_plots as pp
 
-    sel = panel["by_n_comp"][n_comp]["selected"]
-    ns_r, med_r, *_ = pp._selected_series(sel["raw"])
-    ns_e, med_e, *_ = pp._selected_series(sel["embedding"])
-    gaps = [e - r for e, r in zip(med_e, med_r)]
+    d = panel["by_n_comp"][n_comp]
+    ns_r, med_r, *_ = pp._selected_series(d["selected"])
+    layer_meds = [pp._selected_series(curve)[1] for curve in d["layer_curves"].values()]
+    best_layer_med = [max(vals) for vals in zip(*layer_meds)]
+    gaps = [e - r for e, r in zip(best_layer_med, med_r)]
     cross = pp._crossing_n(ns_r, gaps)
     return f"n≈{cross:,.0f}" if cross is not None else "never crosses"
 
@@ -83,15 +86,15 @@ def build(run_dirs: list) -> str:
                 continue
             fp = by_comp["full_pool"]
             raw = next((v for k, v in fp.items() if "raw input (whitened)" in k), None)
-            emb = next((v for k, v in fp.items()
-                       if k.startswith("embedding") and "conventional" not in k), None)
+            embs = [v for k, v in fp.items() if k.startswith("embedding")]
+            emb = max(embs, key=lambda v: v["r2_mean"]) if embs else None
             raw_r2 = _pm(raw["r2_mean"], raw["r2_bootstrap_sd"]) if raw else "—"
             emb_r2 = _pm(emb["r2_mean"], emb["r2_bootstrap_sd"]) if emb else "—"
             gap = f'{emb["r2_mean"] - raw["r2_mean"]:+.3f}' if raw and emb else "—"
             crossing = _crossing_summary(r["panel"], n_comp)
             rows.append([_e(backbone), raw_r2, emb_r2, gap, crossing])
         out.append(_table(["Backbone", "Raw (best)", "Embedding (best)",
-                           "Gap (emb − raw)", "Crossing (honest per-rung)"], rows))
+                           "Gap (emb − raw)", "Crossing"], rows))
 
     # One figure: full-pool embedding R² per backbone, 1 component (the
     # headline number every run has, so every backbone can always appear).
@@ -108,8 +111,8 @@ def build(run_dirs: list) -> str:
         names, vals, errs = [], [], []
         for r in runs:
             fp = r["results"]["by_n_comp"].get("1", {}).get("full_pool", {})
-            emb = next((v for k, v in fp.items()
-                       if k.startswith("embedding") and "conventional" not in k), None)
+            embs = [v for k, v in fp.items() if k.startswith("embedding")]
+            emb = max(embs, key=lambda v: v["r2_mean"]) if embs else None
             if emb:
                 names.append(_backbone_label(r["results"]["meta"]))
                 vals.append(emb["r2_mean"])

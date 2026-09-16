@@ -9,7 +9,8 @@ label (`parameter_0`)?
 
 **n = 4,716** usable spectra (`labeled_data` subset, 12 unique components).
 Every result states component count (1, 2 or 3 concatenated components) and
-n_train.
+**n_train** — the label budget: how many of those spectra had labels
+available to train on.
 
 Pipeline is backbone-general (`code/eval/label_probe/`, extracts
 `hidden_states` from any HF Transformer) — see
@@ -43,20 +44,24 @@ Draw counts: 100 at n_train ≤ 50, 40 at 100–200, 15 at 500, 6 at 1,000, 3 at
   scheme on the winner → (C) concat top-2 blocks → (D) probe on the winner.
   No PLS in the candidate probes (supervised preprocessing = leak risk;
   every recipe here is unsupervised-preprocessing + a probe).
-- **Full-pool diagnostics** (block scoreboard, probe-choice grid,
-  true-vs-predicted): plain mean-pooled single-layer readouts only — never
-  the search's pooling-squeezed recipe, so a figure never conflates "which
-  layer" with "which pooling". Repeated out-of-fold CV over all 4,716 rows.
-- **Label-efficiency panel** — the search picks one recipe at one point
-  (1 comp, full pool); holding it fixed across every budget would be biased,
-  since the best normalizer is itself n_train-dependent. So every rung
-  scores a fixed panel (9 raw × {RidgeCV, OLS}, 7 embedding × {RidgeCV,
-  OLS}), the best per arm is *chosen* on a selection split and *reported* on
-  a disjoint held-out split. Single-split protocol, not CV — its full-pool
-  numbers are close to but not identical to the diagnostic above.
+- **Full-pool diagnostics and label efficiency** (block scoreboard,
+  probe-choice grid, true-vs-predicted, crossover): plain mean-pooled
+  single-layer readouts only — Projector, layer 2, layer 12 — never the
+  search's pooling-squeezed recipe. That squeeze is reported once, in
+  [Squeezing the winning block](#squeezing-the-winning-block); every other
+  figure keeps "embedding" nameable to a specific, generalizing layer.
+- **Label-efficiency test** — at each label budget on the ladder (10, 20,
+  50, ... up to all 4,716), raw input's best recipe is re-chosen fresh
+  (9 recipes × {RidgeCV, OLS} compared), since the best normalizer for raw
+  input changes with the label budget; each embedding layer instead uses one
+  fixed recipe (whitened, RidgeCV) at every budget, no re-choosing. Scored
+  on a held-out split kept separate from the one used to pick raw's recipe
+  — so its full-pool numbers are close to but not identical to the
+  CV-based diagnostic above.
 
-Every reported number is canary-checked (shuffled-label permutation must
-collapse to ≈0); all passed — see `label_probe_results.json`.
+Every reported number passed a leak check (re-running the same pipeline
+with labels randomly shuffled must score ≈0 — it did, every time); see
+`label_probe_results.json`.
 
 ## Baseline geometry
 
@@ -70,8 +75,8 @@ either (this pipeline always solves in float64).
 OLS agree to 0.0003 once whitened (0.8246 vs. 0.8243), vs. far apart
 unnormalized (0.410 vs. 0.403) or z-scored (0.763 vs. 0.593). It is the
 adopted normalizer everywhere below unless stated otherwise: label-free (no
-leak risk), and — per the [label-efficiency panel](#label-efficiency) — the
-right *amount* of whitening is itself n_train-dependent, not fixed.
+leak risk), and — per the [label-efficiency test](#label-efficiency) below
+— the right *amount* of whitening changes with the label budget, not fixed.
 
 ![Probe choice by normalizer: raw input, Projector, layer 2, layer 12 — RidgeCV vs. OLS, full pool](../code/eval_outputs/label_probe/run_2026-09-14/probe_comparison.png)
 
@@ -144,34 +149,34 @@ embedding layer.
 
 ### Label efficiency
 
-Honest per-rung selection (9 raw × {RidgeCV, OLS}, 7 embedding × {RidgeCV,
-OLS} on the search's winning recipe, best per arm chosen on a disjoint
-selection split). Median R² **[IQR]**.
+Raw: best recipe re-chosen at each label budget (9 recipes × {RidgeCV,
+OLS} compared, best picked on a held-out split). Each layer: one fixed
+recipe (whitened, RidgeCV), never re-chosen. Median R².
 
 **1 component**
 
-| n_train | Raw (best) | Embedding (best) |
-|---:|---|---|
-| 10 | +0.060 [−0.03, +0.14] · whiten32+ridgecv | −0.040 [−0.12, −0.00] · whiten+ols |
-| 20 | +0.227 [+0.10, +0.30] · whiten32+ridgecv | +0.011 [−0.05, +0.06] · whiten128+ridgecv |
-| 50 | +0.514 [+0.45, +0.57] · whiten32+ridgecv | +0.129 [+0.08, +0.18] · whiten128+ridgecv |
-| 100 | +0.647 [+0.62, +0.67] · whiten32+ridgecv | +0.260 [+0.23, +0.29] · whiten128+ridgecv |
-| 200 | +0.701 [+0.68, +0.72] · whiten32+ridgecv | +0.399 [+0.37, +0.43] · whiten128+ridgecv |
-| 500 | +0.774 [+0.77, +0.79] · whiten128+ridgecv | +0.675 [+0.65, +0.70] · standardize+ridgecv |
-| 1,000 | +0.810 [+0.81, +0.81] · whiten128+ridgecv | +0.737 [+0.72, +0.78] · standardize+ridgecv |
-| 2,000 | +0.824 [+0.82, +0.83] · whiten128+ridgecv | **+0.874** [+0.85, +0.88] · standardize+ridgecv |
-| 4,716 | +0.830 [+0.83, +0.83] · whiten128+ridgecv | **+0.895** [+0.89, +0.89] · standardize+ridgecv |
+| n_train | Raw (best) | Projector | Layer 2 | Layer 12 |
+|---:|---|---:|---:|---:|
+| 10 | +0.060 · whiten32+ridgecv | −0.030 | −0.039 | −0.035 |
+| 20 | +0.227 · whiten32+ridgecv | −0.007 | −0.004 | −0.009 |
+| 50 | +0.514 · whiten32+ridgecv | +0.052 | +0.051 | +0.033 |
+| 100 | +0.647 · whiten32+ridgecv | +0.130 | +0.117 | +0.089 |
+| 200 | +0.701 · whiten32+ridgecv | +0.269 | +0.253 | +0.200 |
+| 500 | +0.774 · whiten128+ridgecv | +0.566 | +0.545 | +0.429 |
+| 1,000 | +0.810 · whiten128+ridgecv | +0.765 | +0.737 | +0.582 |
+| 2,000 | +0.824 · whiten128+ridgecv | **+0.856** | +0.828 | +0.703 |
+| 4,716 | +0.830 · whiten128+ridgecv | **+0.885** | +0.864 | +0.775 |
 
-**2 components** — raw leads at every rung: +0.073 vs. −0.027 at n=10 to
-**+0.946 vs. 0.895** at full pool.
+**2 components** — raw leads at every label budget: 0.073 vs. best layer
+−0.032 at n=10, to **0.946 vs. 0.908** (layer 2) at the full pool.
 
-**3 components** — raw leads at every rung: +0.074 vs. −0.043 at n=10 to
-**+0.967 vs. 0.884** at full pool.
+**3 components** — raw leads at every label budget: 0.074 vs. best layer
+−0.038 at n=10, to **0.967 vs. 0.907** (layer 2) at the full pool.
 
-![Honest per-rung crossover: absolute R² and the embedding-minus-raw gap](../code/eval_outputs/label_probe/run_2026-09-14/crossover_panel.png)
+![Raw input vs. Projector, layer 2, layer 12 across the label-efficiency ladder](../code/eval_outputs/label_probe/run_2026-09-14/crossover_panel.png)
 
-At 1 component the embedding overtakes raw only past n_train ≈1,532 (raw
-≈0.82, embedding ≈0.87 there). At 2 and 3 components raw leads everywhere,
+At 1 component the Projector overtakes raw past n_train ≈1,539 (raw ≈0.82,
+Projector ≈0.86 there). At 2 and 3 components raw leads everywhere,
 including the full pool.
 
 ### True vs. predicted — full pool
@@ -181,22 +186,20 @@ including the full pool.
 Rows: component counts. Columns: raw whitened, raw z-scored, Projector,
 layer 2, layer 12 (all RidgeCV, all mean-pooled).
 
-Full numeric results (every block, every rung, per-draw scores):
+Full numeric results (every block, every label budget, every individual draw):
 [`label_probe_results.json`](../code/eval_outputs/label_probe/run_2026-09-14/label_probe_results.json),
 [`recipe_panel.json`](../code/eval_outputs/label_probe/run_2026-09-14/recipe_panel.json).
 
 ## What this means
 
-**At 1 component with labels in the thousands, the embedding wins** — 0.895
-vs. 0.830 (honest selection, full pool), or 0.873 vs. 0.825 (plain-layer
-diagnostic). Crossing at n_train ≈ 1,532.
+**At 1 component with labels in the thousands, the Projector wins** — 0.885
+vs. 0.830 (honest selection, full pool). Crossing at n_train ≈ 1,539.
 
 **At 2 and 3 components, raw wins everywhere measured**, from n_train=10 to
 the full pool.
 
 **Below n_train≈500, raw leads at every component count** — at n=100 the
-best raw recipe (0.647) is more than double the best embedding recipe
-(0.260).
+best raw recipe (0.647) is more than five times the best layer (0.130).
 
 **Summary: raw input is the stronger few-shot substrate wherever labels are
 scarce**; the embedding's advantage is confined to 1 component with labels
@@ -204,9 +207,11 @@ in the thousands.
 
 ## Recommendations
 
-1. **1 component, labels in the thousands → embedding** (Projector,
-   four-segment, standardized, RidgeCV — 0.895 at n=4,716, honest
-   selection). Above the ≈1,532 crossing the margin exceeds uncertainty.
+1. **1 component, labels in the thousands → embedding.** Best available
+   number: the searched recipe (Projector, four-segment, standardized,
+   RidgeCV — 0.919, [Squeezing the winning block](#squeezing-the-winning-block)).
+   Without that extra pooling search, plain Projector (whitened, RidgeCV)
+   still overtakes raw past the ≈1,539 crossing (0.885 vs. 0.830).
 2. **Everywhere else → raw input.** Pick the normalizer by budget from the
    panel (whitenK for small n, whitened/whiten128 near full pool) — no
    single normalizer is right everywhere.
@@ -232,10 +237,12 @@ cd code
 ```
 
 Writes `label_probe_results.json` (search + full-pool diagnostics) and
-`recipe_panel.json` (honest per-rung panel), plus every figure above.
+`recipe_panel.json` (the label-efficiency test), plus every figure above.
 `bank.npz` (~5.9 GB) is cached in `out_dir` and reused on rerun. Extraction:
-minutes. Search + full-pool diagnostics: tens of minutes. Honest panel (16
-recipes × 9 budgets, up to 100 draws at the smallest): several hours.
+minutes. Search + full-pool diagnostics: tens of minutes. Label-efficiency
+test (9 raw recipes searched + 3 layers at one fixed recipe, × 9 label
+budgets, up to 100 repeated draws at the smallest budgets): roughly an
+hour.
 
 Redraw figures without recomputing:
 
@@ -244,12 +251,19 @@ python3 -m eval.label_probe --plots_only eval_outputs/label_probe/<run_name>/lab
 python3 -m eval.label_probe --panel_plots_only eval_outputs/label_probe/<run_name>/recipe_panel.json
 ```
 
-### Comparing backbones
+### A different backbone
 
-Self-identifying runs (`meta.backbone`, auto-derived from the model class):
+The checkpoint above is a choice, not an assumption. Every number in this
+report comes from that one `--checkpoint`; re-run the same command with a
+different one and a fresh `--out_dir`, and nothing else changes — block
+names and depth are read from the model itself, so a backbone with a
+different layer count needs no edit.
+
+Runs are self-identifying (`meta.backbone`, auto-derived from the model
+class; `meta.checkpoint` alongside it), so any set of them lines up:
 
 ```bash
-python -m eval.label_probe.compare <run_dir_1> <run_dir_2> [-o out.html]
+python -m eval.label_probe.compare <run_dir_1> <run_dir_2> ... [-o out.html]
 ```
 
 Code: [`code/eval/label_probe/`](../code/eval/label_probe/) — fairseq-free,
