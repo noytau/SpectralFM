@@ -117,8 +117,16 @@
 <p>1. <strong>1 component, labels in the thousands → embedding.</strong> Best available number: the searched recipe (Projector, four-segment, standardized, RidgeCV — 0.919, <a href="#squeezing-the-winning-block">Squeezing the winning block</a>). Without that extra pooling search, plain Projector (whitened, RidgeCV) still overtakes raw past the ≈1,539 crossing (0.885 vs. 0.830). 2. <strong>Everywhere else → raw input.</strong> Pick the normalizer by budget from the panel (whitenK for small n, whitened/whiten128 near full pool) — no single normalizer is right everywhere. 3. <strong>Tap the Projector, not layer 12</strong> — 0.744 vs. 0.873 (whitened, 1 comp); this codebase's other eval tooling defaults to the weaker tap. 4. <strong>Prefer RidgeCV over OLS on the embedding side</strong> — OLS is consistently weaker at every normalizer, and can collapse entirely on a high-dimensional pooling-squeezed recipe (see <a href="#method">Method</a>). 5. <strong>Still untested:</strong> stratified/active label selection, a per-component-count recipe search (winner was searched at 1 comp, reused unchanged at 2–3), other checkpoints, distribution shift — this study is entirely in-distribution.</p>
 </section>
 <section><div class="sec-head"><span class="sec-num mono">09</span><h2>Reproducing this</h2></div>
+<p>Through <code>eval.runner</code> (folds into the shared eval report, alongside any other <code>--evals</code>; no <code>--data_source</code> needed):</p>
 <pre class="code"><code>cd code
-/mnt5/noy/miniconda3/envs/spectralfm_env/bin/python3 -m eval.label_probe \
+/mnt5/noy/miniconda3/envs/spectralfm_env/bin/python3 -m eval.runner \
+  --checkpoint_mode file \
+  --checkpoint_path /mnt5/noy/SpectralFM/checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt \
+  --evals label_probe \
+  --labeled_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \
+  --device cuda --output_dir eval_outputs</code></pre>
+<p>Or standalone, one label set at a time (what actually produced the numbers above):</p>
+<pre class="code"><code>/mnt5/noy/miniconda3/envs/spectralfm_env/bin/python3 -m eval.label_probe \
   --checkpoint /mnt5/noy/SpectralFM/checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt \
   --data /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \
   --out_dir eval_outputs/label_probe/&lt;run_name&gt; \
@@ -131,6 +139,8 @@ python3 -m eval.label_probe --panel_plots_only eval_outputs/label_probe/&lt;run_
 <p>The checkpoint above is a choice, not an assumption. Every number in this report comes from that one <code>--checkpoint</code>; re-run the same command with a different one and a fresh <code>--out_dir</code>, and nothing else changes — block names and depth are read from the model itself, so a backbone with a different layer count needs no edit.</p>
 <p>Runs are self-identifying (<code>meta.backbone</code>, auto-derived from the model class; <code>meta.checkpoint</code> alongside it), so any set of them lines up:</p>
 <pre class="code"><code>python -m eval.label_probe.compare &lt;run_dir_1&gt; &lt;run_dir_2&gt; ... [-o out.html]</code></pre>
+<h3>Multiple label sets, one backbone</h3>
+<p><code>--labeled_data_dir</code> (either entry point) accepts a directory of several labeled-data directories in place of one — each with its own <code>labels.tsv</code> — and probes every one of them in the same run, adding a cross-set comparison table to the report. Useful for checking a finding holds across different label definitions or subject subsets without a separate command per set.</p>
 <p>Code: <a href="../code/eval/label_probe/"><code>code/eval/label_probe/</code></a> — fairseq-free, tested (<code>pytest label_probe/tests/ --import-mode=importlib</code> from <code>code/eval/</code>).</p>
 </section>
 </div>

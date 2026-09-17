@@ -445,7 +445,8 @@ def replot_from_results(results_path: str, out_dir: str = None) -> str:
 
 
 def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
-              device: str = "cpu", comps_for_ladder=(1, 2, 3), seed: int = 42) -> dict:
+              device: str = "cpu", comps_for_ladder=(1, 2, 3), seed: int = 42,
+              model=None) -> dict:
     """The whole pipeline, one call, for any backbone: extract -> search for
     the best embedding recipe -> a full-pool probe-choice grid (every
     normalizer x {RidgeCV, OLS}, on raw input and on two named embedding
@@ -454,12 +455,19 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     label_probe_results.json + recipe_panel.json and every figure; both
     JSONs carry `meta.backbone` (auto-derived from the model class) so runs
     from different backbones can be told apart and compared later (see
-    compare.py)."""
+    compare.py).
+
+    `model`, when given, is used instead of loading `checkpoint_path` from
+    disk -- lets a caller that already holds a loaded model (e.g. eval.runner,
+    any checkpoint_mode including `hf`) reuse it. `checkpoint_path` is still
+    recorded for provenance; pass "" or a descriptive label when there is no
+    backing file."""
     from . import panel as pnl
 
     os.makedirs(out_dir, exist_ok=True)
     bank_path = ro.build_bank_cache(checkpoint_path, labeled_data_dir, out_dir,
-                                     comps=tuple(range(3)), device=device, seed=seed)
+                                     comps=tuple(range(3)), device=device, seed=seed,
+                                     model=model)
     bank, input_raw, input_z, y, meta = ro.load_bank_cache(bank_path)
     print(f"[label_probe] bank loaded: n={len(y)}, "
           f"backbone={meta.get('backbone')}, stages={list(bank)}", flush=True)

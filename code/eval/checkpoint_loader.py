@@ -238,13 +238,10 @@ class CheckpointLoader:
         return model
 
     @staticmethod
-    def from_dir(checkpoint_dir: str, prefer: str = "best", arch: str = "conv1d"):
-        """
-        Load from a directory containing checkpoints.
-        prefer: 'best'   → checkpoint_best.pt
-                'last'   → checkpoint_last.pt
-                'latest' → highest-numbered checkpoint_N.pt
-        """
+    def resolve_dir_checkpoint(checkpoint_dir: str, prefer: str = "best") -> str:
+        """Same selection `from_dir` loads, returned as a path rather than a
+        loaded model -- for callers (e.g. label_probe) that want the file
+        itself, not a model built with this package's own architecture."""
         if not os.path.isdir(checkpoint_dir):
             raise NotADirectoryError(f"Not a directory: {checkpoint_dir}")
 
@@ -252,26 +249,47 @@ class CheckpointLoader:
             "best": os.path.join(checkpoint_dir, "checkpoint_best.pt"),
             "last": os.path.join(checkpoint_dir, "checkpoint_last.pt"),
         }
-
         if prefer in ("best", "last") and os.path.isfile(candidates[prefer]):
-            return CheckpointLoader.from_file(candidates[prefer], arch=arch)
+            return candidates[prefer]
 
-        # Fall back to highest-numbered checkpoint
         numbered = sorted(
             glob.glob(os.path.join(checkpoint_dir, "checkpoint[0-9]*.pt")),
             key=lambda p: int("".join(filter(str.isdigit, os.path.basename(p))) or "0"),
         )
         if numbered:
-            print(f"[CheckpointLoader] Using latest numbered checkpoint: {numbered[-1]}")
-            return CheckpointLoader.from_file(numbered[-1], arch=arch)
+            return numbered[-1]
 
-        # Last resort: any .pt file
         any_pt = glob.glob(os.path.join(checkpoint_dir, "*.pt"))
         if any_pt:
-            print(f"[CheckpointLoader] Using fallback checkpoint: {any_pt[0]}")
-            return CheckpointLoader.from_file(any_pt[0], arch=arch)
+            return any_pt[0]
 
         raise FileNotFoundError(f"No checkpoint found in: {checkpoint_dir}")
+
+    @staticmethod
+    def from_dir(checkpoint_dir: str, prefer: str = "best", arch: str = "conv1d"):
+        """
+        Load from a directory containing checkpoints.
+        prefer: 'best'   → checkpoint_best.pt
+                'last'   → checkpoint_last.pt
+                'latest' → highest-numbered checkpoint_N.pt
+        """
+        path = CheckpointLoader.resolve_dir_checkpoint(checkpoint_dir, prefer=prefer)
+        print(f"[CheckpointLoader] Using checkpoint: {path}")
+        return CheckpointLoader.from_file(path, arch=arch)
+
+    @staticmethod
+    def resolve_multiple_paths(source, pattern: str = "checkpoint*.pt") -> list:
+        """The path list `load_multiple` would load, without loading any of
+        them -- for a caller that wants to run its own loader per checkpoint
+        (e.g. label_probe, one run per backbone)."""
+        if isinstance(source, (list, tuple)):
+            return list(source)
+        if os.path.isdir(source):
+            paths = sorted(glob.glob(os.path.join(source, pattern)))
+            if not paths:
+                raise FileNotFoundError(f"No files matching '{pattern}' in {source}")
+            return paths
+        raise ValueError(f"source must be a directory path or list of file paths, got: {source}")
 
     @staticmethod
     def load_multiple(
@@ -289,14 +307,7 @@ class CheckpointLoader:
         """
         import copy
 
-        if isinstance(source, (list, tuple)):
-            paths = source
-        elif os.path.isdir(source):
-            paths = sorted(glob.glob(os.path.join(source, pattern)))
-            if not paths:
-                raise FileNotFoundError(f"No files matching '{pattern}' in {source}")
-        else:
-            raise ValueError(f"source must be a directory path or list of file paths, got: {source}")
+        paths = CheckpointLoader.resolve_multiple_paths(source, pattern=pattern)
 
         # Load HF base model once — reuse a deep copy per checkpoint
         print(f"[CheckpointLoader] Loading HF base model (once for all {len(paths)} checkpoints)...")

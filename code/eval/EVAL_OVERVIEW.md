@@ -329,9 +329,34 @@ pool. `code/eval/label_probe/` answers it properly: every pipeline block, a sear
 over pooling/normalizer/probe, and a label-efficiency ladder down to n_train=10.
 Findings: [`docs/LABEL_REGRESSION_FINDINGS.md`](../../docs/LABEL_REGRESSION_FINDINGS.md).
 
-It is a separate entry point, not a `--evals` method, and is backbone-general — it
-reads `hidden_states` from any HF-style Transformer, so the number and naming of
-blocks come from the model itself, never a hardcoded layer count.
+It is backbone-general — it reads `hidden_states` from any HF-style Transformer, so
+the number and naming of blocks come from the model itself, never a hardcoded layer
+count — and is available two ways:
+
+**Through the runner** (`--evals label_probe`), one command alongside any other eval,
+no `--data_source` needed:
+
+```bash
+python -m eval.runner \
+  --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <labeled_data_dir> \
+  --device cuda --output_dir eval_outputs
+```
+
+**Swapping the backbone** is just a different `--checkpoint_path` / `--checkpoint_mode`
+(including `hf`) — nothing else changes.
+
+**Multiple label sets in one run:** point `--labeled_data_dir` at a directory
+*of* labeled-data directories (each with its own `labels.tsv`) instead of one --
+the whole study runs once per subfolder, and the report gets a cross-set
+comparison table on top. This is for several label sets on the *same* backbone; to
+line up several *backbones*, run once per checkpoint and use `compare.py` below.
+
+Results land under `<output_dir>/label_probe/<label_set_name>/` and are folded into
+`eval_report.html`/`eval_report.md` alongside the run's other evals.
+
+**Standalone** (no runner, one label set, one backbone — same underlying
+`study.run_study`):
 
 ```bash
 python -m eval.label_probe \
@@ -339,10 +364,8 @@ python -m eval.label_probe \
   [--device cuda] [--comps 1 2 3]
 ```
 
-**Running it on a different backbone** is exactly this command with a new
-`--checkpoint` and a fresh `--out_dir` — nothing else changes. Each run records its
-own `meta.backbone` and `meta.checkpoint`, so runs stay self-identifying and can be
-lined up afterwards:
+Either way, each run records its own `meta.backbone` and `meta.checkpoint`, so runs
+stay self-identifying and can be lined up afterwards:
 
 ```bash
 python -m eval.label_probe.compare <out_dir_1> <out_dir_2> ... [-o compare.html]

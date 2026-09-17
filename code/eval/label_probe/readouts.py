@@ -158,11 +158,16 @@ def extract_bank(model, signals_z: np.ndarray, device: str = "cuda",
 def build_bank_cache(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
                       comps: tuple = tuple(range(12)), max_samples: int = 5000,
                       device: str = "cuda", batch_size: int = 64,
-                      seed: int = 42) -> str:
-    """One GPU pass -> <out_dir>/bank.npz. Idempotent."""
+                      seed: int = 42, model=None) -> str:
+    """One GPU pass -> <out_dir>/bank.npz. Idempotent.
+
+    `model`, when given, is used as-is instead of loading `checkpoint_path`
+    -- lets a caller that already holds a loaded model (any checkpoint_mode,
+    including `hf`) reuse it instead of re-reading the file. `checkpoint_path`
+    is still recorded in `_meta` either way, purely for provenance display;
+    pass "" or a descriptive name if there is no backing file (e.g. `hf`)."""
     import time
 
-    from ..checkpoint_loader import CheckpointLoader
     from ..data_loader import load_labeled_data
     from . import features as feat
 
@@ -180,7 +185,9 @@ def build_bank_cache(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     flat_raw = raw.reshape(n * k, L).astype(np.float32)
     flat_z = feat.normalize_like_fairseq(flat_raw)
 
-    model = CheckpointLoader.from_file(checkpoint_path)
+    if model is None:
+        from ..checkpoint_loader import CheckpointLoader
+        model = CheckpointLoader.from_file(checkpoint_path)
     backbone = _backbone_name(model)
     t0 = time.time()
     bank = extract_bank(model, flat_z, device=device, batch_size=batch_size)

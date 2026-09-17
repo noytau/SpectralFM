@@ -227,8 +227,22 @@ in the thousands.
 
 ## Reproducing this
 
+Through `eval.runner` (folds into the shared eval report, alongside any other
+`--evals`; no `--data_source` needed):
+
 ```bash
 cd code
+/mnt5/noy/miniconda3/envs/spectralfm_env/bin/python3 -m eval.runner \
+  --checkpoint_mode file \
+  --checkpoint_path /mnt5/noy/SpectralFM/checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt \
+  --evals label_probe \
+  --labeled_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \
+  --device cuda --output_dir eval_outputs
+```
+
+Or standalone, one label set at a time (what actually produced the numbers above):
+
+```bash
 /mnt5/noy/miniconda3/envs/spectralfm_env/bin/python3 -m eval.label_probe \
   --checkpoint /mnt5/noy/SpectralFM/checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt \
   --data /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \
@@ -265,6 +279,14 @@ class; `meta.checkpoint` alongside it), so any set of them lines up:
 ```bash
 python -m eval.label_probe.compare <run_dir_1> <run_dir_2> ... [-o out.html]
 ```
+
+### Multiple label sets, one backbone
+
+`--labeled_data_dir` (either entry point) accepts a directory of several
+labeled-data directories in place of one — each with its own `labels.tsv` —
+and probes every one of them in the same run, adding a cross-set comparison
+table to the report. Useful for checking a finding holds across different
+label definitions or subject subsets without a separate command per set.
 
 Code: [`code/eval/label_probe/`](../code/eval/label_probe/) — fairseq-free,
 tested (`pytest label_probe/tests/ --import-mode=importlib` from
