@@ -322,6 +322,62 @@ Raw channels are concatenated; embeddings are extracted per component then conca
 - **Figures:** `label_reg_true_vs_pred[_<ckpt>].png` — true-vs-predicted scatter per probe;
   `label_regression_comparison.png` — R² + ΔR² bars across checkpoints.
 
+#### Going deeper — the `label_probe/` study
+
+The eval above answers "embedding or raw?" with one fixed recipe at the full label
+pool. `code/eval/label_probe/` answers it properly: every pipeline block, a search
+over pooling/normalizer/probe, and a label-efficiency ladder down to n_train=10.
+Findings: [`docs/LABEL_REGRESSION_FINDINGS.md`](../../docs/LABEL_REGRESSION_FINDINGS.md).
+
+It is backbone-general — it reads `hidden_states` from any HF-style Transformer, so
+the number and naming of blocks come from the model itself, never a hardcoded layer
+count — and is available two ways:
+
+**Through the runner** (`--evals label_probe`), one command alongside any other eval,
+no `--data_source` needed:
+
+```bash
+python -m eval.runner \
+  --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <labeled_data_dir> \
+  --device cuda --output_dir eval_outputs
+```
+
+**Swapping the backbone** is just a different `--checkpoint_path` / `--checkpoint_mode`
+(including `hf`) — nothing else changes.
+
+**Multiple label sets in one run:** point `--labeled_data_dir` at a parent
+directory instead of one label set -- every directory found under it with its
+own `labels.tsv` is treated as a label set, **at any nesting depth**
+(`campaign1/site_A/labels.tsv` works, not just one level down), and the whole
+study runs once per set with a cross-set comparison table added on top. This
+is for several label sets on the *same* backbone; to line up several
+*backbones*, run once per checkpoint and use `compare.py` below.
+
+Results land under `<output_dir>/label_probe/<label_set_name>/` and are folded into
+`eval_report.html`/`eval_report.md` alongside the run's other evals.
+
+**Standalone** (no runner, one label set, one backbone — same underlying
+`study.run_study`):
+
+```bash
+python -m eval.label_probe \
+  --checkpoint <ckpt> --data <labeled_data_dir> --out_dir <dir> \
+  [--device cuda] [--comps 1 2 3]
+```
+
+Either way, each run records its own `meta.backbone` and `meta.checkpoint`, so runs
+stay self-identifying and can be lined up afterwards:
+
+```bash
+python -m eval.label_probe.compare <out_dir_1> <out_dir_2> ... [-o compare.html]
+```
+
+Outputs per run: `label_probe_results.json` (search + full-pool diagnostics),
+`recipe_panel.json` (label-efficiency ladder), five figures, and a cached
+`bank.npz` (~6 GB, gitignored, reused on rerun). A tables-only HTML view of one run:
+`python -m eval.label_probe.tables_report <out_dir> -o data.html`.
+
 ### 6. `structured_similarity` — canonical 100-sample panel
 
 **Question:** How does similarity structure evolve through the pipeline stages?

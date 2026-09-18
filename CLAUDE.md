@@ -37,6 +37,7 @@ thing, read `code/eval/EVAL_OVERVIEW.md` (eval) or `ARCHITECTURE.md`
 | [`code/docs/RECON_2AE_BASEMERGE.md`](code/docs/RECON_2AE_BASEMERGE.md) | Design rationale and API surface for the per-component init/freeze/composite-optimizer machinery — merged and current (also see the HTML version). |
 | **Evaluation** | |
 | [`code/eval/EVAL_OVERVIEW.md`](code/eval/EVAL_OVERVIEW.md) | **The single eval doc** — installation, running it, all 7 methods, checkpoint formats, examples. `code/eval/README.md` is a one-paragraph pointer to this file, kept only because GitHub renders it by default when browsing the folder. |
+| [`docs/LABEL_REGRESSION_FINDINGS.md`](docs/LABEL_REGRESSION_FINDINGS.md) | Findings on few-shot label regression over the embedding vs. raw input, using `code/eval/label_probe/`, with an honest per-label-budget recipe selection (not a single fixed recipe held across the whole ladder). **Current answer: raw input beats the embedding at every label budget tested at 2–3 components; at 1-component the embedding only overtakes raw input once n_train passes ≈1,500, not in the few-shot regime.** Read this before doing any further label-regression or few-shot-probe work. |
 | **Reference / provenance** | |
 | [`code/README.md`](code/README.md) | One-line project tagline (oldest doc in the repo). |
 | [`fairseq/examples/data2vec/README.md`](fairseq/examples/data2vec/README.md) | Upstream fairseq data2vec docs (not SpectralFM-specific — background reading on the base architecture). |
@@ -204,6 +205,16 @@ python -m eval.runner \
   --evals embedding_similarity signal_completion noise_robustness \
   --output_dir /mnt5/noy/code/eval_outputs/baseline/
 ```
+
+**Label regression / few-shot probe** (`code/eval/label_probe/`, works on
+any HF-style Transformer backbone): does a frozen embedding beat raw input?
+Findings: `docs/LABEL_REGRESSION_FINDINGS.md`.
+```bash
+python -m eval.label_probe \
+  --checkpoint <path> --data <labeled_data_dir> --out_dir <dir> [--device cuda]
+```
+Comparing a second backbone: rerun with a new `--checkpoint`/`--out_dir`, then
+`python -m eval.label_probe.compare <out_dir_1> <out_dir_2>`.
 
 ---
 
