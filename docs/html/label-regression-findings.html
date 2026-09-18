@@ -140,7 +140,7 @@ python3 -m eval.label_probe --panel_plots_only eval_outputs/label_probe/&lt;run_
 <p>Runs are self-identifying (<code>meta.backbone</code>, auto-derived from the model class; <code>meta.checkpoint</code> alongside it), so any set of them lines up:</p>
 <pre class="code"><code>python -m eval.label_probe.compare &lt;run_dir_1&gt; &lt;run_dir_2&gt; ... [-o out.html]</code></pre>
 <h3>Multiple label sets, one backbone</h3>
-<p><code>--labeled_data_dir</code> (either entry point) accepts a directory of several labeled-data directories in place of one — each with its own <code>labels.tsv</code> — and probes every one of them in the same run, adding a cross-set comparison table to the report. Useful for checking a finding holds across different label definitions or subject subsets without a separate command per set.</p>
+<p>Through <code>eval.runner</code> only (not the standalone entry point): point <code>--labeled_data_dir</code> at a parent directory instead of one label set. Every directory under it with its own <code>labels.tsv</code> is probed, <strong>at any nesting depth</strong> — e.g. <code>campaign1/site_A/labels.tsv</code> and <code>campaign2/sub/site_C/labels.tsv</code> in the same tree both get found and run — adding a cross-set comparison table to the report. Useful for checking a finding holds across different label definitions or subject subsets without a separate command per set.</p>
 <p>Code: <a href="../code/eval/label_probe/"><code>code/eval/label_probe/</code></a> — fairseq-free, tested (<code>pytest label_probe/tests/ --import-mode=importlib</code> from <code>code/eval/</code>).</p>
 </section>
 </div>

@@ -346,11 +346,13 @@ python -m eval.runner \
 **Swapping the backbone** is just a different `--checkpoint_path` / `--checkpoint_mode`
 (including `hf`) — nothing else changes.
 
-**Multiple label sets in one run:** point `--labeled_data_dir` at a directory
-*of* labeled-data directories (each with its own `labels.tsv`) instead of one --
-the whole study runs once per subfolder, and the report gets a cross-set
-comparison table on top. This is for several label sets on the *same* backbone; to
-line up several *backbones*, run once per checkpoint and use `compare.py` below.
+**Multiple label sets in one run:** point `--labeled_data_dir` at a parent
+directory instead of one label set -- every directory found under it with its
+own `labels.tsv` is treated as a label set, **at any nesting depth**
+(`campaign1/site_A/labels.tsv` works, not just one level down), and the whole
+study runs once per set with a cross-set comparison table added on top. This
+is for several label sets on the *same* backbone; to line up several
+*backbones*, run once per checkpoint and use `compare.py` below.
 
 Results land under `<output_dir>/label_probe/<label_set_name>/` and are folded into
 `eval_report.html`/`eval_report.md` alongside the run's other evals.

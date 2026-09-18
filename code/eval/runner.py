@@ -70,10 +70,11 @@ USAGE MODES
 
    Swapping the backbone is just a different --checkpoint_path/--checkpoint_mode —
    block names and depth come from the model's own hidden_states, not a hardcoded
-   layer count. Point --labeled_data_dir at a directory of several label-set
-   subfolders (each with its own labels.tsv) instead of one, and every subfolder
-   is probed in this same run, with a cross-set comparison table added to the
-   report — no separate flag, no separate command per label set.
+   layer count. Point --labeled_data_dir at a parent directory instead of one
+   label set, and every directory found under it with its own labels.tsv is
+   probed in this same run -- AT ANY NESTING DEPTH (e.g. campaign1/site_A/,
+   not just one level down) -- with a cross-set comparison table added to the
+   report. No separate flag, no separate command per label set.
 
 Python API:
     runner = EvalRunner(EvalConfig(...))
@@ -113,21 +114,30 @@ EVAL_TYPES = [
 
 def resolve_label_sets(labeled_data_dir: Optional[str]) -> dict:
     """labeled_data_dir for label_probe is either ONE label set (it has
-    labels.tsv directly) or a PARENT of several (subfolders that each have
-    their own labels.tsv) -- so sweeping several label sets in one run is
-    just pointing at a different kind of folder, no separate flag needed.
-    Returns {name: path}, name taken from the folder itself or each
-    subfolder; empty dict if labeled_data_dir doesn't qualify as either."""
+    labels.tsv directly) or a PARENT of several -- at ANY nesting depth, not
+    just one level down, since real label trees group sets under campaign/
+    site/whatever folders of their own. A label set is any directory with a
+    labels.tsv; once one is found, its own subtree is not searched further
+    (a label set is a leaf -- a labels.tsv nested inside another label set's
+    directory is data for that set, e.g. under wav/, not a second set).
+
+    Returns {name: path}, name = the relative path from labeled_data_dir
+    with '/' separators (e.g. "campaign1/site_A"), or just the folder's own
+    basename for the single-set case. Empty dict if labeled_data_dir doesn't
+    qualify as either (missing, or no labels.tsv anywhere under it)."""
     if not labeled_data_dir or not os.path.isdir(labeled_data_dir):
         return {}
     if os.path.isfile(os.path.join(labeled_data_dir, "labels.tsv")):
         return {os.path.basename(labeled_data_dir.rstrip("/")) or labeled_data_dir: labeled_data_dir}
     sets = {}
-    for name in sorted(os.listdir(labeled_data_dir)):
-        sub = os.path.join(labeled_data_dir, name)
-        if os.path.isdir(sub) and os.path.isfile(os.path.join(sub, "labels.tsv")):
-            sets[name] = sub
-    return sets
+    for root, dirnames, filenames in os.walk(labeled_data_dir):
+        if "labels.tsv" in filenames:
+            name = os.path.relpath(root, labeled_data_dir).replace(os.sep, "/")
+            sets[name] = root
+            dirnames[:] = []  # leaf found -- don't descend into it looking for more
+        else:
+            dirnames.sort()  # deterministic traversal order
+    return dict(sorted(sets.items()))
 
 # ── E4: multi-dataset evaluation ───────────────────────────────────────────────
 # alias → (nova_data subdir, manifest split, default sample count)
@@ -296,8 +306,9 @@ class EvalRunner:
         label_sets = resolve_label_sets(cfg.labeled_data_dir)
         if not label_sets:
             print(f"[EvalRunner] label_probe requires labeled_data_dir with a "
-                  f"labels.tsv, or a parent directory of subfolders that each "
-                  f"have one (got: {cfg.labeled_data_dir!r}). Skipping.")
+                  f"labels.tsv, or a parent directory with one or more label "
+                  f"sets nested under it at any depth (got: "
+                  f"{cfg.labeled_data_dir!r}). Skipping.")
             return {}
         base_out = cfg.label_probe_out_dir or os.path.join(cfg.output_dir, "label_probe")
         checkpoint_label = self._checkpoint_label()
@@ -707,8 +718,9 @@ def main():
     parser.add_argument("--nova_data_dir", default=None, help="nova_data/ root for structured similarity")
     parser.add_argument("--labeled_data_dir", default=None,
                         help="For label_regression and label_probe: a directory with labels.tsv, "
-                             "OR (label_probe only) a parent directory of several such "
-                             "directories -- one label set per subfolder, all probed in this run.")
+                             "OR (label_probe only) a parent directory containing one or more "
+                             "such directories nested at ANY depth -- every one found is probed "
+                             "in this run.")
     parser.add_argument("--label_probe_out_dir", default=None,
                         help="label_probe output root (default: <output_dir>/label_probe); "
                              "one subfolder per label set.")

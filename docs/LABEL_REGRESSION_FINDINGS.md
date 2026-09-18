@@ -282,9 +282,11 @@ python -m eval.label_probe.compare <run_dir_1> <run_dir_2> ... [-o out.html]
 
 ### Multiple label sets, one backbone
 
-`--labeled_data_dir` (either entry point) accepts a directory of several
-labeled-data directories in place of one — each with its own `labels.tsv` —
-and probes every one of them in the same run, adding a cross-set comparison
+Through `eval.runner` only (not the standalone entry point): point
+`--labeled_data_dir` at a parent directory instead of one label set. Every
+directory under it with its own `labels.tsv` is probed, **at any nesting
+depth** — e.g. `campaign1/site_A/labels.tsv` and `campaign2/sub/site_C/labels.tsv`
+in the same tree both get found and run — adding a cross-set comparison
 table to the report. Useful for checking a finding holds across different
 label definitions or subject subsets without a separate command per set.
 
