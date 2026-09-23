@@ -102,6 +102,9 @@ from .evaluations import (
     LabelRegressionEval,
 )
 from .label_probe import study as label_probe_study
+# Shared with merge_label_sets.py, which cannot import it from here (that
+# would be circular: this module already imports from label_probe).
+from .label_probe.label_sets import resolve_label_sets
 from .report import generate_report
 
 
@@ -110,34 +113,6 @@ EVAL_TYPES = [
     "checkpoint_comparison", "clustering", "label_regression",
     "structured_similarity", "label_probe",
 ]
-
-
-def resolve_label_sets(labeled_data_dir: Optional[str]) -> dict:
-    """labeled_data_dir for label_probe is either ONE label set (it has
-    labels.tsv directly) or a PARENT of several -- at ANY nesting depth, not
-    just one level down, since real label trees group sets under campaign/
-    site/whatever folders of their own. A label set is any directory with a
-    labels.tsv; once one is found, its own subtree is not searched further
-    (a label set is a leaf -- a labels.tsv nested inside another label set's
-    directory is data for that set, e.g. under wav/, not a second set).
-
-    Returns {name: path}, name = the relative path from labeled_data_dir
-    with '/' separators (e.g. "campaign1/site_A"), or just the folder's own
-    basename for the single-set case. Empty dict if labeled_data_dir doesn't
-    qualify as either (missing, or no labels.tsv anywhere under it)."""
-    if not labeled_data_dir or not os.path.isdir(labeled_data_dir):
-        return {}
-    if os.path.isfile(os.path.join(labeled_data_dir, "labels.tsv")):
-        return {os.path.basename(labeled_data_dir.rstrip("/")) or labeled_data_dir: labeled_data_dir}
-    sets = {}
-    for root, dirnames, filenames in os.walk(labeled_data_dir):
-        if "labels.tsv" in filenames:
-            name = os.path.relpath(root, labeled_data_dir).replace(os.sep, "/")
-            sets[name] = root
-            dirnames[:] = []  # leaf found -- don't descend into it looking for more
-        else:
-            dirnames.sort()  # deterministic traversal order
-    return dict(sorted(sets.items()))
 
 # ── E4: multi-dataset evaluation ───────────────────────────────────────────────
 # alias → (nova_data subdir, manifest split, default sample count)
@@ -318,10 +293,18 @@ class EvalRunner:
             print(f"\n[EvalRunner] Running: label_probe on {name!r}"
                  f"{f' ({n} label sets total)' if n > 1 else ''}")
             out_dir = os.path.join(base_out, name)
-            results = label_probe_study.run_study(
-                checkpoint_path=checkpoint_label, labeled_data_dir=path, out_dir=out_dir,
-                device=cfg.device, comps_for_ladder=tuple(cfg.label_probe_comps),
-                seed=cfg.label_probe_seed, model=model)
+            try:
+                results = label_probe_study.run_study(
+                    checkpoint_path=checkpoint_label, labeled_data_dir=path, out_dir=out_dir,
+                    device=cfg.device, comps_for_ladder=tuple(cfg.label_probe_comps),
+                    seed=cfg.label_probe_seed, model=model)
+            except (RuntimeError, ValueError, FileNotFoundError) as e:
+                # One malformed/too-thin label set (e.g. too few spectra with
+                # the requested components once NaN rows are filtered out)
+                # must not abort a sweep across many -- report it and move on.
+                print(f"[EvalRunner] label_probe on {name!r} failed: {e}")
+                out[f"label_probe_{name}"] = {"skipped": True, "error": str(e)}
+                continue
             out[f"label_probe_{name}"] = {"out_dir": out_dir, "meta": results.get("meta", {})}
         return out
 

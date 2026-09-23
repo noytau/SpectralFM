@@ -461,12 +461,20 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     disk -- lets a caller that already holds a loaded model (e.g. eval.runner,
     any checkpoint_mode including `hf`) reuse it. `checkpoint_path` is still
     recorded for provenance; pass "" or a descriptive label when there is no
-    backing file."""
+    backing file.
+
+    Extraction pulls exactly as many raw components as the largest requested
+    n_comp needs (comps_for_ladder=(1,) only ever touches component 0) --
+    NOT a fixed 3, since `load_labeled_data` keeps only spectra that have
+    EVERY requested component, and requiring components a dataset doesn't
+    consistently have silently shrinks N (or empties it to zero on a
+    dataset with no multi-component spectra at all)."""
     from . import panel as pnl
 
     os.makedirs(out_dir, exist_ok=True)
+    extract_comps = tuple(range(max(comps_for_ladder)))
     bank_path = ro.build_bank_cache(checkpoint_path, labeled_data_dir, out_dir,
-                                     comps=tuple(range(3)), device=device, seed=seed,
+                                     comps=extract_comps, device=device, seed=seed,
                                      model=model)
     bank, input_raw, input_z, y, meta = ro.load_bank_cache(bank_path)
     print(f"[label_probe] bank loaded: n={len(y)}, "

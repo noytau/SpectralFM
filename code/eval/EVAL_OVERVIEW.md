@@ -378,6 +378,35 @@ Outputs per run: `label_probe_results.json` (search + full-pool diagnostics),
 `bank.npz` (~6 GB, gitignored, reused on rerun). A tables-only HTML view of one run:
 `python -m eval.label_probe.tables_report <out_dir> -o data.html`.
 
+**A directory of separate datasets, run both ways** (e.g. several
+`datasetNNNN/` folders, each with its own `labels.tsv`). Component count
+(`--label_probe_comps`) should be picked to match what every dataset in the
+tree actually has: `load_labeled_data` keeps only spectra with ALL requested
+raw components present, so requesting more than a thin dataset supports
+silently shrinks it (or empties it to zero) -- `--label_probe_comps 1` is
+the safe default whenever coverage is uneven across the tree, since comp0 is
+normally the one component every spectrum has:
+
+```bash
+# each dataset alone -- one run per subfolder + a cross-set comparison table
+python -m eval.runner --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <parent_dir> \
+  --label_probe_comps 1 --device cuda
+
+# all of them pooled into one study instead -- merge first (symlinks the
+# wavs, concatenates labels.tsv; datasets never collide by filename since
+# each embeds its own numeric id), then point at the merge like any single
+# label set
+python -m eval.label_probe.merge_label_sets <parent_dir> <merged_dir>
+python -m eval.runner --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <merged_dir> \
+  --label_probe_comps 1 --device cuda
+```
+
+`resolve_label_sets` (`eval/label_probe/label_sets.py`) silently skips any
+directory with no `labels.tsv`, or an empty one -- both mean "nothing to
+probe here yet" rather than an error.
+
 ### 6. `structured_similarity` — canonical 100-sample panel
 
 **Question:** How does similarity structure evolve through the pipeline stages?
