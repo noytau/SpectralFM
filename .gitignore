@@ -68,6 +68,17 @@ fairseq/base_libri_960h.pt
 # multi-GB, not a result — never commit)
 code/eval_outputs/label_probe/*/bank.npz
 
+# Exploratory label_probe runs (e.g. eval.runner --evals label_probe sweeps
+# over external label sets) and their merged input trees (thousands of
+# symlinks + a bank.npz per set) — reproducible from the source data, never
+# committed. The curated original study's outputs under
+# code/eval_outputs/label_probe/run_*/ are unaffected by this and stay
+# tracked as before.
+code/eval_outputs/label_probe_inputs/
+code/eval_outputs/label_probe_regression/
+code/eval_outputs/label_probe_regression_merged/
+code/eval_outputs/label_probe_smoke/
+
 # Local working notes (rolling-status / daily-log skills) — never commit
 rolling_status.md
 rolling_status.html

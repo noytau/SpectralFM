@@ -100,7 +100,8 @@ def build(run_dirs: list, title: str = "Run comparison") -> str:
                 rows.append([_e(label), "—", "—", "—", "—"])
                 continue
             fp = by_comp["full_pool"]
-            raw = next((v for k, v in fp.items() if "raw input (whitened)" in k), None)
+            raws = [v for k, v in fp.items() if k.startswith("raw input")]
+            raw = max(raws, key=lambda v: v["r2_mean"]) if raws else None
             embs = [v for k, v in fp.items() if k.startswith("embedding")]
             emb = max(embs, key=lambda v: v["r2_mean"]) if embs else None
             raw_r2 = _pm(raw["r2_mean"], raw["r2_bootstrap_sd"]) if raw else "—"
