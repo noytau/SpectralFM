@@ -403,14 +403,21 @@ def _write_figures(all_results: dict, out_dir: str, cells_all: dict = None) -> N
 
     search = all_results.get("embedding_search", {})
     if search.get("stage_scores"):
-        raw_ref = None
+        # Best of the two raw normalizers, not always whitened -- which one
+        # wins is dataset-dependent (see compare.py's own fix for the same
+        # bug), so a fixed "whitened" reference silently understates raw
+        # input on any dataset where z-scored actually wins.
+        raw_ref = raw_ref_sd = raw_ref_norm = None
         for label, v in by_n_comp[first_comp]["full_pool"].items():
-            if "raw input (whitened)" in label:
-                raw_ref = v["r2_mean"]
+            if label.startswith("raw input") and (raw_ref is None or v["r2_mean"] > raw_ref):
+                raw_ref, raw_ref_sd = v["r2_mean"], v.get("r2_bootstrap_sd")
+                raw_ref_norm = "z-scored" if "z-scored" in label else "whitened"
         searched_comp = search.get("n_comp_searched", int(first_comp))
         plots.plot_depth_profile(search["stage_scores"],
                                   os.path.join(out_dir, "depth_profile.png"),
                                   raw_reference=raw_ref,
+                                  raw_reference_sd=raw_ref_sd,
+                                  raw_reference_label=raw_ref_norm or "whitened",
                                   display_name=ro.stage_display_name,
                                   n_comp=searched_comp, n_samples=n_samples,
                                   n_repeats=SCREEN_REPEATS)

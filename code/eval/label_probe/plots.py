@@ -187,6 +187,8 @@ def _crossing_n(ns, gaps):
 
 def plot_depth_profile(stage_scores: dict, output_path: str,
                         raw_reference: float = None,
+                        raw_reference_sd: float = None,
+                        raw_reference_label: str = "whitened",
                         display_name=None, n_comp: int = 1,
                         n_samples: int = None, n_repeats: int = None) -> str:
     """
@@ -195,6 +197,13 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
     Error bars are the split-assignment SD across repeated shuffled 5-fold
     splits -- the uncertainty that decides whether one block really beats
     the next one on this data.
+
+    `raw_reference` is the raw-input dashed line: the caller picks it as the
+    BEST of the whitened/z-scored full-pool scores (not always whitened --
+    which normalizer wins depends on the dataset), and `raw_reference_sd`
+    is that same recipe's bootstrap SD, shown as a shaded band and in the
+    line's own label so the comparison against each block carries its
+    uncertainty too, not just a bare number.
     """
     n_txt = f", n={n_samples:,}" if n_samples else ""
     rep_txt = f"{n_repeats} repeated 5-fold splits; " if n_repeats else ""
@@ -235,8 +244,12 @@ def plot_depth_profile(stage_scores: dict, output_path: str,
                     elinewidth=1.2, capsize=3, ecolor=_PALETTE[i])
 
     if raw_reference is not None:
+        if raw_reference_sd:
+            ax.axhspan(raw_reference - raw_reference_sd, raw_reference + raw_reference_sd,
+                       color=_INK_2, alpha=0.08, zorder=1, linewidth=0)
         ax.axhline(raw_reference, color=_INK_2, linestyle="--", linewidth=1.2, zorder=2)
-        ax.annotate(f"whitened raw input · {raw_reference:.3f}",
+        sd_txt = f" ±{raw_reference_sd:.3f}" if raw_reference_sd else ""
+        ax.annotate(f"{raw_reference_label} raw input · {raw_reference:.3f}{sd_txt}",
                     xy=(xs[-1], raw_reference), xytext=(0, 5),
                     textcoords="offset points", fontsize=8.5, color=_INK_2,
                     ha="right", va="bottom")
