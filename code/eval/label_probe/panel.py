@@ -176,6 +176,31 @@ def run_layer_curves(bank, input_raw, y, n_comp, layer_stages, n_trains, seed=42
     return curves
 
 
+def _raw_full_pool_reference(results_path: str) -> dict:
+    """{n_comp: (r2_mean, r2_bootstrap_sd, normalizer_label)} for the best of
+    (whitened, z-scored) raw input at the full pool, per n_comp -- read from
+    the sibling label_probe_results.json, if one was written alongside this
+    recipe_panel.json. Returns {} if it isn't there (e.g. a bare
+    recipe_panel.json redrawn on its own with no results file beside it)."""
+    import json
+    import os
+
+    if not os.path.isfile(results_path):
+        return {}
+    with open(results_path) as f:
+        results = json.load(f)
+    out = {}
+    for n_comp, by_comp in results.get("by_n_comp", {}).items():
+        best = None
+        for label, v in by_comp.get("full_pool", {}).items():
+            if label.startswith("raw input") and (best is None or v["r2_mean"] > best[0]):
+                norm = "z-scored" if "z-scored" in label else "whitened"
+                best = (v["r2_mean"], v.get("r2_bootstrap_sd"), norm)
+        if best:
+            out[n_comp] = best
+    return out
+
+
 def write_panel_figures(recipe_panel_path: str, out_dir: str = None) -> str:
     """Redraw the panel-derived figure (crossover_panel.png) from a finished
     recipe_panel.json. Cheap: seconds, no recompute -- mirrors
@@ -192,7 +217,10 @@ def write_panel_figures(recipe_panel_path: str, out_dir: str = None) -> str:
     out_dir = out_dir or os.path.dirname(recipe_panel_path)
     n_pool = d["meta"].get("n")
     n_eval_report = next(iter(d["by_n_comp"].values())).get("n_eval_report")
+    raw_full_pool = _raw_full_pool_reference(
+        os.path.join(os.path.dirname(recipe_panel_path), "label_probe_results.json"))
     pp.plot_crossover_panel(d["by_n_comp"], os.path.join(out_dir, "crossover_panel.png"),
-                            n_eval_report=n_eval_report, n_pool=n_pool)
+                            n_eval_report=n_eval_report, n_pool=n_pool,
+                            raw_full_pool=raw_full_pool)
     print(f"[panel] redrew figures in {out_dir}", flush=True)
     return out_dir

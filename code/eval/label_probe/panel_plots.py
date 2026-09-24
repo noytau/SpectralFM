@@ -45,7 +45,8 @@ def _layer_envelope_draws(layer_curves: dict, k: str):
 
 
 def plot_crossover_panel(by_n_comp: dict, output_path: str,
-                          n_eval_report: int = None, n_pool: int = None) -> str:
+                          n_eval_report: int = None, n_pool: int = None,
+                          raw_full_pool: dict = None) -> str:
     """
     Two rows per component count: absolute R² on top (so a "crossing" can be
     read against how good either side actually is, not just which is ahead),
@@ -55,6 +56,17 @@ def plot_crossover_panel(by_n_comp: dict, output_path: str,
     per-layer recipe search, and no pooling-squeezed recipe here at all (see
     panel.py's module docstring). The gap curve pairs raw against whichever
     named layer wins on each individual draw.
+
+    `raw_full_pool`, when given, is {n_comp: (r2_mean, r2_bootstrap_sd,
+    normalizer_label)} -- the best-of-(whitened, z-scored) raw score from
+    the full-pool CV diagnostic (label_probe_results.json), drawn as a
+    second, dotted reference line. The panel's own raw curve is already
+    honest (it searches every normalizer, not a fixed one), but at small n
+    its selection+report split can be a handful of rows, so its own
+    endpoint is noisier than the properly cross-validated full-pool number
+    -- this anchors "how good can raw really get" against that split noise,
+    so a small gap here never reads as "the embedding is competitive" when
+    a much larger, reliably-estimated one is sitting right next to it.
     """
     comps = sorted(by_n_comp, key=lambda k: int(k))
     fig, axes = plt.subplots(2, len(comps), figsize=(4.3 * len(comps), 6.6),
@@ -108,6 +120,20 @@ def plot_crossover_panel(by_n_comp: dict, output_path: str,
             med_n = [none["report"][k]["r2_median"] for k in keys]
             top.plot(ns_n, med_n, marker="none", linewidth=1.4, linestyle=(0, (4, 2)),
                      color=_NONE_COLOR, label="raw, no normalizer (naive)", zorder=2)
+
+        ref = (raw_full_pool or {}).get(key)
+        if ref:
+            ref_r2, ref_sd, ref_label = ref
+            if ref_sd:
+                top.axhspan(ref_r2 - ref_sd, ref_r2 + ref_sd, color=raw_color,
+                            alpha=0.06, zorder=0, linewidth=0)
+            top.axhline(ref_r2, color=raw_color, linestyle=":", linewidth=1.2,
+                       alpha=0.6, zorder=2)
+            sd_txt = f" ±{ref_sd:.3f}" if ref_sd else ""
+            top.annotate(f"full-pool CV, best-of-normalizer ({ref_label}): "
+                        f"{ref_r2:.3f}{sd_txt}", xy=(ns_r[0], ref_r2), xytext=(2, 4),
+                        textcoords="offset points", fontsize=7.2, color=raw_color,
+                        ha="left", va="bottom", alpha=0.85)
 
         # endpoint labels: raw, and whichever layer tops the pack at the full
         # pool -- the other layers stay legend-identified without adding more
