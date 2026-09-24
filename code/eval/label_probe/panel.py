@@ -106,6 +106,12 @@ def run_panel(bank, input_raw, y, n_comp, n_trains, seed=42, n_eval=500):
     arms = build_raw_arms(input_raw, ci, seed=seed)
     eval_select, eval_report = _eval_split(y, seed=seed, n_eval=n_eval)
 
+    # A small-n rung for the progress print below, picked from whatever
+    # rungs THIS run actually has (n_trains is trimmed to the real pool size
+    # by the caller, so a fixed 50 isn't always present -- e.g. it's absent
+    # entirely on a dataset with under 50 labels).
+    small_n = min((n for n in n_trains if n >= 50), default=min(n_trains))
+
     panel = {}
     for label, (X, probe) in arms.items():
         res_sel = laddermod.score_readout(
@@ -124,7 +130,7 @@ def run_panel(bank, input_raw, y, n_comp, n_trains, seed=42, n_eval=500):
                         for k, v in res_rep.items()},
         }
         print(f"[panel] {n_comp}-comp  raw  {label:<26} "
-              f"n=50:{res_rep[50]['r2_median']:+.3f}  "
+              f"n={small_n}:{res_rep[small_n]['r2_median']:+.3f}  "
               f"full:{res_rep[max(n_trains)]['r2_median']:+.3f}", flush=True)
 
     selected = {}
@@ -151,6 +157,7 @@ def run_layer_curves(bank, input_raw, y, n_comp, layer_stages, n_trains, seed=42
     ci = [feat.UNIQUE_COMPS.index(c) for c in feat.COMP_LADDER[n_comp]]
     _, eval_report = _eval_split(y, seed=seed, n_eval=n_eval)
     norm, probe = LAYER_RECIPE
+    small_n = min((n for n in n_trains if n >= 50), default=min(n_trains))
 
     curves = {}
     for name, stage in layer_stages.items():
@@ -164,7 +171,7 @@ def run_layer_curves(bank, input_raw, y, n_comp, layer_stages, n_trains, seed=42
                                   "n_draws": v["n_draws"], "r2_draws": v["r2_draws"]}
                         for k, v in res.items()}
         print(f"[panel] {n_comp}-comp  layer  {name:<24} "
-              f"n=50:{res[50]['r2_median']:+.3f}  "
+              f"n={small_n}:{res[small_n]['r2_median']:+.3f}  "
               f"full:{res[max(n_trains)]['r2_median']:+.3f}", flush=True)
     return curves
 

@@ -503,7 +503,13 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     panel_results = {"meta": meta, "raw_panel": pnl.RAW_PANEL,
                      "layer_recipe": list(pnl.LAYER_RECIPE),
                      "layer_stages": layer_stages, "by_n_comp": {}}
-    n_trains = list(PANEL_N_TRAINS) + [len(y)]
+    # Rungs at or above the real pool size are dropped, not just left in --
+    # ladder.draw_indices clips each draw to min(n_train, pool) anyway, so an
+    # unfiltered rung would silently draw the SAME actual sample and report
+    # it under a bigger, misleading nominal n_train (e.g. a rung literally
+    # labeled "n_train=2,000" on a 25-row dataset). The real pool size is
+    # always kept as the final rung.
+    n_trains = sorted(set(n for n in PANEL_N_TRAINS if n < len(y)) | {len(y)})
 
     for n_comp in comps_for_ladder:
         fp = run_full_pool_comparison(bank, input_raw, y, n_comp, embedding_search, seed=seed)

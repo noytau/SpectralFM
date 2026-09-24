@@ -15,35 +15,6 @@ import os
 
 from . import readouts as ro
 
-# ── measured outside the main run (see the baseline diagnostic) ───────────
-BASELINE_DIAGNOSTICS = [
-    ("Condition number of the raw design matrix", "9.9 × 10⁸"),
-    ("Directions holding 99% of the variance", "4 of 245"),
-    ("Directions holding 99.9% of the variance", "7 of 245"),
-    ("Directions holding 99.99% of the variance", "10 of 245"),
-]
-BASELINE_WRONG = [
-    ("RidgeCV, unnormalized", "0.409", "0.001"),
-    ("OLS, float32", "0.404", "0.001"),
-    ("OLS, float64", "0.825", "0.001"),
-]
-BASELINE_CANDIDATES = [
-    ("z-scored + RidgeCV", "0.7627", "0.0005", ""),
-    ("OLS, float64", "0.8245", "0.0006", ""),
-    ("z-scored + PLS-64 (fold-internal)", "0.8246", "0.0005", ""),
-    ("whitened + RidgeCV", "0.8248", "0.0005", "adopted"),
-]
-WHITEN_BY_N = [
-    ("10", "−0.234", "−0.023", "whitened"), ("20", "−0.145", "0.002", "whitened"),
-    ("50", "0.126", "0.096", "z-scored"), ("100", "0.510", "0.234", "z-scored"),
-    ("200", "0.609", "0.457", "z-scored"), ("500", "0.672", "0.699", "tie"),
-    ("1,000", "0.697", "0.782", "whitened"), ("4,716", "0.762", "0.825", "whitened"),
-]
-LEAK_DEMO = [
-    ("PLS fitted on all rows → CV'd ridge", "0.794", "+0.001"),
-    ("PLS fitted inside each fold", "0.824", "−0.072"),
-]
-
 FIGURES = [
     ("depth_profile.png", "R² by pipeline block · 1 component, full pool · error bars ±1 split SD"),
     ("recipe_search.png",
@@ -107,34 +78,9 @@ def build(run_dir: str) -> str:
         ["[IQR]", "across repeated training draws"],
     ]))
 
-    # ── baseline ─────────────────────────────────────────────────────────
-    h2("Setting the baseline", "01")
-    h3("Raw-input geometry")
-    out.append(_table(["Quantity", "Value"], [[a, b] for a, b in BASELINE_DIAGNOSTICS],
-                      ["left", "num"]))
-    h3("Two ways to get the same wrong answer — 1 component, n_train=4,716")
-    out.append(_table(["Route", "R²"],
-                      [[r, _pm(float(v), float(e))] for r, v, e in BASELINE_WRONG],
-                      ["left", "num"]))
-    h3("Baseline candidates — 1 component, n_train=4,716")
-    out.append(_table(["Recipe", "R²", ""],
-                      [[r, _pm(float(v), float(e), 4),
-                        f'<span class="badge raw">{tag}</span>' if tag else "",
-                        "__win__" if tag else ""]
-                       for r, v, e, tag in BASELINE_CANDIDATES],
-                      ["left", "num", "left"]))
-    h3("Normalizer by label budget — raw input, 1 component")
-    out.append(_table(["n_train", "z-scored", "whitened", "better"],
-                      [[a, b, c, dd] for a, b, c, dd in WHITEN_BY_N],
-                      ["num", "num", "num", "left"]))
-    h3("Leak check on the supervised reducer — 1 component, n_train=4,716")
-    out.append(_table(["Pipeline", "R², real labels", "R², shuffled labels"],
-                      [[a, b, c] for a, b, c in LEAK_DEMO], ["left", "num", "num"]))
-    out.append("</section>")
-
     # ── block scoreboard ─────────────────────────────────────────────────
     if es.get("stage_scores"):
-        h2("Block scoreboard", "02")
+        h2("Block scoreboard", "01")
         h3(f"1 component, n_train={n:,}, mean-pooled, RidgeCV")
         sc = es["stage_scores"]
         blocks = sorted({k.split("|")[0] for k in sc},
@@ -155,7 +101,7 @@ def build(run_dir: str) -> str:
         out.append("</section>")
 
         # ── recipe search ────────────────────────────────────────────────
-        h2("Recipe search", "03")
+        h2("Recipe search", "02")
         h3("Pooling scheme — winning block")
         out.append(_table(["Recipe", "R²"],
                           [[k.split("|", 1)[1].replace("|", " · "), _pm(v["r2"], v["repeat_sd"])]
@@ -178,7 +124,7 @@ def build(run_dir: str) -> str:
         out.append("</section>")
 
     # ── full pool ────────────────────────────────────────────────────────
-    h2("Full pool", "04")
+    h2("Full pool", "03")
     h3(f"n_train = {n:,}")
     labels = list(d["by_n_comp"][comps[0]]["full_pool"])
     rows = []
@@ -198,7 +144,7 @@ def build(run_dir: str) -> str:
     if os.path.exists(panel_path):
         with open(panel_path) as f:
             pd = json.load(f)
-        h2("Label efficiency — best recipe re-chosen at each label budget", "05")
+        h2("Label efficiency — best recipe re-chosen at each label budget", "04")
         for c in sorted(pd["by_n_comp"], key=int):
             by_c = pd["by_n_comp"][c]
             sel, layer_curves = by_c["selected"], by_c["layer_curves"]
@@ -232,7 +178,7 @@ def build(run_dir: str) -> str:
 
     # ── canary ───────────────────────────────────────────────────────────
     if d.get("canary"):
-        h2("Shuffled-label canary", "06")
+        h2("Shuffled-label canary", "05")
         rows = []
         for c in comps:
             for lab, v in d["canary"][c].items():
@@ -243,7 +189,7 @@ def build(run_dir: str) -> str:
         out.append("</section>")
 
     # ── figures ──────────────────────────────────────────────────────────
-    h2("Figures", "07")
+    h2("Figures", "06")
     for fn, cap in FIGURES:
         path = os.path.join(run_dir, fn)
         if not os.path.exists(path):
