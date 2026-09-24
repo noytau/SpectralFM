@@ -1280,6 +1280,35 @@ def _html_section_generic(title: str, cards: dict, figures: list) -> str:
     return f"<section>\n<h2>{title}</h2>\n{body}\n</section>"
 
 
+def _html_section_label_probe(results: dict) -> str:
+    """label_probe's real output already IS a self-contained tables+figures
+    HTML page per label set (tables_report.build) and, across label sets, a
+    run-comparison page (compare.build) -- splice both in directly rather
+    than re-deriving figures from a metrics dict, unlike every other eval
+    here."""
+    import html as html_mod
+
+    runs = {k[len("label_probe_"):]: r for k, r in results.items()
+            if k.startswith("label_probe_") and isinstance(r, dict) and r.get("out_dir")}
+    if not runs:
+        return ""
+
+    from .label_probe import compare as lp_compare
+    from .label_probe import tables_report as lp_tables
+
+    parts = ["<section>", "<h2>Label-efficiency probe</h2>"]
+    for name, r in sorted(runs.items()):
+        if len(runs) > 1:
+            parts.append(f"<h3>{html_mod.escape(name)}</h3>")
+        parts.append(lp_tables.build(r["out_dir"]))
+    if len(runs) > 1:
+        parts.append("<h3>Across label sets</h3>")
+        parts.append(lp_compare.build([r["out_dir"] for _, r in sorted(runs.items())],
+                                      title="Label sets compared"))
+    parts.append("</section>")
+    return "\n".join(parts)
+
+
 def _html_section_noise(results: dict, figures: list) -> str:
     r = results.get("noise_robustness", {})
     summary = r.get("summary", {})
@@ -1592,6 +1621,15 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
             cap, path = fig[0], fig[1]
             lines += ["", f"![{cap}]({os.path.relpath(path, run_dir)})"]
 
+    label_probe_runs = {k[len("label_probe_"):]: r for k, r in results.items()
+                        if k.startswith("label_probe_") and isinstance(r, dict) and r.get("out_dir")}
+    if label_probe_runs:
+        lines += ["", "## Label-efficiency probe", "",
+                  "Full tables and figures are in the HTML report; each label set's own "
+                  "`label_probe_results.json` / `recipe_panel.json` / figures live at:", ""]
+        for name, r in sorted(label_probe_runs.items()):
+            lines.append(f"- **{name}:** `{os.path.relpath(r['out_dir'], run_dir)}`")
+
     with open(md_path, "w") as f:
         f.write("\n".join(lines))
 
@@ -1642,6 +1680,10 @@ def generate_report(results: dict, output_dir: str, config=None) -> tuple[str, s
         sections.append(_html_section_comparison(
             results, figures_by_eval.get("checkpoint_comparison", [])
         ))
+
+    lp_section = _html_section_label_probe(results)
+    if lp_section:
+        sections.append(lp_section)
 
     with open(html_path, "w") as f:
         f.write(_build_html(results, config, ts, sections))
