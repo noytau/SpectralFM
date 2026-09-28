@@ -46,27 +46,25 @@ def _layer_envelope_draws(layer_curves: dict, k: str):
 
 def plot_crossover_panel(by_n_comp: dict, output_path: str,
                           n_eval_report: int = None, n_pool: int = None,
-                          raw_full_pool: dict = None) -> str:
+                          full_pool_refs: dict = None) -> str:
     """
     Two rows per component count: absolute R² on top (so a "crossing" can be
     read against how good either side actually is, not just which is ahead),
-    the paired gap with its crossing below. Raw is the HONEST per-rung best
-    recipe (selected on a split disjoint from the one scored); each embedding
-    layer is one fixed recipe (see panel.LAYER_RECIPE) -- there is no
-    per-layer recipe search, and no pooling-squeezed recipe here at all (see
-    panel.py's module docstring). The gap curve pairs raw against whichever
-    named layer wins on each individual draw.
+    the paired gap with its crossing below. Every curve -- raw input and each
+    named embedding layer -- is that arm's per-rung best recipe, chosen the
+    same way (panel.RECIPE_PANEL, selected on a split disjoint from the one
+    scored); no pooling-squeezed recipe appears here at all (see panel.py's
+    module docstring). The gap curve pairs raw against whichever named layer
+    wins on each individual draw.
 
-    `raw_full_pool`, when given, is {n_comp: (r2_mean, r2_bootstrap_sd,
-    normalizer_label)} -- the best-of-(whitened, z-scored) raw score from
-    the full-pool CV diagnostic (label_probe_results.json), drawn as a
-    second, dotted reference line. The panel's own raw curve is already
-    honest (it searches every normalizer, not a fixed one), but at small n
-    its selection+report split can be a handful of rows, so its own
-    endpoint is noisier than the properly cross-validated full-pool number
-    -- this anchors "how good can raw really get" against that split noise,
-    so a small gap here never reads as "the embedding is competitive" when
-    a much larger, reliably-estimated one is sitting right next to it.
+    `full_pool_refs`, when given, is {n_comp: {"raw": ref, "embedding": ref}}
+    with ref = (r2_mean, r2_bootstrap_sd, normalizer_label, arm_name): the
+    best full-pool CV score of raw input and of the best named layer (see
+    panel._full_pool_references), each drawn as a dotted reference line with
+    its ±1 SD band. At small n the panel's selection+report splits can be a
+    handful of rows, so its own endpoints are noisier than the properly
+    cross-validated full-pool numbers -- both sides get that anchor, so split
+    noise on either one cannot read as a real gap.
     """
     comps = sorted(by_n_comp, key=lambda k: int(k))
     fig, axes = plt.subplots(2, len(comps), figsize=(4.3 * len(comps), 6.6),
@@ -88,10 +86,10 @@ def plot_crossover_panel(by_n_comp: dict, output_path: str,
         layer_series = {name: _selected_series(curve) for name, curve in layer_curves.items()}
         none = panel.get("none + ridgecv")
 
-        # top: absolute R² -- raw (honest per-rung best) plus one line per
-        # named layer (single fixed recipe each).
+        # top: absolute R² -- raw plus one line per named layer, every one at
+        # its own per-rung best recipe.
         top.plot(ns_r, med_r, marker="o", markersize=4.5, linewidth=1.9,
-                 color=raw_color, label="raw (best recipe per label budget)", zorder=3)
+                 color=raw_color, label="raw input", zorder=3)
         multi = [i for i, dd in enumerate(draws_r) if dd > 1]
         if multi:
             top.fill_between([ns_r[i] for i in multi], [lo_r[i] for i in multi],
@@ -121,19 +119,26 @@ def plot_crossover_panel(by_n_comp: dict, output_path: str,
             top.plot(ns_n, med_n, marker="none", linewidth=1.4, linestyle=(0, (4, 2)),
                      color=_NONE_COLOR, label="raw, no normalizer (naive)", zorder=2)
 
-        ref = (raw_full_pool or {}).get(key)
-        if ref:
-            ref_r2, ref_sd, ref_label = ref
+        refs = (full_pool_refs or {}).get(key, {})
+        # Higher line's label sits above it, lower line's below, so the two
+        # can never overlap however close the values are.
+        order = sorted(refs, key=lambda s: -refs[s][0])
+        for rank, side in enumerate(order):
+            ref_r2, ref_sd, norm_label, arm_name = refs[side]
+            names = list(layer_series)
+            color = (raw_color if side == "raw" else
+                     layer_colors[names.index(arm_name) % len(layer_colors)]
+                     if arm_name in names else _INK_2)
             if ref_sd:
-                top.axhspan(ref_r2 - ref_sd, ref_r2 + ref_sd, color=raw_color,
+                top.axhspan(ref_r2 - ref_sd, ref_r2 + ref_sd, color=color,
                             alpha=0.06, zorder=0, linewidth=0)
-            top.axhline(ref_r2, color=raw_color, linestyle=":", linewidth=1.2,
-                       alpha=0.6, zorder=2)
+            top.axhline(ref_r2, color=color, linestyle=":", linewidth=1.2,
+                        alpha=0.7, zorder=2)
             sd_txt = f" ±{ref_sd:.3f}" if ref_sd else ""
-            top.annotate(f"full-pool CV, best-of-normalizer ({ref_label}): "
-                        f"{ref_r2:.3f}{sd_txt}", xy=(ns_r[0], ref_r2), xytext=(2, 4),
-                        textcoords="offset points", fontsize=7.2, color=raw_color,
-                        ha="left", va="bottom", alpha=0.85)
+            top.annotate(f"full-pool CV · {arm_name} ({norm_label}): {ref_r2:.3f}{sd_txt}",
+                         xy=(ns_r[0], ref_r2), xytext=(2, 4 if rank == 0 else -4),
+                         textcoords="offset points", fontsize=7.2, color=_INK_2,
+                         ha="left", va="bottom" if rank == 0 else "top")
 
         # endpoint labels: raw, and whichever layer tops the pack at the full
         # pool -- the other layers stay legend-identified without adding more
@@ -209,7 +214,9 @@ def plot_crossover_panel(by_n_comp: dict, output_path: str,
                          loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.035))
         for t in leg.get_texts():
             t.set_color(_INK_2)
-    note = "top: absolute R² (median, IQR band; hollow marker = only one training draw at that label budget)"
+    note = ("every curve: that arm's best recipe at each label budget, chosen identically for raw and "
+            "each layer  ·  top: absolute R² (median, IQR band; hollow marker = only one training draw "
+            "at that label budget)")
     if n_eval_report:
         note += (f"  ·  scored on a {n_eval_report}-row held-out split, "
                  "disjoint from the recipe-selection split")

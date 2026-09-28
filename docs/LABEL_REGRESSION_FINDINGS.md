@@ -53,11 +53,17 @@ Draw counts: 100 at n_train ≤ 50, 40 at 100–200, 15 at 500, 6 at 1,000, 3 at
 - **Label-efficiency test** — at each label budget on the ladder (10, 20,
   50, ... up to all 4,716), raw input's best recipe is re-chosen fresh
   (9 recipes × {RidgeCV, OLS} compared), since the best normalizer for raw
-  input changes with the label budget; each embedding layer instead uses one
-  fixed recipe (whitened, RidgeCV) at every budget, no re-choosing. Scored
-  on a held-out split kept separate from the one used to pick raw's recipe
-  — so its full-pool numbers are close to but not identical to the
-  CV-based diagnostic above.
+  input changes with the label budget; each embedding layer in this
+  document's numbers uses one fixed recipe (whitened, RidgeCV) at every
+  budget, no re-choosing. Scored on a held-out split kept separate from the
+  one used to pick raw's recipe — so its full-pool numbers are close to but
+  not identical to the CV-based diagnostic above.
+  *The current code gives every embedding layer the same per-budget recipe
+  choice as raw input (and both normalizers in the full-pool diagnostic),
+  so a rerun of this study will differ somewhat. On this dataset whitening
+  is also the better normalizer for embeddings, so the fixed recipe was
+  close to each layer's best here; on datasets where standardizing wins for
+  embeddings, a fixed whitened recipe understates them.*
 
 Every reported number passed a leak check (re-running the same pipeline
 with labels randomly shuffled must score ≈0 — it did, every time); see
@@ -254,9 +260,9 @@ Writes `label_probe_results.json` (search + full-pool diagnostics) and
 `recipe_panel.json` (the label-efficiency test), plus every figure above.
 `bank.npz` (~5.9 GB) is cached in `out_dir` and reused on rerun. Extraction:
 minutes. Search + full-pool diagnostics: tens of minutes. Label-efficiency
-test (9 raw recipes searched + 3 layers at one fixed recipe, × 9 label
-budgets, up to 100 repeated draws at the smallest budgets): roughly an
-hour.
+test (9 recipes searched for raw input and for each of 3 layers, × 9 label
+budgets, up to 100 repeated draws at the smallest budgets): a few hours at
+n=4,716.
 
 Redraw figures without recomputing:
 

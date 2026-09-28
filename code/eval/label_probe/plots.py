@@ -60,7 +60,7 @@ def _n_keys(by_n: dict) -> list:
     return sorted(by_n, key=lambda k: int(k))
 
 
-def _scatter_cell(ax, y_true, y_pred, color, axis_limits, is_best, r2):
+def _scatter_cell(ax, y_true, y_pred, color, axis_limits, is_best, r2, note=None):
     lo, hi = axis_limits
     ax.scatter(y_true, y_pred, s=3, alpha=0.18, color=color, rasterized=True,
                linewidths=0)
@@ -71,7 +71,8 @@ def _scatter_cell(ax, y_true, y_pred, color, axis_limits, is_best, r2):
     ax.set_aspect("equal", adjustable="box")
     _style_axes(ax)
     ax.tick_params(labelsize=7)
-    ax.annotate(f"R² = {r2:.3f}", xy=(0.045, 0.955), xycoords="axes fraction",
+    ax.annotate(f"R² = {r2:.3f}" + (f" · {note}" if note else ""),
+                xy=(0.045, 0.955), xycoords="axes fraction",
                 fontsize=9, color=_INK, ha="left", va="top",
                 fontweight="700" if is_best else "600",
                 bbox=dict(boxstyle="round,pad=0.28", facecolor=_SURFACE,
@@ -126,7 +127,8 @@ def plot_true_vs_pred_grid(cells: dict, output_path: str,
                 continue
             _scatter_cell(ax, cells[key]["y_true"], cells[key]["y_pred"],
                           _PALETTE[j % len(_PALETTE)], axis_limits,
-                          is_best=(best_in_row.get(row) == key), r2=r2s[key])
+                          is_best=(best_in_row.get(row) == key), r2=r2s[key],
+                          note=cells[key].get("note"))
             # axis labels only on the outer edge -- repeating them on 15 panels
             # is clutter, and every panel shares the same scale anyway
             ax.set_xlabel("true" if i == n_rows - 1 else "", fontsize=8.5,

@@ -19,8 +19,8 @@ FIGURES = [
     ("depth_profile.png", "R² by pipeline block · 1 component, full pool · error bars ±1 split SD"),
     ("recipe_search.png",
      "Pooling schemes and probes on the winning block · 1 component, full pool"),
-    ("crossover_panel.png", "Raw input (best recipe re-chosen at each label budget) vs. "
-                            "Projector, layer 2, layer 12 (each one fixed recipe)"),
+    ("crossover_panel.png", "Raw input vs. named embedding layers · every curve at its own "
+                            "best recipe, re-chosen at each label budget the same way for every arm"),
     ("probe_comparison.png", "RidgeCV vs OLS at every normalizer · raw input, Projector, "
                              "layer 2, layer 12 (all plain mean-pooled) · 1 component, full pool"),
     ("true_vs_pred_grid.png", "True vs predicted · full pool · axes fixed to [−2, 2]"),
@@ -150,8 +150,9 @@ def build(run_dir: str) -> str:
             sel, layer_curves = by_c["selected"], by_c["layer_curves"]
             layer_names = list(layer_curves)
             keys = sorted(sel, key=int)
-            h3(f"{c} component{'s' if c != '1' else ''} — raw's best recipe chosen per budget "
-               "on a disjoint selection split; each layer is one fixed recipe. Median R² [IQR]")
+            h3(f"{c} component{'s' if c != '1' else ''} — every arm's best recipe chosen per "
+               "budget on a disjoint selection split, the same way for raw and each layer. "
+               "Median R² [IQR] · recipe")
             rows = []
             for k in keys:
                 r = sel[k]
@@ -159,18 +160,14 @@ def build(run_dir: str) -> str:
                 best_name = max(by_layer, key=lambda n: by_layer[n]["r2_median"])
                 r_best = r["r2_median"] >= by_layer[best_name]["r2_median"]
 
-                def raw_cell(v, is_best):
+                def cell(v, is_best):
                     txt = (f'{v["r2_median"]:.3f} <span class="pm">'
-                           f'[{v["r2_p25"]:.2f}, {v["r2_p75"]:.2f}] · {_e(v["recipe"])}</span>')
+                           f'[{v["r2_p25"]:.2f}, {v["r2_p75"]:.2f}] · {_e(v.get("recipe", ""))}</span>')
                     return f"<strong>{txt}</strong>" if is_best else txt
 
-                def layer_cell(v, is_best):
-                    txt = f'{v["r2_median"]:.3f} <span class="pm">[{v["r2_p25"]:.2f}, {v["r2_p75"]:.2f}]</span>'
-                    return f"<strong>{txt}</strong>" if is_best else txt
-
-                row = [f"{int(k):,}", raw_cell(r, r_best)]
+                row = [f"{int(k):,}", cell(r, r_best)]
                 for name in layer_names:
-                    row.append(layer_cell(by_layer[name], not r_best and name == best_name))
+                    row.append(cell(by_layer[name], not r_best and name == best_name))
                 rows.append(row)
             out.append(_table(["n_train", "raw (best)"] + [_e(n) for n in layer_names], rows,
                               ["num", "left"] + ["left"] * len(layer_names)))

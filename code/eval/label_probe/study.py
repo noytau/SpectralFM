@@ -83,7 +83,7 @@ POOLINGS_TO_SWEEP = ("mean", "mean_std", "mean_max_min", "segment4", "first_last
 # for anything that beats RidgeCV on the embedding side. No PLS candidates:
 # it is a supervised preprocessing step (fits on labels, not just features),
 # and every recipe this module searches over is deliberately
-# unsupervised-preprocessing + a probe -- see panel.py's RAW_PANEL comment
+# unsupervised-preprocessing + a probe -- see panel.py's RECIPE_PANEL comment
 # for the full reasoning.
 EMBEDDING_PROBE_CANDIDATES = (
     "ridgecv", "pca10_ridge", "pca32_ridge", "pca64_ridge", "hgb", "knn5",
@@ -257,32 +257,45 @@ def _readout_label(kind: str, spec: tuple) -> str:
     return f"embedding: {ro.stage_display_name(stage)}/{pooling} ({normalizer})"
 
 
+_FULL_POOL_NORMALIZERS = (("whiten", "whitened"), ("standardize", "z-scored"))
+
+
 def _full_pool_readouts(bank: dict, input_raw: np.ndarray, ci: list,
                          embedding_search: dict, seed: int) -> dict:
     """label -> (X, probe_name), for the full-pool-only diagnostics (canary,
-    true-vs-predicted, probe grid). Three embedding columns, each a plain
-    mean-pooled single-layer readout -- never the search's pooling-squeezed
-    recipe, so a block is never conflated with a pooling choice here: the
-    winning block, the runner-up, and the conventional final layer, all
-    whitened (the adopted normalizer) with RidgeCV. NOT used for any
-    per-n_train comparison -- see panel.py's module docstring for why a
-    fixed recipe is only fair at a single point, not across a ladder.
+    true-vs-predicted). Four arms -- raw input, and three plain mean-pooled
+    single layers (the winning block, the runner-up, the conventional final
+    layer; never the search's pooling-squeezed recipe, so a block is never
+    conflated with a pooling choice) -- and EVERY arm at both normalizers,
+    whitened and z-scored, with RidgeCV. Which normalizer wins differs
+    between raw input and an embedding and between datasets, so giving only
+    one arm both would tilt the comparison. Labels read
+    "<arm> (<normalizer>), RidgeCV"; see _best_normalizer_per_arm.
     """
-    X_raw = feat.make_wide(input_raw, ci)
-    X_raw_white = fit_normalizer("whiten", X_raw, seed=seed).transform(X_raw)
-    X_raw_z = fit_normalizer("standardize", X_raw, seed=seed).transform(X_raw)
-
     ranked = _ranked_stages(embedding_search)
     stages = list(dict.fromkeys([ranked[0], ranked[1], _final_layer_stage(bank)]))
-
-    out = {
-        "raw input (whitened), RidgeCV": (X_raw_white, "ridgecv"),
-        "raw input (z-scored), RidgeCV": (X_raw_z, "ridgecv"),
-    }
+    arms = {"raw input": feat.make_wide(input_raw, ci)}
     for stage in stages:
-        X = _build_matrix(bank[stage], ci, "mean", "whiten", seed=seed)
-        out[f"embedding: {ro.stage_display_name(stage)}/mean, RidgeCV"] = (X, "ridgecv")
+        arms[f"embedding: {ro.stage_display_name(stage)}/mean"] = ro.build_readout(bank[stage], ci, "mean")
+
+    out = {}
+    for arm, X in arms.items():
+        for norm, norm_label in _FULL_POOL_NORMALIZERS:
+            Xn = fit_normalizer(norm, X, seed=seed).transform(X)
+            out[f"{arm} ({norm_label}), RidgeCV"] = (Xn, "ridgecv")
     return out
+
+
+def _best_normalizer_per_arm(full_pool: dict) -> set:
+    """The full-pool labels that are each arm's better normalizer -- one per
+    arm, e.g. {"raw input (z-scored), RidgeCV", "embedding: Projector/mean
+    (whitened), RidgeCV", ...}."""
+    best = {}
+    for label, v in full_pool.items():
+        arm = label.rsplit(" (", 1)[0]
+        if arm not in best or v["r2_mean"] > full_pool[best[arm]]["r2_mean"]:
+            best[arm] = label
+    return set(best.values())
 
 
 def run_full_pool_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
@@ -507,8 +520,7 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
                    "probe_grid": probe_grid, "by_n_comp": {}}
     canary_all = {}
     cells_all = {}
-    panel_results = {"meta": meta, "raw_panel": pnl.RAW_PANEL,
-                     "layer_recipe": list(pnl.LAYER_RECIPE),
+    panel_results = {"meta": meta, "recipe_panel": pnl.RECIPE_PANEL,
                      "layer_stages": layer_stages, "by_n_comp": {}}
     # Rungs at or above the real pool size are dropped, not just left in --
     # ladder.draw_indices clips each draw to min(n_train, pool) anyway, so an
@@ -525,12 +537,20 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
             for k, v in fp["full_pool"].items()}}
         canary_all[n_comp] = run_canary_checks(fp["readout_matrices"], y, seed=seed)
         if n_comp <= 3:
-            cells = build_true_vs_pred_cells(fp["readout_matrices"], y, seed=seed)
+            # One cell per ARM at its better normalizer, keyed by arm so the
+            # grid's columns line up across component counts even when the
+            # winning normalizer differs between rows; the normalizer is
+            # printed in the cell itself.
+            best = _best_normalizer_per_arm(fp["full_pool"])
+            cells = build_true_vs_pred_cells(
+                {lb: m for lb, m in fp["readout_matrices"].items() if lb in best}, y, seed=seed)
             for label, cell in cells.items():
-                cells_all[(f"{n_comp}-comp", label)] = cell
+                arm, norm = label.rsplit(" (", 1)
+                cell["note"] = norm.split(")")[0]
+                cells_all[(f"{n_comp}-comp", arm)] = cell
 
         rung = pnl.run_panel(bank, input_raw, y, n_comp, n_trains, seed=seed)
-        rung["layer_curves"] = pnl.run_layer_curves(
+        rung["layer_curves"], rung["layer_panels"] = pnl.run_layer_curves(
             bank, input_raw, y, n_comp, layer_stages, n_trains, seed=seed)
         panel_results["by_n_comp"][str(n_comp)] = rung
 
