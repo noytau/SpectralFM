@@ -215,6 +215,10 @@ python -m eval.label_probe \
 ```
 Comparing a second backbone: rerun with a new `--checkpoint`/`--out_dir`, then
 `python -m eval.label_probe.compare <out_dir_1> <out_dir_2>`.
+Several backbones in one HTML report, scored with nested CV:
+`python -m eval.label_probe.nested <run_dirs> --n_jobs 10`, then
+`python -m eval.label_probe.backbone_report eval_outputs -o report.html`
+(the backbone list is in `eval/label_probe/backbone_metrics.py`).
 
 ---
 

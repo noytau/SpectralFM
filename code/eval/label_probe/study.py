@@ -32,6 +32,7 @@ import numpy as np
 from . import features as feat
 from . import readouts as ro
 from .canary import shuffled_label_canary
+from .nested import NORMALIZERS as NESTED_NORMALIZERS, PROBES as NESTED_PROBES, run_nested_for_dir
 from .normalize import fit_normalizer
 from .protocol import run_primary
 from .regressors import make_fewshot_regressor, make_regressor
@@ -324,8 +325,8 @@ def run_full_pool_comparison(bank: dict, input_raw: np.ndarray, y: np.ndarray,
 # probe=ridgecv while comparing blocks/pooling) this grid exists specifically
 # to answer "does OLS behave differently from RidgeCV", so it must never
 # leave a normalizer covered by only one of them.
-PROBE_GRID_NORMALIZERS = ("none", "standardize", "whiten", "whiten8", "whiten32", "whiten128")
-PROBE_GRID_PROBES = ("ridgecv", "ols")
+PROBE_GRID_NORMALIZERS = NESTED_NORMALIZERS
+PROBE_GRID_PROBES = NESTED_PROBES
 
 
 def run_probe_grid(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int,
@@ -490,7 +491,7 @@ def replot_from_results(results_path: str, out_dir: str = None) -> str:
 
 def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
               device: str = "cpu", comps_for_ladder=(1, 2, 3), seed: int = 42,
-              model=None) -> dict:
+              model=None, nested_jobs: int = 1) -> dict:
     """The whole pipeline, one call, for any backbone: extract -> search for
     the best embedding recipe -> a full-pool probe-choice grid (every
     normalizer x {RidgeCV, OLS}, on raw input and on two named embedding
@@ -512,7 +513,11 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     NOT a fixed 3, since `load_labeled_data` keeps only spectra that have
     EVERY requested component, and requiring components a dataset doesn't
     consistently have silently shrinks N (or empties it to zero on a
-    dataset with no multi-component spectra at all)."""
+    dataset with no multi-component spectra at all).
+
+    Also runs nested CV (nested.py) on the cached bank -- the headline
+    raw-vs-embedding scores -- with `nested_jobs` outer folds in parallel;
+    skipped for label sets below nested.MIN_N."""
     from . import panel as pnl
 
     os.makedirs(out_dir, exist_ok=True)
@@ -594,5 +599,9 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     _write_figures(all_results, out_dir, cells_all=cells_all)
     pnl.write_panel_figures(panel_path, out_dir)
     print(f"[label_probe] wrote plots to {out_dir}", flush=True)
+
+    nested_path = run_nested_for_dir(out_dir, n_jobs=nested_jobs, seed=seed)
+    print(f"[label_probe] wrote {nested_path}" if nested_path else
+          "[label_probe] nested CV skipped: too few labeled spectra", flush=True)
 
     return {"results": all_results, "panel": panel_results}

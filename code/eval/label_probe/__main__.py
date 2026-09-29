@@ -45,6 +45,8 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--comps", type=int, nargs="+", default=[1, 2, 3])
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--nested_jobs", type=int, default=1,
+                    help="outer folds of the nested CV run in parallel")
     args = ap.parse_args()
 
     if args.plots_only:
@@ -60,7 +62,8 @@ def main():
         ap.error(f"{', '.join(missing)} required unless --plots_only is given")
 
     run_study(args.checkpoint, args.data, args.out_dir, device=args.device,
-              comps_for_ladder=tuple(args.comps), seed=args.seed)
+              comps_for_ladder=tuple(args.comps), seed=args.seed,
+              nested_jobs=args.nested_jobs)
 
 
 if __name__ == "__main__":

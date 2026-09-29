@@ -286,6 +286,22 @@ class; `meta.checkpoint` alongside it), so any set of them lines up:
 python -m eval.label_probe.compare <run_dir_1> <run_dir_2> ... [-o out.html]
 ```
 
+### Several backbones, nested CV, one report
+
+The multi-backbone comparison scores everything with nested CV
+(`eval/label_probe/nested.py`): each arm picks its block and recipe inside
+every outer training fold, and differences between arms or backbones are
+paired on shared folds. From `code/`, on runs that already have a `bank.npz`
+(CPU only):
+
+```bash
+OMP_NUM_THREADS=1 python -m eval.label_probe.nested eval_outputs/label_probe_regression_*/label_probe/* --n_jobs 10 --skip_done
+python -m eval.label_probe.backbone_report eval_outputs -o report.html --findings findings.json
+```
+
+The backbone list is at the top of `eval/label_probe/backbone_metrics.py`. See
+`code/eval/EVAL_OVERVIEW.md` for details.
+
 ### Multiple label sets, one backbone
 
 Through `eval.runner` only (not the standalone entry point): point

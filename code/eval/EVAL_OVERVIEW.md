@@ -407,6 +407,37 @@ python -m eval.runner --checkpoint_mode file --checkpoint_path <ckpt> \
 directory with no `labels.tsv`, or an empty one -- both mean "nothing to
 probe here yet" rather than an error.
 
+**Headline scores: nested CV** (`eval/label_probe/nested.py`). Raw input and
+the embedding each pick their block and recipe (6 normalizers × {RidgeCV,
+OLS}) inside every outer training fold. The outer loop is 2× repeated 5-fold,
+the inner loop is 5-fold, and normalizers are fit on training rows only. So no
+score is chosen on the rows that grade it. Every arm shares the same outer
+folds, so differences between arms, or between backbones, get a paired
+bootstrap SD. `run_study` runs it automatically; pass `--nested_jobs N` to run
+the outer folds in parallel. Label sets under 20 spectra are skipped. On runs
+that already exist it works from the cached `bank.npz`, with no GPU:
+
+```bash
+OMP_NUM_THREADS=1 python -m eval.label_probe.nested <run_dir> [<run_dir> ...] --n_jobs 10 --skip_done
+```
+
+This writes `nested_results.json` and `nested_oof.npz` (out-of-fold predictions)
+into each run dir. The 4,716-row `labeled_data` pool takes about
+15 minutes per backbone with 10 jobs; a 700-row pool takes about 1 minute.
+
+**Backbone-comparison report.** A single HTML page comparing every backbone
+with raw input and with each other: per set, pooled, depth profile and label
+efficiency. The backbone list and the run-dir naming live at the top of
+`eval/label_probe/backbone_metrics.py`:
+
+```bash
+python -m eval.label_probe.backbone_report eval_outputs -o report.html \
+  [--findings findings.json] [--metrics_out metrics.json]
+```
+
+`--findings` adds written observations per section (keys listed in the
+module docstring); without it the page shows the numbers only.
+
 ### 6. `structured_similarity` — canonical 100-sample panel
 
 **Question:** How does similarity structure evolve through the pipeline stages?
