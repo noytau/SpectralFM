@@ -335,9 +335,9 @@ def run_probe_grid(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int
     plain mean-pooled single-layer embedding readouts -- the winning block,
     the runner-up, and the conventional final layer (same three as
     `_full_pool_readouts`) -- never the search's pooling-squeezed recipe, so
-    probe behavior is never confounded with pooling choice. "none" is
-    raw-input-only (see the baseline section this feeds: it exists to show
-    the naive failure mode, not as a real embedding candidate).
+    probe behavior is never confounded with pooling choice. Every arm gets
+    every normalizer, "none" included, so each arm's best cell is a best over
+    the same recipe set.
     """
     ci = _comp_idx(n_comp)
     X_raw = feat.make_wide(input_raw, ci)
@@ -353,8 +353,6 @@ def run_probe_grid(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int
     grid = {}
     for arm_label, X_arm in arms.items():
         for norm in PROBE_GRID_NORMALIZERS:
-            if norm == "none" and arm_label != "raw input":
-                continue
             X = fit_normalizer(norm, X_arm, seed=seed).transform(X_arm)
             for probe in PROBE_GRID_PROBES:
                 res = run_primary(lambda probe=probe: _make_any_regressor(probe, seed=seed),
@@ -365,6 +363,32 @@ def run_probe_grid(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int
                 }
                 print(f"[label_probe] probe-grid {arm_label:<55} {norm:<12} {probe:<8} "
                       f"R2={res.r2_mean:+.4f}", flush=True)
+    return grid
+
+
+def run_stage_grid(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int = 1,
+                   seed: int = 42) -> dict:
+    """The probe grid (every normalizer x {RidgeCV, OLS}) on EVERY arm: raw
+    input and every extracted block, mean-pooled. Any comparison can then
+    report each arm's very best recipe, with raw input and every block
+    choosing from the same set. Keyed "<arm>|<normalizer>|<probe>", arm =
+    "raw" or a bank stage key."""
+    ci = _comp_idx(n_comp)
+    arms = {"raw": feat.make_wide(input_raw, ci)}
+    for stage in bank:
+        arms[stage] = ro.build_readout(bank[stage], ci, "mean")
+    grid = {}
+    for arm, X_arm in arms.items():
+        for norm in PROBE_GRID_NORMALIZERS:
+            X = fit_normalizer(norm, X_arm, seed=seed).transform(X_arm)
+            for probe in PROBE_GRID_PROBES:
+                res = run_primary(lambda probe=probe: _make_any_regressor(probe, seed=seed),
+                                   X, y, n_repeats=2, seed0=seed)
+                grid[f"{arm}|{norm}|{probe}"] = {"r2_mean": res.r2_mean,
+                                                 "r2_bootstrap_sd": res.r2_bootstrap_sd}
+        best = max((k for k in grid if k.startswith(arm + "|")), key=lambda k: grid[k]["r2_mean"])
+        print(f"[label_probe] stage-grid {arm:<18} best {best.split('|', 1)[1]:<24} "
+              f"R2={grid[best]['r2_mean']:+.4f}", flush=True)
     return grid
 
 
@@ -508,6 +532,7 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
           flush=True)
 
     probe_grid = run_probe_grid(bank, input_raw, y, 1, embedding_search, seed=seed)
+    stage_grid = run_stage_grid(bank, input_raw, y, 1, seed=seed)
 
     # Same three plain layers as run_probe_grid / _full_pool_readouts, named
     # once here and reused everywhere below -- winning block, runner-up,
@@ -517,7 +542,7 @@ def run_study(checkpoint_path: str, labeled_data_dir: str, out_dir: str,
     layer_stages = {ro.stage_display_name(s): s for s in layer_keys}
 
     all_results = {"meta": meta, "embedding_search": embedding_search,
-                   "probe_grid": probe_grid, "by_n_comp": {}}
+                   "probe_grid": probe_grid, "stage_grid": stage_grid, "by_n_comp": {}}
     canary_all = {}
     cells_all = {}
     panel_results = {"meta": meta, "recipe_panel": pnl.RECIPE_PANEL,
