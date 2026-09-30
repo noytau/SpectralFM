@@ -48,6 +48,10 @@ NORMALIZERS = ("none", "standardize", "whiten", "whiten8", "whiten32", "whiten12
 PROBES = ("ridgecv", "ols")
 RECIPES = tuple((n, p) for n in NORMALIZERS for p in PROBES)
 
+# The block-average readout: the ENSEMBLE_K best blocks (by inner CV, each
+# at its own best recipe), predictions averaged.
+ENSEMBLE_K = 3
+
 # Below this many labeled spectra nested CV is not meaningful: the inner
 # folds would fit on a handful of rows. Such label sets are skipped.
 MIN_N = 20
@@ -88,9 +92,10 @@ def _inner_scores(X, y, n_inner, seed):
     return {rc: r2(y, p) for rc, p in preds.items()}
 
 
-def _outer_fold(arms, families, y, tr, te, n_inner, seed, fixed_arms):
+def _outer_fold(arms, families, y, tr, te, n_inner, seed, fixed_arms, ensembles):
     with threadpool_limits(limits=1):
-        needed = sorted({a for names in families.values() for a in names})
+        needed = sorted({a for names in families.values() for a in names}
+                        | {a for names, _ in ensembles.values() for a in names})
         inner = {a: _inner_scores(arms[a][tr], y[tr], n_inner, seed) for a in needed}
         cache = {}
 
@@ -106,6 +111,18 @@ def _outer_fold(arms, families, y, tr, te, n_inner, seed, fixed_arms):
             a, b = transforms(arm)[norm]
             chosen[fam] = {"pred": _fit_predict(a, y[tr], b, probe, seed), "arm": arm,
                            "norm": norm, "probe": probe, "inner_r2": inner[arm][(norm, probe)]}
+        for name, (names, k) in ensembles.items():
+            # each arm at its own best recipe, then the k best arms
+            best = {a: max(RECIPES, key=lambda rc: inner[a][rc]) for a in names}
+            top = sorted(names, key=lambda a: -inner[a][best[a]])[:k]
+            preds = []
+            for a_ in top:
+                norm, probe = best[a_]
+                a, b = transforms(a_)[norm]
+                preds.append(_fit_predict(a, y[tr], b, probe, seed))
+            chosen[name] = {"pred": np.mean(preds, axis=0),
+                            "members": [{"arm": a_, "norm": best[a_][0], "probe": best[a_][1],
+                                         "inner_r2": inner[a_][best[a_]]} for a_ in top]}
         fixed = {}
         for arm in fixed_arms:
             for norm, probe in RECIPES:
@@ -136,9 +153,11 @@ def paired_delta(y, PA, PB, n_boot=1000, seed=0):
 
 def nested_cv(arms: dict, families: dict, y: np.ndarray, n_repeats: int = 2,
               n_folds: int = 5, n_inner: int = 5, seed: int = 42,
-              fixed_arms=(), n_jobs: int = 1) -> dict:
+              fixed_arms=(), ensembles=None, n_jobs: int = 1) -> dict:
     """arms: {name: X [n, d]}. families: {family: [arm names]} -- each family
     picks its best (arm, normalizer, probe) inside every outer training fold.
+    ensembles: {name: ([arm names], k)} -- each arm at its inner-best recipe,
+    the k best arms refit and their predictions averaged.
     fixed_arms: arms additionally scored at every recipe held fixed (no
     selection), same folds, fold-internal normalizer.
 
@@ -147,11 +166,12 @@ def nested_cv(arms: dict, families: dict, y: np.ndarray, n_repeats: int = 2,
     "test_folds": [R][F] index lists}."""
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
+    ensembles = ensembles or {}
     jobs = []
     for r in range(n_repeats):
         for f, (tr, te) in enumerate(KFold(n_folds, shuffle=True, random_state=seed + r).split(y)):
             jobs.append((r, f, tr, te))
-    args = [(arms, families, y, tr, te, n_inner, seed + 1000 + 10 * r + f, fixed_arms)
+    args = [(arms, families, y, tr, te, n_inner, seed + 1000 + 10 * r + f, fixed_arms, ensembles)
             for r, f, tr, te in jobs]
     if n_jobs > 1:
         from joblib import Parallel, delayed
@@ -159,7 +179,7 @@ def nested_cv(arms: dict, families: dict, y: np.ndarray, n_repeats: int = 2,
     else:
         outs = [_outer_fold(*a) for a in args]
 
-    res = {fam: {"oof": np.zeros((n_repeats, n)), "chosen": []} for fam in families}
+    res = {fam: {"oof": np.zeros((n_repeats, n)), "chosen": []} for fam in [*families, *ensembles]}
     fixed = {k: np.zeros((n_repeats, n)) for k in outs[0][1]}
     test_folds = [[] for _ in range(n_repeats)]
     for (r, f, tr, te), (chosen, fx) in zip(jobs, outs):
@@ -169,7 +189,7 @@ def nested_cv(arms: dict, families: dict, y: np.ndarray, n_repeats: int = 2,
             res[fam]["chosen"].append({"repeat": r, "fold": f, **{k: v for k, v in c.items() if k != "pred"}})
         for k, p in fx.items():
             fixed[k][r, te] = p
-    for fam, v in res.items():
+    for v in res.values():
         v["r2_per_repeat"] = [r2(y, p) for p in v["oof"]]
         v["r2_mean"] = float(np.mean(v["r2_per_repeat"]))
         v["bootstrap_sd"] = bootstrap_sd(y, v["oof"])
@@ -182,8 +202,10 @@ def run_nested(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int = 1
                n_repeats: int = 2, n_folds: int = 5, n_inner: int = 5, seed: int = 42,
                n_jobs: int = 1):
     """Raw input vs the embedding (every block, mean-pooled), each at its
-    nested-selected recipe; plus every block on its own (the depth profile)
-    and raw input at every fixed recipe (the normalizer comparison).
+    nested-selected recipe; the average of the ENSEMBLE_K best blocks; every
+    block on its own (the depth profile -- and the fixed-block readout, one
+    block chosen in advance); raw input at every fixed recipe (the normalizer
+    comparison).
     Returns (json-able results, {family: oof [R, n]})."""
     ci = [feat.UNIQUE_COMPS.index(c) for c in feat.COMP_LADDER[n_comp]]
     arms = {"raw": feat.make_wide(input_raw, ci)}
@@ -191,8 +213,11 @@ def run_nested(bank: dict, input_raw: np.ndarray, y: np.ndarray, n_comp: int = 1
         arms[stage] = ro.build_readout(bank[stage], ci, "mean")
     stages = list(bank)
     families = {"raw": ["raw"], "embedding": stages, **{s: [s] for s in stages}}
+    ensembles = {f"embedding_top{ENSEMBLE_K}": (stages, ENSEMBLE_K)}
     res = nested_cv(arms, families, y, n_repeats=n_repeats, n_folds=n_folds,
-                    n_inner=n_inner, seed=seed, fixed_arms=("raw",), n_jobs=n_jobs)
+                    n_inner=n_inner, seed=seed, fixed_arms=("raw",), ensembles=ensembles,
+                    n_jobs=n_jobs)
+    families = {**families, **ensembles}
     y64 = np.asarray(y, dtype=np.float64)
     out = {
         "protocol": {"n": len(y), "n_repeats": n_repeats, "n_folds": n_folds,

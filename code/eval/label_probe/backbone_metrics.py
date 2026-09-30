@@ -6,7 +6,8 @@ Reads, for each backbone in BACKBONES and each label set:
   <eval_dir>/label_probe_regression_merged_<tag>/label_probe/labeled_regression_all/
   <eval_dir>/label_probe_regression_labeled_data_<tag>/label_probe/labeled_data/
 each holding nested_results.json + nested_oof.npz (nested.py),
-label_probe_results.json (canary) and recipe_panel.json (label efficiency).
+label_probe_results.json (canary) and, for the two pools, nested_ladder.json
+(label efficiency, nested_ladder.py).
 
 Headline numbers are the nested-CV scores. Backbone-vs-backbone and
 embedding-vs-raw differences are paired: every arm on a label set shares the
@@ -93,36 +94,48 @@ def _crossing(ns, gaps):
     return f"embedding ahead from n≈{x:,.0f}"
 
 
-def _panel(path):
+def _ladder(path):
+    """nested_ladder.json -> per-rung medians for raw input and the fixed block."""
     if not os.path.isfile(path):
         return None
-    p = json.load(open(path))["by_n_comp"]["1"]
-    rungs = sorted(p["selected"], key=int)
-    raw = {k: {"med": p["selected"][k]["r2_median"], "recipe": p["selected"][k]["recipe"]} for k in rungs}
-    lay = {}
-    for k in rungs:
-        name = max(p["layer_curves"], key=lambda n: p["layer_curves"][n][k]["r2_median"])
-        v = p["layer_curves"][name][k]
-        lay[k] = {"med": v["r2_median"], "layer": name, "recipe": v.get("recipe")}
-    # Hindsight bound: each arm's best recipe picked on the scoring split
-    # itself -- optimistic for both arms equally.
-    raw_h = {k: max(v["report"][k]["r2_median"] for v in p["panel"].values()) for k in rungs}
-    lay_h = {k: max(max(rp[k] for rp in lp.values()) for lp in p["layer_panels"].values()) for k in rungs}
-    ns = [int(k) for k in rungs]
-    return {"rungs": ns, "raw": raw, "layer": lay, "raw_hind": raw_h, "layer_hind": lay_h,
-            "crossing": _crossing(ns, [lay[k]["med"] - raw[k]["med"] for k in rungs]),
-            "crossing_hind": _crossing(ns, [lay_h[k] - raw_h[k] for k in rungs]),
-            "n_eval_select": p.get("n_eval_select"), "n_eval_report": p.get("n_eval_report")}
+    L = json.load(open(path))
+    ns = L["rungs"]
+    k = [str(n) for n in ns]
+    top = lambda d: max(d, key=d.get)
+    return {"rungs": ns, "block": L["block"], "draws": L["draws"],
+            "raw": {r: {**L["arms"]["raw"][r], "recipe": top(L["arms"]["raw"][r]["recipes"])} for r in k},
+            "emb": {r: {**L["arms"]["block"][r], "recipe": top(L["arms"]["block"][r]["recipes"])} for r in k},
+            "gap": L["gaps"]["block"],
+            "crossing": _crossing(ns, [L["gaps"]["block"][r]["median"] for r in k])}
 
 
-def run_metrics(run_dir):
-    """One backbone on one label set, or None if nested CV was not run."""
+def _readouts(run_dir, fixed_block):
+    """The embedding three ways, each paired against raw input on the same
+    folds: full block search, one block fixed in advance, top-k average."""
+    p = os.path.join(run_dir, "nested_oof.npz")
+    if not os.path.isfile(p):
+        return None
+    o = np.load(p)
+    y = o["y"].astype(np.float64)
+    out = {}
+    for name, key in (("search", "embedding"), ("fixed", fixed_block),
+                      ("top3", "embedding_top3")):
+        if key and key in o.files:
+            d = paired_delta(y, o[key], o["raw"])
+            out[name] = {"key": key, "r2": float(np.mean([1 - np.sum((y - q) ** 2) / np.sum((y - y.mean()) ** 2)
+                                                           for q in o[key]])), **d}
+    return out
+
+
+def run_metrics(run_dir, fixed_block=None):
+    """One backbone on one label set, or None if nested CV was not run.
+    fixed_block: the block chosen in advance for this backbone (see collect)."""
     np_path = os.path.join(run_dir, "nested_results.json")
     if not os.path.isfile(np_path):
         return None
     nr = json.load(open(np_path))
     fam = nr["families"]
-    stages = [s for s in fam if s not in ("raw", "embedding")]
+    stages = [s for s in fam if s != "raw" and not s.startswith("embedding")]
     out = {
         "n": nr["protocol"]["n"],
         "raw": {"r2": fam["raw"]["r2_mean"], "sd": fam["raw"]["bootstrap_sd"],
@@ -137,7 +150,8 @@ def run_metrics(run_dir):
     if os.path.isfile(rp):
         canary = json.load(open(rp)).get("canary", {}).get("1", {})
         out["canary"] = {"n": len(canary), "passed": sum(1 for v in canary.values() if v["passed"])}
-    out["panel"] = _panel(os.path.join(run_dir, "recipe_panel.json"))
+    out["readouts"] = _readouts(run_dir, fixed_block)
+    out["ladder"] = _ladder(os.path.join(run_dir, "nested_ladder.json"))
     return out
 
 
@@ -162,6 +176,14 @@ def _rank(eval_dir, ds, tags):
     return {"order": order, "gaps": gaps}
 
 
+def _peak_block(run_dir):
+    p = os.path.join(run_dir, "nested_results.json")
+    if not os.path.isfile(p):
+        return None
+    from .nested_ladder import best_block
+    return best_block(run_dir)
+
+
 def discover_label_sets(eval_dir, tag):
     base = os.path.join(eval_dir, f"label_probe_regression_{tag}", "label_probe")
     return sorted(os.path.basename(d) for d in glob.glob(os.path.join(base, "dataset*")))
@@ -171,7 +193,10 @@ def collect(eval_dir, backbones=BACKBONES):
     tags = [b["tag"] for b in backbones]
     sets = discover_label_sets(eval_dir, tags[0])
     everything = sets + [MERGED, LD]
-    runs = {t: {ds: run_metrics(_run_dir(eval_dir, t, ds)) for ds in everything} for t in tags}
+    # Each backbone's fixed block: its best single block on labeled_data
+    # (the depth-profile peak), then held fixed on every other label set.
+    fixed = {t: _peak_block(_run_dir(eval_dir, t, LD)) for t in tags}
+    runs = {t: {ds: run_metrics(_run_dir(eval_dir, t, ds), fixed[t]) for ds in everything} for t in tags}
     sizes = {}
     for ds in everything:
         bank = os.path.join(_run_dir(eval_dir, tags[0], ds), "bank.npz")
@@ -180,6 +205,6 @@ def collect(eval_dir, backbones=BACKBONES):
     ranking = {ds: _rank(eval_dir, ds, tags) for ds in everything
                if any(runs[t][ds] for t in tags)}
     return {"backbones": backbones, "label_sets": sets, "merged": MERGED, "reference": LD,
-            "sizes": sizes, "runs": runs, "ranking": ranking,
+            "sizes": sizes, "runs": runs, "ranking": ranking, "fixed_blocks": fixed,
             "stage_names": {s: stage_display_name(s) for s in
                             ["fe", "extract_features"] + [f"layer{i}" for i in range(13)]}}

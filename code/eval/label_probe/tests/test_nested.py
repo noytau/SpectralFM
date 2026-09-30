@@ -89,7 +89,17 @@ def test_run_nested_on_a_bank():
     raw = rng.normal(size=(n, 1, 20)).astype(np.float32)
     y = bank["layer1"][:, 0].mean(axis=1) @ np.ones(8)
     res, oof = nested.run_nested(bank, raw, y, n_repeats=1, seed=0)
-    assert set(res["families"]) == {"raw", "embedding", "layer0", "layer1"}
+    assert set(res["families"]) == {"raw", "embedding", "embedding_top3", "layer0", "layer1"}
     assert res["families"]["embedding"]["r2_mean"] > res["families"]["raw"]["r2_mean"]
     assert len(res["raw_fixed_recipes"]) == len(nested.RECIPES)
     assert oof["embedding"].shape == (1, n)
+
+
+def test_top1_ensemble_equals_single_selection():
+    arms = _arms(n=60, n_arms=4)
+    y = arms["a1"][:, 0] + 0.5 * arms["a2"][:, 1]
+    res = nested.nested_cv(arms, {"all": list(arms)}, y, n_repeats=1, seed=0,
+                           ensembles={"top1": (list(arms), 1), "top3": (list(arms), 3)})
+    np.testing.assert_allclose(res["top1"]["oof"], res["all"]["oof"])
+    for c in res["top3"]["chosen"]:
+        assert len({m["arm"] for m in c["members"]}) == 3

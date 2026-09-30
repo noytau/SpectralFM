@@ -296,6 +296,8 @@ paired on shared folds. From `code/`, on runs that already have a `bank.npz`
 
 ```bash
 OMP_NUM_THREADS=1 python -m eval.label_probe.nested eval_outputs/label_probe_regression_*/label_probe/* --n_jobs 10 --skip_done
+# label efficiency on the two pools, one fixed block per backbone (its labeled_data peak)
+OMP_NUM_THREADS=1 python -m eval.label_probe.nested_ladder <merged_run_dir> <labeled_data_run_dir> --block_from <labeled_data_run_dir> --n_jobs 8
 python -m eval.label_probe.backbone_report eval_outputs -o report.html --findings findings.json
 ```
 

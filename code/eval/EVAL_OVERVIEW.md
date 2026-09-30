@@ -424,6 +424,23 @@ OMP_NUM_THREADS=1 python -m eval.label_probe.nested <run_dir> [<run_dir> ...] --
 This writes `nested_results.json` and `nested_oof.npz` (out-of-fold predictions)
 into each run dir. The 4,716-row `labeled_data` pool takes about
 15 minutes per backbone with 10 jobs; a 700-row pool takes about 1 minute.
+Besides the full block search, the results include each block on its own
+(the depth profile, and the "fixed block" readout: one block chosen in
+advance) and `embedding_top3`: inside each outer fold, the 3 best blocks by
+inner CV, each at its own best recipe, refit and averaged.
+
+**Label efficiency under nested CV** (`eval/label_probe/nested_ladder.py`).
+At each label budget, random subsets of the outer training fold are drawn.
+The recipe is chosen by inner CV on that subset only, then scored on the
+held-out fold. Raw input and one fixed block are compared on the same
+subsets:
+
+```bash
+OMP_NUM_THREADS=1 python -m eval.label_probe.nested_ladder <run_dir> [...] \
+  (--block layer0 | --block_from <labeled_data_run_dir>) --n_jobs 8
+```
+
+This writes `nested_ladder.json`. `--block_from` picks that run's best single block.
 
 **Backbone-comparison report.** A single HTML page comparing every backbone
 with raw input and with each other: per set, pooled, depth profile and label

@@ -144,7 +144,7 @@ class Report:
     # ── charts ──────────────────────────────────────────────────────────────
     def chart_lines(self, xs_labels, series, ref=None, log_x=False, xs_values=None,
                     y_label="R²", aria="", x_title=""):
-        """series: {tag | 'raw' | 'raw_h': [y or None per x]}; ref: (y, sd, label) band."""
+        """series: {tag | 'raw': [y or None per x]}; ref: (y, sd, label) band."""
         allv = [v for s in series.values() for v in s if v is not None]
         if ref:
             allv += [ref[0] - ref[1], ref[0] + ref[1]]
@@ -178,14 +178,13 @@ class Report:
                        f'height="{y(ry-rsd)-y(ry+rsd):.1f}" class="band"/>')
             svg.append(f'<line x1="{left}" x2="{W-right}" y1="{y(ry):.1f}" y2="{y(ry):.1f}" class="refline"/>')
             svg.append(f'<text x="{W-right+8}" y="{y(ry)+4:.1f}" class="endlab">{e(rlab)}</text>')
-        names = {"raw": "raw input", "raw_h": "raw, hindsight"}
+        names = {"raw": "raw input"}
         ends = []
         for key, vals in series.items():
             col = "var(--ink)" if key.startswith("raw") else self.SERIES[key]
             pts = [(xpos(i), y(v)) for i, v in enumerate(vals) if v is not None]
             if len(pts) > 1:
-                dash = {"raw": ' stroke-dasharray="5 3"',
-                        "raw_h": ' stroke-dasharray="1.5 3" stroke-opacity="0.6"'}.get(key, "")
+                dash = ' stroke-dasharray="5 3"' if key == "raw" else ""
                 svg.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in pts)}" '
                            f'fill="none" stroke="{col}" stroke-width="2"{dash}/>')
             for a, b in pts:
@@ -199,7 +198,7 @@ class Report:
         for yy, key in ends:
             svg.append(f'<text x="{W-right+8}" y="{yy+4:.1f}" class="endlab">'
                        f'{e(names.get(key) or self.SHORT[key])}</text>')
-        tipname = {"raw": "raw input (chosen recipe)", "raw_h": "raw input (best in hindsight)"}
+        tipname = {"raw": "raw input"}
         for i, lab in enumerate(xs_labels):
             x0 = (xpos(i - 1) + xpos(i)) / 2 if i else left - 10
             x1 = (xpos(i) + xpos(i + 1)) / 2 if i < n - 1 else W - right + 4
@@ -213,8 +212,6 @@ class Report:
         extra = None
         if "raw" in series:
             extra = '<span class="lg"><span class="sw dash"></span>raw input</span>'
-            if "raw_h" in series:
-                extra += '<span class="lg"><span class="sw dot"></span>raw input, best recipe in hindsight</span>'
         elif ref:
             extra = f'<span class="lg"><span class="sw dash"></span>{e(ref[2])}</span>'
         return self.legend(extra) + "".join(svg)
@@ -426,54 +423,82 @@ class Report:
                                 aria=f"Nested-CV R² by pipeline block, {self.dname(ds)}, one line per backbone",
                                 x_title="pipeline block (mean-pooled; recipe chosen by nested CV per block)")
 
-    def efficiency(self, ds):
-        P0 = next(self.get(t, ds)["panel"] for t in self.TAGS if self.get(t, ds) and self.get(t, ds)["panel"])
-        rungs = [str(n) for n in P0["rungs"]]
-        series = {"raw": [P0["raw"][k]["med"] for k in rungs], "raw_h": [P0["raw_hind"][k] for k in rungs]}
+    def readouts_table(self):
+        """The embedding three ways against raw input: full block search, one
+        block fixed in advance (each backbone's labeled_data peak), and the
+        average of the top 3 blocks. Small sets: mean paired gap over the
+        probed sets; pools: paired gap and its SD."""
+        kinds = [("search", "full block search"), ("fixed", "fixed block"), ("top3", "top-3 average")]
+        small = self.probed_sets()
+        head = ('<tr><th rowspan="2">Backbone<div class="thn">fixed block</div></th>'
+                + "".join(f'<th colspan="3">{e(lab)}</th>' for _, lab in kinds) + "</tr><tr>"
+                + "".join(f'<th>small sets<div class="thn">mean of {len(small)}</div></th>'
+                          '<th>merged</th><th>labeled_data</th>' for _ in kinds) + "</tr>")
+        body = []
         for t in self.TAGS:
-            r = self.get(t, ds)
-            if r and r["panel"]:
-                series[t] = [r["panel"]["layer"][k]["med"] for k in rungs]
+            fb = self.M["fixed_blocks"].get(t)
+            cells = []
+            for kind, _ in kinds:
+                ds_ = [self.get(t, ds)["readouts"][kind]["delta"] for ds in small
+                       if self.get(t, ds) and kind in (self.get(t, ds)["readouts"] or {})]
+                ahead = sum(d >= 0 for d in ds_)
+                cells.append(f'<td class="mono {"pos" if ds_ and sum(ds_) > 0 else "neg"}">'
+                             f'{sum(ds_) / len(ds_):+.3f}<div class="sub">≥ raw {ahead}/{len(ds_)}</div></td>'
+                             if ds_ else '<td class="mono">—</td>')
+                for pool in (MERGED, LD):
+                    r = self.get(t, pool)
+                    v = (r["readouts"] or {}).get(kind) if r else None
+                    if not v:
+                        cells.append('<td class="mono">—</td>')
+                        continue
+                    mark = "†" if kind == "fixed" and pool == LD else ""
+                    cells.append(f'<td class="mono {"pos" if v["delta"] > 0 else "neg"}">{v["delta"]:+.3f}{mark}'
+                                 f'<div class="sub">{v["delta"] / v["sd"]:+.1f} SD · {v["r2"]:.3f}</div></td>')
+            body.append(f'<tr><td>{self.swatch(t)}<span class="mono">{e(self.SHORT[t])}</span>'
+                        f'<div class="sub">{e(self.block(fb))}</div></td>' + "".join(cells) + "</tr>")
+        return ('<div class="table-wrap"><table><thead>' + head + "</thead><tbody>" + "".join(body)
+                + "</tbody></table></div>"
+                '<div class="cap">Every cell is the embedding minus raw input, paired on the same outer folds; under a pool '
+                'cell, its paired SD and the embedding’s R². '
+                '<b>Full block search</b>: block and recipe chosen by nested CV (the numbers in the table above). '
+                '<b>Fixed block</b>: the block is fixed in advance to the backbone’s best single block on '
+                '<span class="mono">labeled_data</span>; only the recipe is chosen, from the same 12 as raw input. '
+                '† On <span class="mono">labeled_data</span> itself that choice is in-sample, so this cell is mildly '
+                'optimistic. <b>Top-3 average</b>: inside each outer training fold, the 3 blocks with the best inner-CV '
+                'scores, each at its own best recipe, refit and averaged.</div>')
+
+    def efficiency(self, ds):
+        runs = {t: self.get(t, ds)["ladder"] for t in self.TAGS if self.get(t, ds) and self.get(t, ds)["ladder"]}
+        L0 = next(iter(runs.values()))
+        rungs = [str(n) for n in L0["rungs"]]
+        series = {"raw": [L0["raw"][k]["median"] for k in rungs],
+                  **{t: [L["emb"][k]["median"] for k in rungs] for t, L in runs.items()}}
         chart = self.chart_lines([f"{int(k):,}" for k in rungs], series, log_x=True,
                                  xs_values=[int(k) for k in rungs], y_label="median held-out R²",
-                                 aria=f"Label efficiency on {self.dname(ds)}: raw input vs best named block per backbone",
+                                 aria=f"Label efficiency on {self.dname(ds)}: raw input vs each backbone's fixed block",
                                  x_title="labels used for training (log scale)")
-        head = ('<tr><th rowspan="2">n_train</th><th colspan="2">raw input</th>'
-                f'<th colspan="{len(self.TAGS)}">best named block, recipe chosen per budget · (best in hindsight)</th></tr>'
-                '<tr><th>chosen</th><th>hindsight</th>'
-                + "".join(f"<th>{self.swatch(t)}{e(self.SHORT[t])}</th>" for t in self.TAGS) + "</tr>")
-        lay = lambda s: (s or "").replace("Transformer layer ", "L").replace("Projector", "Proj")
-        rec = lambda s: (s or "").replace(" + ridgecv", "+Ridge").replace(" + ols", "+OLS").replace("standardize", "z")
+        head = ('<tr><th>labels</th><th>raw input</th>'
+                + "".join(f"<th>{self.swatch(t)}{e(self.SHORT[t])} · {e(self.block(runs[t]['block']))}"
+                          f'<div class="thn">median · paired gap to raw</div></th>' for t in runs) + "</tr>")
         body = []
         for k in rungs:
-            cells = {"raw": P0["raw"][k]["med"], **{t: self.get(t, ds)["panel"]["layer"][k]["med"]
-                                                     for t in self.TAGS if self.get(t, ds) and self.get(t, ds)["panel"]}}
+            cells = {"raw": L0["raw"][k]["median"], **{t: L["emb"][k]["median"] for t, L in runs.items()}}
             best_k = max(cells, key=cells.get)
-            row = [f'<td class="mono">{int(k):,}</td>',
+            row = [f'<td class="mono">{int(k):,}<div class="sub">{L0["draws"][k]} draws</div></td>',
                    f'<td class="mono{" best" if best_k == "raw" else ""}">{cells["raw"]:.3f}'
-                   f'<div class="sub">{e(rec(P0["raw"][k]["recipe"]))}</div></td>',
-                   f'<td class="mono muted-cell">{P0["raw_hind"][k]:.3f}</td>']
-            for t in self.TAGS:
-                r = self.get(t, ds)
-                if not (r and r["panel"]):
-                    row.append("<td>—</td>")
-                    continue
-                v, h = r["panel"]["layer"][k], r["panel"]["layer_hind"][k]
-                row.append(f'<td class="mono{" best" if best_k == t else ""}">{v["med"]:.3f}'
-                           f'<span class="pm"> ({h:.3f})</span>'
-                           f'<div class="sub">{e(lay(v["layer"]))} · {e(rec(v["recipe"]))}</div></td>')
+                   f'<div class="sub">{e(recipe_short(*L0["raw"][k]["recipe"].split("+")))}</div></td>']
+            for t, L in runs.items():
+                g = L["gap"][k]
+                row.append(f'<td class="mono{" best" if best_k == t else ""}">{cells[t]:.3f}'
+                           f'<span class="pm"> ({g["median"]:+.3f})</span>'
+                           f'<div class="sub">{e(recipe_short(*L["emb"][k]["recipe"].split("+")))} · '
+                           f'{g["frac_positive"]:.0%} ahead</div></td>')
             body.append("<tr>" + "".join(row) + "</tr>")
-
-        def verdict_row(label, key):
-            return (f'<tr class="strong"><td colspan="3">{label}</td>' + "".join(
-                f'<td class="wrap">{e(self.get(t, ds)["panel"][key]) if self.get(t, ds) and self.get(t, ds)["panel"] else "—"}</td>'
-                for t in self.TAGS) + "</tr>")
-
+        body.append('<tr class="strong"><td colspan="2">where the embedding leads</td>'
+                    + "".join(f'<td class="wrap">{e(L["crossing"])}</td>' for L in runs.values()) + "</tr>")
         table = ('<div class="table-wrap"><table><thead>' + head + "</thead><tbody>" + "".join(body)
-                 + verdict_row("where the embedding leads · chosen recipes", "crossing")
-                 + verdict_row("… · both arms at best-in-hindsight", "crossing_hind")
                  + "</tbody></table></div>")
-        return chart, table, P0["n_eval_select"], P0["n_eval_report"]
+        return chart, table
 
     # ── page ────────────────────────────────────────────────────────────────
     def pool_block(self, ds, fkey):
@@ -488,14 +513,15 @@ class Report:
                 self.verdict(fkey)]
 
     def eff_block(self, ds, fkey):
-        chart, table, n_sel, n_eval = self.efficiency(ds)
-        return [self.section(e(self.dname(ds)),
-                             f"recipe chosen on a {n_sel}-row split, scored on a separate {n_eval}-row split", small=True),
+        chart, table = self.efficiency(ds)
+        return [self.section(e(self.dname(ds)), f"n = {self.n(ds):,}", small=True),
                 '<div class="chart-card">' + chart +
-                '<div class="cap">Dashed: raw input at the recipe the selection split chose. Dotted: raw input at the '
-                'recipe that scores best on the scoring split itself, an optimistic bound (the table gives the same '
-                'bound for every backbone in brackets). Coloured: each backbone’s best named block, recipe chosen the '
-                'same way as raw input’s. Normalizers here are fit once on all spectra, without labels.</div></div>',
+                '<div class="cap">For each outer fold (5-fold) and label budget, random subsets of that many labeled '
+                'spectra are drawn from the training fold. On each subset, a 5-fold inner CV over those labels only '
+                'picks the recipe (the same 12 for both arms); the winner is refit on the subset and scored on the '
+                'whole held-out fold. Both arms use the same subsets, so the bracketed gap is paired; “% ahead” is '
+                'the share of draws where the embedding beats raw input. Each backbone uses its fixed block from the '
+                'table in section 1. Hover or focus a column for all values.</div></div>',
                 table, self.verdict(fkey)]
 
     def render(self, css, js):
@@ -519,6 +545,9 @@ class Report:
             self.section("Backbones ranked against each other", "rank by nested embedding R²", small=True),
             self.ranking_table(),
             self.verdict("ranking"),
+            self.section("Embedding readouts compared", "full block search vs. a block fixed in advance vs. the top-3 average", small=True),
+            self.readouts_table(),
+            self.verdict("readouts"),
             self.section("2. Raw input, recipe by recipe", "each of the 12 recipes held fixed · same outer folds"),
             self.raw_normalizer_section(),
             self.verdict("rawnorm"),
@@ -526,9 +555,9 @@ class Report:
             *[p for ds, k in zip(pools, ("merged", "merged_ld")) for p in self.pool_block(ds, k)],
             self.section("4. Where the label signal lives", "every pipeline block on its own"),
             *[p for ds, k in zip(pools, ("depth", "depth_ld")) for p in self.depth_block(ds, k)],
-            self.section("5. Label efficiency", "median over repeated training draws"),
+            self.section("5. Label efficiency", "recipe chosen from the labels available · median over draws"),
             *[p for ds, k in zip(pools, ("efficiency", "efficiency_ld"))
-              if any(self.get(t, ds) and self.get(t, ds)["panel"] for t in self.TAGS)
+              if any(self.get(t, ds) and self.get(t, ds)["ladder"] for t in self.TAGS)
               for p in self.eff_block(ds, k)],
             self.verdict("caveats", warn=True),
             f'<div class="page-footer">{F.get("footer", "")}</div>',
