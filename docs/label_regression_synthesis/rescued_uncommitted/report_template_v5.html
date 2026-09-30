@@ -1,0 +1,731 @@
+<title>Label Regression Findings</title>
+<style>
+  :root {
+    --bg: #0a0d12;
+    --bg-panel: #11151c;
+    --bg-panel-raised: #161b24;
+    --ink: #dfe4ec;
+    --ink-dim: #8791a3;
+    --ink-faint: #545e6e;
+    --line: #232a38;
+    --accent: #4fd1c5;
+    --accent-ink: #06211f;
+    --accent-2: #f0a860;
+    --accent-2-ink: #2b1a05;
+    --verdict: #cf6b6b;
+    --verdict-wash: rgba(207,107,107,0.09);
+    --accent-wash: rgba(79,209,197,0.10);
+    --accent-2-wash: rgba(240,168,96,0.13);
+    --code-bg: #0d1117;
+    --fig-bg: #ffffff;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f7f9;
+    --bg-panel: #ffffff;
+    --bg-panel-raised: #ffffff;
+    --ink: #1b212b;
+    --ink-dim: #5b6472;
+    --ink-faint: #909aab;
+    --line: #e2e6ec;
+    --accent: #0e8f86;
+    --accent-ink: #ffffff;
+    --accent-2: #b5691f;
+    --accent-2-ink: #ffffff;
+    --verdict: #a3352d;
+    --verdict-wash: rgba(163,53,45,0.07);
+    --accent-wash: rgba(14,143,134,0.09);
+    --accent-2-wash: rgba(181,105,31,0.11);
+    --code-bg: #f1f3f6;
+    --fig-bg: #ffffff;
+    --shadow: 0 1px 3px rgba(20,25,35,0.08);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f7f9;
+      --bg-panel: #ffffff;
+      --bg-panel-raised: #ffffff;
+      --ink: #1b212b;
+      --ink-dim: #5b6472;
+      --ink-faint: #909aab;
+      --line: #e2e6ec;
+      --accent: #0e8f86;
+      --accent-ink: #ffffff;
+      --accent-2: #b5691f;
+      --accent-2-ink: #ffffff;
+      --verdict: #a3352d;
+      --verdict-wash: rgba(163,53,45,0.07);
+      --accent-wash: rgba(14,143,134,0.09);
+      --accent-2-wash: rgba(181,105,31,0.11);
+      --code-bg: #f1f3f6;
+      --fig-bg: #ffffff;
+      --shadow: 0 1px 3px rgba(20,25,35,0.08);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  code {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 0.86em;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.08em 0.34em;
+    color: var(--ink);
+  }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .wrap { max-width: 78rem; margin: 0 auto; padding: 3.4rem 1.6rem 5rem; }
+  @media (max-width: 900px) { .wrap { padding: 2.2rem 1.1rem 3.5rem; } }
+
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 0.7rem;
+  }
+  h1 {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+    font-weight: 600;
+    font-size: 2.1rem;
+    line-height: 1.16;
+    letter-spacing: -0.012em;
+    text-wrap: balance;
+    margin: 0 0 0.9rem;
+  }
+  @media (max-width: 640px) { h1 { font-size: 1.55rem; } }
+  .lede { font-size: 1.05rem; color: var(--ink-dim); max-width: 44rem; margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  h2 {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-weight: 600;
+    font-size: 1.04rem;
+    letter-spacing: 0.005em;
+    margin: 0 0 0.25rem;
+    text-wrap: balance;
+  }
+  h3 {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-weight: 600;
+    font-size: 0.88rem;
+    margin: 0 0 0.3rem;
+    color: var(--ink);
+  }
+  section { margin-top: 3rem; }
+  section > .sec-head { display: flex; flex-direction: column; gap: 0.15rem; margin-bottom: 1.1rem; }
+  .sec-head .kicker {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  p { margin: 0 0 0.95rem; max-width: 44rem; }
+  p:last-child { margin-bottom: 0; }
+  .prose-wide { max-width: 56rem; }
+
+  /* Timeline of the seven steps */
+  .timeline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1.2rem 0 0;
+  }
+  .tl-step {
+    flex: 1 1 12rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 0.8rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .tl-step .num {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .tl-step .name { font-size: 0.87rem; font-weight: 600; color: var(--ink); }
+  .tl-step .desc { font-size: 0.79rem; color: var(--ink-dim); line-height: 1.4; }
+  .tl-step.tl-verdict-no { border-left: 3px solid var(--verdict); }
+  .tl-step.tl-verdict-mixed { border-left: 3px solid var(--accent-2); }
+
+  /* Verdict banner */
+  .verdict {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0 1.35rem;
+    align-items: start;
+    margin-top: 2.2rem;
+    padding: 1.4rem 1.5rem;
+    background: var(--verdict-wash);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--verdict);
+    border-radius: 5px;
+  }
+  .verdict .big {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 2.3rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--verdict);
+    letter-spacing: -0.02em;
+  }
+  .verdict .vtext { font-size: 0.96rem; color: var(--ink-dim); max-width: 48rem; }
+  .verdict .vtext strong { color: var(--ink); }
+
+  .figure {
+    background: var(--fig-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.9rem;
+    margin: 1.1rem 0;
+    overflow-x: auto;
+  }
+  .figure img { display: block; width: 100%; height: auto; border-radius: 2px; }
+  .fig-cap {
+    font-size: 0.82rem;
+    color: var(--ink-dim);
+    margin: 0.55rem 0 0;
+    max-width: none;
+  }
+  .fig-cap strong { color: var(--ink); }
+
+  .tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-panel); margin: 1rem 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  caption {
+    caption-side: top;
+    text-align: left;
+    padding: 0.85rem 1rem 0.6rem;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.66rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--line);
+  }
+  th, td { padding: 0.48rem 0.75rem; text-align: left; border-bottom: 1px solid var(--line); }
+  thead th {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", monospace; }
+  .win { color: var(--accent-2); font-weight: 600; }
+  .neg { color: var(--verdict); }
+  .dim { color: var(--ink-dim); }
+  .faint { color: var(--ink-faint); }
+
+  .findings { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.85rem; }
+  .finding {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 0.95rem 1.05rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .finding .stat {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .finding .stat.t { color: var(--accent); }
+  .finding .stat.a { color: var(--accent-2); }
+  .finding .stat.v { color: var(--verdict); }
+  .finding .cap {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.63rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .finding p { font-size: 0.85rem; color: var(--ink-dim); margin: 0; max-width: none; }
+
+  ul.plain { padding-left: 1.15rem; margin: 0; max-width: 50rem; }
+  ul.plain li { margin-bottom: 0.42rem; color: var(--ink-dim); }
+  ul.plain li:last-child { margin-bottom: 0; }
+  ul.plain strong { color: var(--ink); font-weight: 600; }
+
+  ol.ranked { list-style: none; counter-reset: r; padding: 0; margin: 0; display: grid; gap: 0.7rem; }
+  ol.ranked li {
+    counter-increment: r;
+    display: grid;
+    grid-template-columns: 1.8rem 1fr;
+    gap: 0 0.8rem;
+    padding: 0.85rem 1rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+  }
+  ol.ranked li::before {
+    content: counter(r);
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1.5;
+  }
+  ol.ranked p { max-width: none; font-size: 0.88rem; }
+  ol.ranked p:first-of-type { color: var(--ink); margin-bottom: 0.25rem; }
+  ol.ranked p:last-of-type { color: var(--ink-dim); margin-bottom: 0; font-size: 0.83rem; }
+
+  .callout {
+    background: var(--accent-2-wash);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent-2);
+    border-radius: 5px;
+    padding: 1.1rem 1.3rem;
+    margin: 1rem 0;
+  }
+  .callout .hero {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 1.7rem;
+    font-weight: 700;
+    color: var(--accent-2);
+    letter-spacing: -0.015em;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+  .callout p { margin: 0.5rem 0 0; max-width: 48rem; color: var(--ink-dim); font-size: 0.92rem; }
+  .callout p strong { color: var(--ink); }
+
+  .toc {
+    margin-top: 1.6rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.76rem;
+  }
+  .toc a { color: var(--ink-dim); }
+  .toc a:hover { color: var(--accent); }
+  .toc .sep { color: var(--ink-faint); }
+
+  .scope, .rulings-box {
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1.1rem 1.3rem;
+  }
+  .rulings-box ol { padding-left: 1.2rem; margin: 0; }
+  .rulings-box li { margin-bottom: 0.6rem; color: var(--ink-dim); font-size: 0.87rem; }
+  .rulings-box li:last-child { margin-bottom: 0; }
+  .rulings-box strong { color: var(--ink); }
+
+  hr.rule { border: none; border-top: 1px solid var(--line); margin: 3.2rem 0 0; }
+  footer {
+    margin-top: 1.5rem;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    color: var(--ink-faint);
+    line-height: 1.85;
+  }
+  footer .path { color: var(--ink-dim); }
+</style>
+
+
+<div class="wrap">
+
+  <p class="eyebrow">SpectralFM &middot; label-regression evaluation</p>
+  <h1>Does the embedding give a foundation for few-shot label regression?</h1>
+  <p class="lede">
+    On the Feb-25 SSL <code>data2vec-audio</code> backbone and the NOVA <code>parameter_0</code>
+    regression target: does a frozen embedding beat correctly-probed raw input, at any label budget
+    from 10 to the full 4,716-spectrum pool? Answer, method, and the evidence, current as of this
+    report's last measurement pass.
+  </p>
+
+  <nav class="toc">
+    <a href="#verdict">Bottom line</a><span class="sep">/</span>
+    <a href="#method">Method</a><span class="sep">/</span>
+    <a href="#pipeline">Signal across the pipeline</a><span class="sep">/</span>
+    <a href="#recipe">Recipe search</a><span class="sep">/</span>
+    <a href="#crossover">Label efficiency</a><span class="sep">/</span>
+    <a href="#pls-investigation">The PLS/float64 check</a><span class="sep">/</span>
+    <a href="#mechanism">Why raw wins</a><span class="sep">/</span>
+    <a href="#next">Recommendations</a><span class="sep">/</span>
+    <a href="#validity">Methodology &amp; validity</a>
+  </nav>
+
+  <div class="verdict" id="verdict">
+    <div class="big">NO</div>
+    <div>
+      <div class="vtext">
+        <strong>Raw input beats the frozen embedding at every label budget measured, n=10 through the
+        entire 3,716-spectrum training pool, and across every one of 456 extraction recipes searched.</strong>
+        There is no n at which the embedding wins. The single biggest lever measured anywhere in this
+        study is <strong>whitening</strong> (decorrelating and rescaling the feature space to unit
+        variance) &mdash; it helps raw input more than it helps the embedding, because raw input had
+        more untapped structure to begin with. The binding constraint is the <strong>representation</strong>,
+        not the label budget: collecting more labels will not close this gap on the data in hand.
+      </div>
+    </div>
+  </div>
+
+  <section id="method">
+    <div class="sec-head">
+      <span class="kicker">Method</span>
+      <h2>One protocol, five recipes, a pre-registered win rule</h2>
+    </div>
+    <p class="prose-wide">
+      Every comparison in this report follows the same discipline: a win rule fixed and unit-tested
+      <em>before</em> any number was measured, two disjoint 500-spectrum evaluation sets drawn from the
+      4,716-spectrum labeled corpus (<code>eval_a</code> for recipe selection, <code>eval_b</code> for
+      reporting &mdash; a recipe never gets to pick itself a winning test set), and paired draws so two
+      arms are always compared on identical training samples at a given n. The remaining 3,716 spectra
+      are the training pool the label-efficiency curves below draw from.
+    </p>
+    <p class="prose-wide">
+      Four representations are compared: <strong>raw input</strong> (245-point spectrum),
+      <strong>raw input, z-scored</strong> per-sample, the <strong>frozen embedding</strong> at its best
+      extraction recipe found by search (layer &times; pooling &times; normalization), and the
+      <strong>embedding at its historical tap</strong> (final transformer layer, mean-pooled &mdash; the
+      recipe every earlier measurement of this backbone used). A probe panel spanning linear (OLS,
+      Ridge, RidgeCV), kernel (RBF-GP, RBF-KRR), graph-propagation, k-NN, and PLS regressors is run for
+      every recipe at every n, and only the best-of-panel result is reported &mdash; TabPFN was tested
+      throughout and is excluded from every "best" selection (see the note in Recipe search below).
+    </p>
+  </section>
+
+  <section id="pipeline">
+    <div class="sec-head">
+      <span class="kicker">Signal across the pipeline</span>
+      <h2>Where does the label signal live?</h2>
+    </div>
+    <p class="prose-wide">
+      At 1- and 2-components (the deployment-relevant range), the ordinary linear panel
+      (OLS/Ridge/RidgeCV, no whitening) shows the signal at every stage of the forward pass, from raw
+      input through the frozen transformer. RidgeCV is the probe that matters here: plain
+      <code>Ridge(alpha=1.0)</code> understates every stage by 5&ndash;15 points of R&sup2;, enough on
+      its own to make a worse probe look like a better representation.
+    </p>
+    <div class="figure">
+      <img src="{{IMG:stages_1_2}}" alt="Left: R-squared across the forward pass for 1-component and 2-component configurations only, dashed lines mark each config's best input R-squared. Right: OLS/ridge/RidgeCV comparison at 1-comp, showing RidgeCV as the consistently best probe.">
+      <p class="fig-cap"><strong>Left:</strong> label signal across six forward-pass stages, 1- and
+        2-component only. <strong>Right:</strong> regressor choice at 1-comp &mdash; RidgeCV (red) leads
+        at every stage; plain Ridge (green) trails by a wide margin. This panel has no whitening; the
+        fully current ceiling for raw input, measured with the complete probe panel including whitening,
+        is in Label efficiency below and is substantially higher than what this panel alone shows.</p>
+    </div>
+    <div class="figure">
+      <img src="{{IMG:fixed_step1_grid}}" alt="15-panel grid of true vs predicted parameter_0 for 1, 2 and 3 components across five forward-pass stages, all axes fixed to minus 2 to 2, with R-squared, Pearson r and MAE annotated per panel; 3-component raw input is boxed as the best cell.">
+      <p class="fig-cap">1&ndash;3 components &times; five forward-pass stages, true vs. predicted, every
+        axis fixed to [&minus;2, 2] so panels are comparable at a glance. Best cell in this range
+        (3-comp, raw input, boxed) reaches R&sup2;=0.863 under this probe panel.</p>
+    </div>
+  </section>
+
+  <section id="recipe">
+    <div class="sec-head">
+      <span class="kicker">Recipe search</span>
+      <h2>456 recipes, one winner: whitened raw input</h2>
+    </div>
+    <p class="prose-wide">
+      Every transformer depth (13 layers) &times; six poolings &times; four unlabeled-corpus
+      normalizations (a <strong>recipe</strong>) was screened on <code>eval_a</code> and confirmed on
+      the disjoint <code>eval_b</code>, under the win rule fixed before any number was measured.
+      Result: <strong>0 of 6 confirmation cells</strong> favor the embedding at n&isin;{20,50},
+      bootstrap P(&Delta;&gt;0)=0.00 in every cell.
+    </p>
+    <div class="figure">
+      <img src="{{IMG:step6_confirm}}" alt="Bar chart comparing embedding versus raw input median held-out R-squared at n=20 and n=50 for 1, 2 and 3 components, confirming raw input wins all six cells.">
+      <p class="fig-cap">The confirmation grid, held-out set. Raw (orange) leads in every one of the six
+        pre-registered cells.</p>
+    </div>
+    <div class="figure">
+      <img src="{{IMG:step6_screen_1comp}}" alt="Line chart of best screen R-squared by transformer layer for four normalizations, 1-component, mean pooling, showing layer 0-3 outperforming layer 12 by roughly a factor of two.">
+      <p class="fig-cap"><strong>The most reusable finding in this study.</strong> The final transformer
+        layer &mdash; the tap every earlier measurement of this backbone used &mdash; is among the
+        <em>worst</em> taps. The peak sits at blocks 0&ndash;3, roughly 2&ndash;2.5&times; stronger. This
+        changes the measurement basis for every embedding claim on this backbone, including the
+        checkpoint ranking that guides the training programme.</p>
+    </div>
+
+    <h3 style="margin-top:1.9rem;">What "whitening" does</h3>
+    <p class="prose-wide">
+      <strong>Whitening</strong> is fitted once on the 4,716 unlabeled spectra (no labels involved) and
+      rescales the feature space so its covariance becomes the identity matrix &mdash; every direction
+      decorrelated from every other and brought to unit variance, instead of a few directions quietly
+      dominating a probe's regularization.
+    </p>
+    <div class="figure">
+      <img src="{{IMG:whitening_schematic}}" alt="Two scatter plots of a toy 2-dimensional point cloud. Left, before whitening: an elongated, correlated ellipse with one dominant direction of variance, marked with a red arrow. Right, after whitening: a round, uncorrelated cloud with equal variance in every direction, circled in red.">
+      <p class="fig-cap">A 2-D stand-in for what happens in 245 (raw) or up to 768 (embedding) real
+        dimensions. Before whitening (left), the cloud is an elongated ellipse. After whitening (right),
+        it's round &mdash; covariance = identity. One numerical detail: at this sample size, whitening
+        the full 768-dim embedding is unstable, so it's capped at the top 256 directions (~18
+        samples/direction), matching the 245-dim raw input's natural scale.</p>
+    </div>
+    <div class="findings">
+      <div class="finding">
+        <div class="cap">Diagnostic that predicts recipe quality</div>
+        <div class="stat t">&rho; = +0.631</div>
+        <p><code>whitened_topk_r2</code> vs. few-shot R&sup2; across all 456 recipes (p&asymp;5&times;10<sup>&minus;52</sup>).
+          Cheap to compute, but consumes the full label set &mdash; not truly label-free.</p>
+      </div>
+      <div class="finding">
+        <div class="cap">Whitening's effect on raw input</div>
+        <div class="stat a">+0.47 R&sup2;</div>
+        <p>At 1-comp/n=50, unwhitened raw input scores 0.10; whitened, 0.59. Same protocol, same n. This
+          is the largest single lever found anywhere in this study.</p>
+      </div>
+      <div class="finding">
+        <div class="cap">Recipe's worth vs. the historical tap</div>
+        <div class="stat t">~2&ndash;2.5&times;</div>
+        <p>Best embedding recipe vs. the historical layer12/mean tap, at matched n. Recipe choice alone
+          recovers a large fraction of the historical shortfall &mdash; still not enough to beat raw.</p>
+      </div>
+    </div>
+    <p class="faint" style="font-size:0.82rem;">
+      TabPFN was tested at every n and recipe in this search. It is excluded from every "best" selection
+      throughout this report because, once a recipe is whitened, conventional probes (RidgeCV, GP-RBF)
+      overtake it &mdash; e.g. at n=50, GP-RBF reaches +0.58 vs. TabPFN's +0.37 on the same whitened raw
+      input. TabPFN only led on the old, unwhitened recipe; it adds nothing once the input is prepared
+      properly.
+    </p>
+  </section>
+
+  <section id="crossover">
+    <div class="sec-head">
+      <span class="kicker">Label efficiency</span>
+      <h2>No crossing anywhere, n=10 through the full 3,716-spectrum pool</h2>
+    </div>
+    <p class="prose-wide">
+      The headline measurement: five recipes on <strong>one identical protocol</strong>, every point a
+      direct measurement (nothing borrowed or extrapolated) &mdash; raw input whitened, embedding
+      whitened, the historical layer12/mean tap, and both old unwhitened baselines (raw, and raw
+      z-scored) &mdash; each walked across 11 rungs from n=10 to n=3,716, the entire training pool.
+      Draw counts run from 300 (n&le;50) down to 1 (n=3,716, where the pool itself is the only draw
+      there is &mdash; see the note below).
+    </p>
+    <div class="tw">
+      <table>
+        <caption>1-component &middot; median held-out R&sup2; on eval_b &middot; one protocol throughout</caption>
+        <thead>
+          <tr><th>n_train</th><th>draws</th>
+              <th class="num">Raw input<br>(whitened)</th>
+              <th class="num">Embedding<br>(whitened)</th>
+              <th class="num">Embedding<br>(historical tap)</th>
+              <th class="num">Raw input<br>(UNwhitened)</th>
+              <th class="num">Raw, z-scored<br>(UNwhitened)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>10</td><td class="num">300</td><td class="num win">+0.049</td><td class="num">&minus;0.003</td><td class="num dim">&minus;0.044</td><td class="num dim">&minus;0.023</td><td class="num dim">&minus;0.047</td></tr>
+          <tr><td>15</td><td class="num">300</td><td class="num win">+0.131</td><td class="num">&minus;0.003</td><td class="num dim">&minus;0.018</td><td class="num dim">&minus;0.013</td><td class="num dim">&minus;0.042</td></tr>
+          <tr><td>20</td><td class="num">300</td><td class="num win">+0.249</td><td class="num">+0.000</td><td class="num dim">&minus;0.018</td><td class="num dim">&minus;0.012</td><td class="num dim">&minus;0.018</td></tr>
+          <tr><td>30</td><td class="num">300</td><td class="num win">+0.402</td><td class="num">+0.049</td><td class="num dim">&minus;0.012</td><td class="num dim">&minus;0.010</td><td class="num dim">&minus;0.006</td></tr>
+          <tr><td>50</td><td class="num">300</td><td class="num win">+0.587</td><td class="num">+0.120</td><td class="num dim">&minus;0.004</td><td class="num dim">+0.093</td><td class="num dim">+0.096</td></tr>
+          <tr><td>100</td><td class="num">200</td><td class="num win">+0.761</td><td class="num">+0.280</td><td class="num dim">+0.109</td><td class="num dim">+0.498</td><td class="num dim">+0.268</td></tr>
+          <tr><td>200</td><td class="num">150</td><td class="num win">+0.825</td><td class="num">+0.461</td><td class="num dim">+0.242</td><td class="num dim">+0.346</td><td class="num dim">+0.309</td></tr>
+          <tr><td>500</td><td class="num">100</td><td class="num win">+0.877</td><td class="num">+0.650</td><td class="num dim">+0.366</td><td class="num dim">+0.701</td><td class="num dim">+0.601</td></tr>
+          <tr><td>1,000</td><td class="num">60</td><td class="num win">+0.848</td><td class="num">+0.692</td><td class="num dim">+0.503</td><td class="num dim">+0.810</td><td class="num dim">+0.732</td></tr>
+          <tr><td>2,000</td><td class="num">40</td><td class="num win">+0.853</td><td class="num">+0.738</td><td class="num dim">+0.596</td><td class="num dim">+0.841</td><td class="num dim">+0.769</td></tr>
+          <tr><td>3,716 <span class="faint">(full pool)</span></td><td class="num">1</td><td class="num win">+0.856</td><td class="num">+0.755</td><td class="num dim">+0.654</td><td class="num dim">+0.853</td><td class="num dim">+0.786</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="faint" style="font-size:0.8rem;">
+      <strong>Uncertainty note:</strong> every row above n=3,716 has a real sampling distribution behind
+      it (draws in the hundreds at small n, down to 40 at n=2,000) and the chart's error bars are its
+      interquartile range. The n=3,716 row has none &mdash; it uses the <em>entire</em> training pool, so
+      there is exactly one possible draw, not a distribution to summarize. Treat that row as a single
+      point estimate, not a tighter measurement than the rungs before it.
+    </p>
+    <div class="figure">
+      <img src="{{IMG:step7_v3_real}}" alt="Log-x plot from n=10 to n=3716 (the full training pool) with five series, each measured on one identical protocol with real IQR error bars throughout: raw input whitened (highest), embedding whitened, raw input unwhitened, raw z-scored unwhitened, and the historical layer12/mean tap (lowest). The two unwhitened raw baselines climb steeply from n=50 and nearly catch the whitened raw curve by n=1,000-2,000. The final point at n=3,716 is marked with a star and no error bar, since only one draw is possible at the full pool.">
+      <p class="fig-cap">Five recipes, one protocol, n=10 to n=3,716 &mdash; every point measured, none
+        borrowed or bridged. <strong>Whitened raw input leads at every rung</strong> and the gap to
+        whitened embedding never closes. The two old unwhitened baselines (dashed) start no better than
+        noise at n&le;30, cross into positive territory by n=50, and climb fast enough that by n&ge;1,000
+        they are within a few points of whitened raw &mdash; whitening's edge is largest in the few-shot
+        regime and shrinks as n grows, rather than being a constant advantage. The historical
+        layer12/mean tap (dotted) is the weakest recipe at every n. The star markers at n=3,716 have no
+        error bar for the reason in the note above.</p>
+    </div>
+    <div class="callout">
+      <div class="hero">No crossing, any n</div>
+      <p><strong>Raw input wins at every measured rung, n=10 through the full pool of 3,716.</strong>
+        Whitening is the single biggest lever measured anywhere in this study, on either side of the
+        raw/embedding comparison, and it does not favor the embedding.</p>
+    </div>
+    <p class="faint" style="font-size:0.82rem;">
+      Scope: 1-component only (2- and 3-component were not laddered here; the pipeline sweep above shows
+      raw ahead there too). Every cell above n=3,716 is estimated from a finite number of draws, not an
+      exhaustive census &mdash; tightest at small n (hundreds of draws), loosest at n=1,000&ndash;2,000
+      (40&ndash;60 draws). One non-monotonic wobble at n=200 for unwhitened raw input (0.35, dipping
+      below its own n=100 value of 0.50) is a real measurement, not a chart error, and a reminder that
+      individual mid-ladder points carry real sampling noise even with this draw budget.
+    </p>
+  </section>
+
+  <section id="pls-investigation">
+    <div class="sec-head">
+      <span class="kicker">A parallel-branch signal, checked here</span>
+      <h2>PLS reaches a much higher raw-input ceiling at large n &mdash; it does not help at few-shot n</h2>
+    </div>
+    <p class="prose-wide">
+      A separate study on this same corpus found that raw input's true large-n ceiling is far higher
+      than a RidgeCV-based probe panel reaches: at the full n=4,716, a PLS regressor fitted honestly
+      inside each cross-validation fold (verified leak-free by a shuffled-label canary, and stable
+      whether computed in float32 or float64) scores <strong>0.825</strong> at 1-component, against
+      RidgeCV's <strong>0.404</strong> &mdash; because RidgeCV's isotropic shrinkage penalizes the
+      near-degenerate, highly collinear directions where raw input's signal actually lives, and PLS
+      selects directions by label-covariance instead, reaching it directly. That finding does not
+      change this report's own conclusion &mdash; the whitened-raw numbers already measured above
+      (0.856 at the full pool) meet or exceed it, because whitening addresses the same collinearity
+      problem by a different route.
+    </p>
+    <p class="prose-wide">
+      What was untested was whether this same lever pays off in the <strong>few-shot regime this report
+      is about</strong> (n&le;50) &mdash; PLS was never part of the small-n probe panel here. Checked
+      directly: a fold-internal PLS probe (k swept small enough to fit safely at these sample sizes),
+      shuffled-label canary run at every cell (always cleanly negative &mdash; no leak, e.g.
+      &minus;0.37 to &minus;0.70 across cells where the real signal reaches up to +0.59).
+    </p>
+    <div class="tw">
+      <table>
+        <caption>1-component, raw input whitened &middot; PLS (small k, fold-internal) vs. this study's existing best-of-panel</caption>
+        <thead><tr><th>n_train</th><th class="num">Best PLS (small k)</th><th class="num">Existing best-of-panel</th><th class="num">&Delta;</th></tr></thead>
+        <tbody>
+          <tr><td>10</td><td class="num">&minus;0.093</td><td class="num win">+0.049</td><td class="num neg">&minus;0.142</td></tr>
+          <tr><td>15</td><td class="num">&minus;0.003</td><td class="num win">+0.131</td><td class="num neg">&minus;0.134</td></tr>
+          <tr><td>20</td><td class="num">+0.086</td><td class="num win">+0.249</td><td class="num neg">&minus;0.163</td></tr>
+          <tr><td>30</td><td class="num">+0.225</td><td class="num win">+0.402</td><td class="num neg">&minus;0.177</td></tr>
+          <tr><td>50</td><td class="num">+0.377</td><td class="num win">+0.587</td><td class="num neg">&minus;0.210</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="prose-wide">
+      PLS loses to this study's existing best-of-panel at every one of these n, on the recipe this
+      report already recommends (whitened raw input). On the two old <em>unwhitened</em> baselines, PLS
+      is roughly comparable to the existing panel &mdash; ahead by a few points at one or two isolated
+      cells (e.g. raw unwhitened at n=50: PLS +0.165 vs. existing +0.093), behind at most others &mdash;
+      never enough to change which recipe wins overall. <strong>Conclusion: the float64/PLS ceiling
+      lift is real, but it is a large-n phenomenon that does not transfer to this report's few-shot
+      decision regime.</strong> It does not change the recommendation to ship whitening, and it is not
+      a substitute for it at small n.
+    </p>
+  </section>
+
+  <section id="mechanism">
+    <div class="sec-head">
+      <span class="kicker">Why</span>
+      <h2>The mechanism: dilution, not absence</h2>
+    </div>
+    <p class="prose-wide">
+      The label signal <em>is</em> present in the embedding &mdash; the pipeline sweep shows most of it
+      is linearly recoverable at large n. But it is <strong>spread across many collinear directions</strong>,
+      and at 10&ndash;2,000 labels only a handful of them can be reliably estimated. Raw input's 245
+      dimensions are physically meaningful axes that already concentrate the signal, and every generic
+      lever tried here &mdash; whitening, PLS, kernel methods &mdash; helps raw <em>more</em> than it
+      helps the embedding, because raw had more untapped structure to begin with.
+    </p>
+    <p class="prose-wide">
+      A 245-point smooth 1-D signal with a smooth physical target is close to the worst case for
+      demonstrating foundation-model value: raw features are already near-optimal and low-dimensional,
+      so there is no representation gap for a foundation model to close. That is a property of this
+      <em>task</em>, not evidence that the backbone failed at what it was trained to do.
+    </p>
+  </section>
+
+  <section id="next">
+    <div class="sec-head">
+      <span class="kicker">Recommendations</span>
+      <h2>Where the remaining leverage is</h2>
+    </div>
+    <ol class="ranked">
+      <li>
+        <div>
+          <p>Re-measure the reconstruction-trained checkpoints under the whitened-recipe protocol.</p>
+          <p>Their existing scores were taken at the historical layer12/mean tap &mdash; shown here to be
+            among the worst available. The checkpoint ranking guiding the training programme is
+            currently unverified against a fair recipe.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <p>Ship whitening as part of the deployed pipeline, not as a post-hoc probe choice.</p>
+          <p>It is the single largest lever measured in this study (+0.47 R&sup2; at 1-comp/n=50) and is
+            fit label-free on the unlabeled corpus, so it costs nothing extra to deploy. Supervised
+            compression (PLS) is <strong>not</strong> a substitute at few-shot n &mdash; checked directly
+            above, it underperforms the existing panel at n&le;50 on the whitened recipe. It has a real,
+            separately-verified benefit only once n is large (near the full corpus).</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <p>Test active or stratified label selection.</p>
+          <p>Every draw in this study was random. Selection is a geometry problem &mdash; exactly where
+            an embedding's structure, even if its raw features don't win, could still add value.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <p>Re-aim the foundation-model demonstration at a task where raw features actually fail.</p>
+          <p>Multi-component disentangling, anomaly detection, or cross-instrument transfer &mdash; not
+            single-component regression on a smooth, low-dimensional, pre-standardized signal.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section id="validity">
+    <div class="sec-head">
+      <span class="kicker">Methodology &amp; validity</span>
+      <h2>How this negative result is protected against being wrong</h2>
+    </div>
+    <p class="prose-wide">
+      A pre-registered win rule, written and unit-tested before any number was measured; two disjoint
+      evaluation sets (rank on one, report on the other); paired draws so both arms are compared on
+      identical training samples; and a shuffled-label canary run wherever a supervised transform
+      (PLS, in particular) enters the pipeline, to catch a label leak before it can inflate a result.
+      All of this machinery is covered by regression tests in the merged code.
+    </p>
+    <div class="scope">
+      <ul class="plain">
+        <li><strong>Checkpoint:</strong> one SSL backbone (<code>runai_long_train_2026-02-25</code>),
+          target <code>parameter_0</code>, components 0&ndash;2.</li>
+        <li><strong>Frozen backbone throughout.</strong> No trained projection head was tried &mdash; see
+          Recommendations.</li>
+        <li><strong>Random label draws only.</strong> Active/stratified selection is untested.</li>
+        <li><strong>A NO bounds this recipe family on this backbone.</strong> It does not prove no
+          recipe could ever work &mdash; only that 456 of them, searched honestly, did not.</li>
+      </ul>
+    </div>
+  </section>
+
+  <hr class="rule">
+  <footer>
+    <div>Source data: <span class="path">code/eval_outputs/label_probe/{2026-09-03_full_run,step6,step7}/</span></div>
+    <div>Full reports: <span class="path">step1_REPORT.md</span> &hellip; <span class="path">step7_REPORT.md</span>, <span class="path">TASKS.md</span> T6&ndash;T15</div>
+    <div>Developed on <span class="path">eval/label-efficiency-crossover</span> &middot; 88 tests passing</div>
+  </footer>
+
+</div>

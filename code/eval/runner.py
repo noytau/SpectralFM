@@ -56,6 +56,26 @@ USAGE MODES
    recorded in the checkpoint (--recon_normalize true/false overrides).
    signal_reconstruction can be combined with checkpoint_comparison in one run.
 
+4. Label-efficiency probe (deeper than label_regression above: every pipeline
+   block, a recipe search, and a label-efficiency ladder down to n_train=10 —
+   see code/eval/label_probe/, findings in docs/LABEL_REGRESSION_FINDINGS.md).
+   No --data_source needed; --labeled_data_dir does double duty as either one
+   label set or a parent of several:
+
+   python -m eval.runner \\
+     --checkpoint_mode file --checkpoint_path /path/to/checkpoint.pt \\
+     --evals label_probe \\
+     --labeled_data_dir /mnt5/noy/SpectralFM/fairseq/data/nova_data/labeled_data \\
+     --device cuda --output_dir eval_outputs
+
+   Swapping the backbone is just a different --checkpoint_path/--checkpoint_mode —
+   block names and depth come from the model's own hidden_states, not a hardcoded
+   layer count. Point --labeled_data_dir at a parent directory instead of one
+   label set, and every directory found under it with its own labels.tsv is
+   probed in this same run -- AT ANY NESTING DEPTH (e.g. campaign1/site_A/,
+   not just one level down) -- with a cross-set comparison table added to the
+   report. No separate flag, no separate command per label set.
+
 Python API:
     runner = EvalRunner(EvalConfig(...))
     results = runner.run()
@@ -81,13 +101,17 @@ from .evaluations import (
     ClusteringEval,
     LabelRegressionEval,
 )
+from .label_probe import study as label_probe_study
+# Shared with merge_label_sets.py, which cannot import it from here (that
+# would be circular: this module already imports from label_probe).
+from .label_probe.label_sets import resolve_label_sets
 from .report import generate_report
 
 
 EVAL_TYPES = [
     "embedding_similarity", "signal_reconstruction", "noise_robustness",
     "checkpoint_comparison", "clustering", "label_regression",
-    "structured_similarity",
+    "structured_similarity", "label_probe",
 ]
 
 # ── E4: multi-dataset evaluation ───────────────────────────────────────────────
@@ -175,6 +199,18 @@ class EvalConfig:
     # Label regression (optional) — defaults to <nova_data_dir>/labeled_data
     labeled_data_dir: Optional[str] = None
 
+    # Label-efficiency probe (`--evals label_probe`, code/eval/label_probe/) —
+    # a deeper study than the fixed-recipe label_regression above: every
+    # pipeline block, a recipe search, and a label-efficiency ladder down to
+    # n_train=10. Reuses labeled_data_dir (see resolve_label_sets): point it
+    # at a parent of several label-set folders to run the whole study once
+    # per set plus a cross-set comparison, in one command. Backbone comes
+    # from whichever checkpoint_mode/path was already given above — a
+    # different checkpoint is just a different run, nothing else changes.
+    label_probe_out_dir: Optional[str] = None    # default: <output_dir>/label_probe
+    label_probe_comps: tuple = (1, 2, 3)
+    label_probe_seed: int = 42
+
     # Output
     output_dir: str = "eval_outputs"
 
@@ -215,6 +251,62 @@ class EvalRunner:
             source = cfg.checkpoint_paths or cfg.checkpoint_path
             return CheckpointLoader.load_multiple(source, arch=cfg.arch, pattern=cfg.checkpoint_pattern)
         raise ValueError(f"Unknown checkpoint_mode: {mode!r}. Choose from: {CHECKPOINT_MODES}")
+
+    def _checkpoint_label(self) -> str:
+        """A checkpoint identifier for provenance (label_probe's meta.checkpoint)
+        -- a real path where one exists, so runs stay traceable back to the
+        exact file even though the model itself is passed in already-loaded."""
+        cfg = self.cfg
+        if cfg.checkpoint_mode == "file":
+            return cfg.checkpoint_path
+        if cfg.checkpoint_mode == "dir":
+            return CheckpointLoader.resolve_dir_checkpoint(cfg.checkpoint_path)
+        if cfg.checkpoint_mode == "hf":
+            return f"hf:{cfg.hf_model_name}"
+        return f"({cfg.checkpoint_mode}: first checkpoint)"
+
+    # ── Label-efficiency probe (code/eval/label_probe/) ─────────────────────────
+
+    def _run_label_probe(self, model) -> dict:
+        """One `study.run_study` per resolved label set, sharing the model
+        already loaded for the other single-checkpoint evals -- no separate
+        checkpoint load, and it works unchanged under any checkpoint_mode.
+        `multiple` mode runs against whichever checkpoint the caller already
+        picked as `model` (label_probe's own compare.py is for lining up
+        checkpoints; running the whole study once per checkpoint here would
+        multiply an already tens-of-minutes-per-set study by the checkpoint
+        count, so it is left to a separate --checkpoint_mode=file run per
+        checkpoint, in the loop of your choice)."""
+        cfg = self.cfg
+        label_sets = resolve_label_sets(cfg.labeled_data_dir)
+        if not label_sets:
+            print(f"[EvalRunner] label_probe requires labeled_data_dir with a "
+                  f"labels.tsv, or a parent directory with one or more label "
+                  f"sets nested under it at any depth (got: "
+                  f"{cfg.labeled_data_dir!r}). Skipping.")
+            return {}
+        base_out = cfg.label_probe_out_dir or os.path.join(cfg.output_dir, "label_probe")
+        checkpoint_label = self._checkpoint_label()
+        n = len(label_sets)
+        out = {}
+        for name, path in label_sets.items():
+            print(f"\n[EvalRunner] Running: label_probe on {name!r}"
+                 f"{f' ({n} label sets total)' if n > 1 else ''}")
+            out_dir = os.path.join(base_out, name)
+            try:
+                results = label_probe_study.run_study(
+                    checkpoint_path=checkpoint_label, labeled_data_dir=path, out_dir=out_dir,
+                    device=cfg.device, comps_for_ladder=tuple(cfg.label_probe_comps),
+                    seed=cfg.label_probe_seed, model=model)
+            except (RuntimeError, ValueError, FileNotFoundError) as e:
+                # One malformed/too-thin label set (e.g. too few spectra with
+                # the requested components once NaN rows are filtered out)
+                # must not abort a sweep across many -- report it and move on.
+                print(f"[EvalRunner] label_probe on {name!r} failed: {e}")
+                out[f"label_probe_{name}"] = {"skipped": True, "error": str(e)}
+                continue
+            out[f"label_probe_{name}"] = {"out_dir": out_dir, "meta": results.get("meta", {})}
+        return out
 
     # ── Data loading ──────────────────────────────────────────────────────────
 
@@ -386,6 +478,8 @@ class EvalRunner:
                         model, cfg.nova_data_dir, device=cfg.device,
                         batch_size=cfg.batch_size,
                     )
+                elif eval_name == "label_probe":
+                    all_results.update(self._run_label_probe(model))
                 elif eval_name in EVAL_DATASET_MATRIX:
                     for alias in EVAL_DATASET_MATRIX[eval_name]:
                         if alias not in datasets:
@@ -413,23 +507,33 @@ class EvalRunner:
 
     def _run_single_dataset(self) -> dict:
         cfg = self.cfg
-        print(f"[EvalRunner] Loading data from: {cfg.data_source}")
-        df = self._load_data()
-        print(f"[EvalRunner] Data shape: {df.shape}, stacks: {df['stack_idx'].nunique()}")
 
-        # Keep raw (un-normalized) signals for signal_reconstruction — build_dataloader
-        # layer-norms df['data'] in place, but the recon checkpoints expect raw input
-        # unless their recorded normalize flag says otherwise.
-        df_raw = df.copy(deep=True)
+        # label_probe reads labeled_data_dir directly and needs no wav
+        # dataset -- a run of just `--evals label_probe` needs no
+        # --data_source at all, unlike every other eval here.
+        needs_wav_data = bool(set(cfg.evals) - {"label_probe"}) or not cfg.evals
+        if needs_wav_data:
+            print(f"[EvalRunner] Loading data from: {cfg.data_source}")
+            df = self._load_data()
+            print(f"[EvalRunner] Data shape: {df.shape}, stacks: {df['stack_idx'].nunique()}")
 
-        dataloader, df = build_dataloader(
-            df,
-            mask_ratio=cfg.mask_ratio,
-            masking_type=cfg.masking_type,
-            batch_size=cfg.batch_size,
-        )
-        datasets = {"data": {"df": df, "loader": dataloader, "df_raw": df_raw}}
-        matrix = {e: ["data"] for e in EVAL_DATASET_MATRIX}
+            # Keep raw (un-normalized) signals for signal_reconstruction — build_dataloader
+            # layer-norms df['data'] in place, but the recon checkpoints expect raw input
+            # unless their recorded normalize flag says otherwise.
+            df_raw = df.copy(deep=True)
+
+            dataloader, df = build_dataloader(
+                df,
+                mask_ratio=cfg.mask_ratio,
+                masking_type=cfg.masking_type,
+                batch_size=cfg.batch_size,
+            )
+            datasets = {"data": {"df": df, "loader": dataloader, "df_raw": df_raw}}
+            matrix = {e: ["data"] for e in EVAL_DATASET_MATRIX}
+        else:
+            print(f"[EvalRunner] No wav dataset needed for evals: {cfg.evals}")
+            df = df_raw = dataloader = None
+            datasets, matrix = {}, {}
 
         all_results = {}
 
@@ -518,6 +622,8 @@ class EvalRunner:
                             model, cfg.nova_data_dir, device=cfg.device,
                             batch_size=cfg.batch_size,
                         )
+                elif eval_name == "label_probe":
+                    all_results.update(self._run_label_probe(model))
                 else:
                     print(f"[EvalRunner] Unknown eval: {eval_name!r}")
 
@@ -593,7 +699,18 @@ def main():
     parser.add_argument("--output_dir", default="eval_outputs")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--nova_data_dir", default=None, help="nova_data/ root for structured similarity")
-    parser.add_argument("--labeled_data_dir", default=None, help="Dataset with labels.tsv for label regression")
+    parser.add_argument("--labeled_data_dir", default=None,
+                        help="For label_regression and label_probe: a directory with labels.tsv, "
+                             "OR (label_probe only) a parent directory containing one or more "
+                             "such directories nested at ANY depth -- every one found is probed "
+                             "in this run.")
+    parser.add_argument("--label_probe_out_dir", default=None,
+                        help="label_probe output root (default: <output_dir>/label_probe); "
+                             "one subfolder per label set.")
+    parser.add_argument("--label_probe_comps", type=int, nargs="+", default=None,
+                        help="label_probe: component counts for the label-efficiency ladder "
+                             "(default: 1 2 3).")
+    parser.add_argument("--label_probe_seed", type=int, default=None)
     parser.add_argument("--recon_ckpt", default=None,
                         help="Signal reconstruction: single 3AE checkpoint (keys: data2vec_audio + "
                              "fe_mirror/proj_mirror/transformer_mirror). Runs ALL contained pathways: "

@@ -1,0 +1,650 @@
+<title>Label Signal Through the Backbone</title>
+<style>
+/* ── Tokens ─────────────────────────────────────────────────────────────
+   Dark-first, mirroring docs/html/architecture.html so this page sits in
+   the same hub. :root = dark; explicit light stamp and prefers-light both
+   override. Every colour is a token; none is declared only inside a media
+   or [data-theme] block. */
+:root{
+  --bg:#0a0d12; --bg-panel:#11151c; --bg-raised:#161b24; --bg-sunken:#0d1117;
+  --ink:#dfe4ec; --ink-dim:#8791a3; --ink-faint:#545e6e;
+  --line:#232a38; --line-soft:#1b212c;
+  --accent:#4fd1c5; --accent-ink:#06211f; --accent-soft:#123a37;
+  --neg:#e8836f; --neg-soft:#3a1d18;
+  --warn:#f0a860; --good:#5fd4c7;
+  /* sequential ramp — component count (ordered quantity). Validated:
+     min dL 0.100, extreme-step contrast 2.77. */
+  --seq1:#2d6660; --seq2:#3a8c82; --seq3:#48b0a4; --seq4:#5fd4c7; --seq5:#9df0e6;
+  /* categorical — stage identity. Validated: CVD dE 13.2, normal-vision 20.8. */
+  --cat1:#a58bf0; --cat2:#4fd1c5; --cat3:#f0a860;
+  --shadow:0 1px 2px rgba(0,0,0,.45);
+  color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --bg:#f6f7f9; --bg-panel:#ffffff; --bg-raised:#ffffff; --bg-sunken:#f1f3f6;
+  --ink:#1b212b; --ink-dim:#5b6472; --ink-faint:#909aab;
+  --line:#e2e6ec; --line-soft:#eef1f5;
+  --accent:#0e8f86; --accent-ink:#ffffff; --accent-soft:#e2f4f2;
+  --neg:#b23c22; --neg-soft:#fbeae6;
+  --warn:#b5691f; --good:#0e8f86;
+  --seq1:#7fc7bd; --seq2:#4aa89c; --seq3:#2a8b80; --seq4:#106e66; --seq5:#084a43;
+  --cat1:#6a44b8; --cat2:#0e8f86; --cat3:#b5691f;
+  --shadow:0 1px 3px rgba(20,25,35,.08);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){
+    --bg:#f6f7f9; --bg-panel:#ffffff; --bg-raised:#ffffff; --bg-sunken:#f1f3f6;
+    --ink:#1b212b; --ink-dim:#5b6472; --ink-faint:#909aab;
+    --line:#e2e6ec; --line-soft:#eef1f5;
+    --accent:#0e8f86; --accent-ink:#ffffff; --accent-soft:#e2f4f2;
+    --neg:#b23c22; --neg-soft:#fbeae6;
+    --warn:#b5691f; --good:#0e8f86;
+    --seq1:#7fc7bd; --seq2:#4aa89c; --seq3:#2a8b80; --seq4:#106e66; --seq5:#084a43;
+    --cat1:#6a44b8; --cat2:#0e8f86; --cat3:#b5691f;
+    --shadow:0 1px 3px rgba(20,25,35,.08);
+    color-scheme:light;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+  font-size:15px; line-height:1.62; -webkit-font-smoothing:antialiased;
+}
+.mono,code,th,td,.fig,.num{font-family:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace}
+.num,td,th{font-variant-numeric:tabular-nums}
+.shell{max-width:1040px;margin:0 auto;padding:0 24px 96px}
+.prose{max-width:68ch}
+h1,h2,h3{text-wrap:balance;line-height:1.22;margin:0}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+
+/* ── Masthead ── */
+header{border-bottom:1px solid var(--line);padding:56px 0 30px;margin-bottom:44px}
+.eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--accent);margin:0 0 16px}
+h1{font-size:clamp(30px,4.4vw,46px);font-weight:640;letter-spacing:-.022em}
+.lede{max-width:64ch;margin:20px 0 0;font-size:17px;color:var(--ink-dim)}
+.lede strong{color:var(--ink);font-weight:600}
+.meta{display:flex;flex-wrap:wrap;gap:8px 26px;margin-top:26px;
+  font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--ink-faint)}
+.meta b{color:var(--ink-dim);font-weight:500}
+
+/* ── Verdict tiles ── */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(212px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden;margin:0 0 52px}
+.tile{background:var(--bg-panel);padding:20px 20px 22px}
+.tile .k{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-faint);margin-bottom:12px}
+.tile .v{font-family:ui-monospace,Menlo,monospace;font-size:27px;font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;line-height:1.05;color:var(--ink)}
+.tile .v.pos{color:var(--good)} .tile .v.neg{color:var(--neg)}
+.tile .d{font-size:12.5px;color:var(--ink-dim);margin-top:9px;line-height:1.45}
+
+/* ── Sections ── */
+section{margin:0 0 60px;scroll-margin-top:20px}
+.sec-head{display:flex;align-items:baseline;gap:14px;padding-bottom:12px;
+  border-bottom:1px solid var(--line);margin-bottom:26px}
+.sec-n{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--accent);
+  letter-spacing:.06em;flex:none}
+h2{font-size:20px;font-weight:620;letter-spacing:-.012em}
+.sec-head .tag{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);flex:none}
+h3{font-size:15px;font-weight:620;margin:34px 0 12px}
+p{margin:0 0 15px}
+.prose ul,.prose ol{margin:0 0 15px;padding-left:20px} .prose li{margin-bottom:7px}
+
+/* ── Tables ── */
+.tw{overflow-x:auto;margin:22px 0;border:1px solid var(--line);border-radius:3px;background:var(--bg-panel)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+caption{caption-side:top;text-align:left;padding:13px 16px;font-family:ui-monospace,Menlo,monospace;
+  font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint);
+  border-bottom:1px solid var(--line)}
+caption .n{text-transform:none;letter-spacing:0;color:var(--ink-faint);font-weight:400}
+th{text-align:right;padding:9px 13px;font-weight:600;color:var(--ink-dim);
+  border-bottom:1px solid var(--line);white-space:nowrap;font-size:11.5px}
+th:first-child,td:first-child{text-align:left}
+td{padding:8px 13px;text-align:right;border-bottom:1px solid var(--line-soft);white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+.hl{background:var(--accent-soft);font-weight:600}
+.dim{color:var(--ink-faint)}
+.win{color:var(--good);font-weight:600} .lose{color:var(--neg)}
+
+/* ── Charts ── */
+figure{margin:26px 0 30px;background:var(--bg-panel);border:1px solid var(--line);
+  border-radius:3px;padding:20px 20px 14px}
+.fig-t{font-size:13.5px;font-weight:620;margin-bottom:3px}
+.fig-s{font-size:12px;color:var(--ink-dim);margin-bottom:16px;max-width:60ch}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:14px 0 0;
+  font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-dim)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.sw{width:15px;height:2.5px;border-radius:1.5px;flex:none}
+.chart{width:100%;height:auto;display:block;overflow:visible}
+.chart .grid{stroke:var(--line);stroke-width:1}
+.chart .zero{stroke:var(--ink-faint);stroke-width:1;stroke-dasharray:3 3}
+.chart .ax{stroke:var(--line);stroke-width:1}
+.chart text{fill:var(--ink-faint);font-family:ui-monospace,Menlo,monospace;font-size:10px}
+.chart .albl{fill:var(--ink-dim);font-size:10.5px}
+.chart .dlbl{font-size:10px;font-weight:600}
+.chart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chart .pt{stroke:var(--bg-panel);stroke-width:2}
+.chart .hit{fill:transparent;cursor:crosshair}
+.chart .xh{stroke:var(--ink-faint);stroke-width:1;stroke-dasharray:2 3;opacity:0}
+.tip{position:fixed;pointer-events:none;opacity:0;transition:opacity .1s;z-index:50;
+  background:var(--bg-raised);border:1px solid var(--line);border-radius:3px;
+  box-shadow:var(--shadow);padding:9px 11px;font-family:ui-monospace,Menlo,monospace;
+  font-size:11px;color:var(--ink);min-width:168px}
+.tip .th{color:var(--ink-faint);font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+  margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.tip .r{display:flex;align-items:center;gap:8px;justify-content:space-between;margin-top:3px}
+.tip .r span{display:inline-flex;align-items:center;gap:7px;color:var(--ink-dim)}
+.tip .r b{font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
+
+/* ── Callouts ── */
+.call{border:1px solid var(--line);border-left:3px solid var(--accent);
+  background:var(--bg-panel);border-radius:0 3px 3px 0;padding:16px 20px;margin:22px 0}
+.call.neg{border-left-color:var(--neg)}
+.call.warn{border-left-color:var(--warn)}
+.call .ct{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-faint);margin-bottom:9px}
+.call p:last-child{margin-bottom:0}
+
+/* ── Falsified-hypotheses grid ── */
+.corr{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.corr .row{background:var(--bg-panel);padding:17px 20px;display:grid;
+  grid-template-columns:82px 1fr;gap:18px;align-items:start}
+.corr .row .st{font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--neg);border:1px solid var(--neg);
+  background:var(--neg-soft);border-radius:2px;padding:3px 0;text-align:center;margin-top:2px}
+.corr .row .cl{font-weight:600;margin-bottom:6px;font-size:14px}
+.corr .row .cb{font-size:13px;color:var(--ink-dim);line-height:1.55}
+.corr .row .cb b{color:var(--ink);font-weight:600}
+
+/* ── Files ── */
+.files{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:var(--bg-sunken);
+  border:1px solid var(--line);border-radius:3px;padding:18px 20px;overflow-x:auto;color:var(--ink-dim)}
+.files b{color:var(--ink);font-weight:600}
+.files .c{color:var(--ink-faint)}
+footer{border-top:1px solid var(--line);padding-top:24px;margin-top:64px;
+  font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-faint);line-height:1.7}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+@media (max-width:620px){
+  .shell{padding:0 16px 64px} header{padding-top:36px}
+  .corr .row{grid-template-columns:1fr;gap:10px}
+  .corr .row .st{justify-self:start;padding:3px 10px}
+}
+</style>
+
+<div class="shell">
+<header>
+  <p class="eyebrow">SpectralFM · label-probe study · branch label-regression-dev</p>
+  <h1>Where the label signal survives the backbone</h1>
+  <p class="lede">A rebuild of the <code>parameter_0</code> regression eval, probing every stage
+  of the forward pass on the full labeled set (<strong>n=4,716 spectra</strong>) with a probe
+  panel that includes PLS alongside OLS, Ridge and RidgeCV. <strong>Raw input, probed correctly,
+  beats the backbone's own transformer output at every component count tested</strong> — 1, 2, 3,
+  7 and 12 — and the gap as a fraction of the ceiling is worst exactly where deployment is most
+  likely to sit: 1 to 3 components.</p>
+  <div class="meta">
+    <span><b>checkpoint</b> runai_long_train_2026-02-25</span>
+    <span><b>n</b> 4,716 spectra</span>
+    <span><b>components</b> 12 unique</span>
+    <span><b>protocol</b> repeated shuffled 5-fold ×5</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">1-comp: backbone vs input</div><div class="v neg">−0.18</div>
+    <div class="d">Post-transformer 0.645 vs raw input's ceiling 0.825 (n=4,716). The backbone does not beat raw input at any component count tested.</div></div>
+  <div class="tile"><div class="k">Signal kept</div><div class="v">78–95%</div>
+    <div class="d">Recovery ratio against the raw-input ceiling, rising from 78% at 1-comp to 95% at 12-comp (n=4,716).</div></div>
+  <div class="tile"><div class="k">Probe choice alone</div><div class="v neg">0.27</div>
+    <div class="d">R² swing at 1-comp (n=4,716) from the probe, not the data. Split noise is 0.0005 — three orders smaller.</div></div>
+  <div class="tile"><div class="k">Viable at 20 labels?</div><div class="v neg">Barely</div>
+    <div class="d">Only TabPFN clears the mean predictor (R²≈0.10–0.13, n_train=20). Every conventional probe fails.</div></div>
+</div>
+
+<section id="repro">
+  <div class="sec-head"><span class="sec-n">01</span><h2>The old numbers reproduce exactly</h2>
+    <span class="tag">credibility check</span></div>
+  <div class="prose">
+    <p>Before probing anything further, the new code had to reproduce the old result. Running the
+    repo's own loader and probe at the historical settings — <strong>n_train=1,000</strong> of the
+    4,716 available spectra, unshuffled folds, a single RidgeCV — returns the recorded values to
+    four decimal places.</p>
+    <p><strong>The old pipeline was not buggy.</strong> It was under-powered: 21% of the available
+    data, and one probe out of a much wider field.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Legacy protocol, reproduced <span class="n">· n_train=1,000</span></caption>
+    <thead><tr><th>components</th><th>raw input</th><th>z-scored input</th><th>post-transformer</th><th>recorded (TASKS.md)</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>0.3691</td><td class="hl">0.3772</td><td class="hl">0.4412</td><td class="dim">0.3772 / 0.4412</td></tr>
+      <tr><td>2</td><td>0.7649</td><td class="hl">0.7076</td><td class="hl">0.4754</td><td class="dim">0.7060 / 0.4754</td></tr>
+      <tr><td>3</td><td>0.8235</td><td class="hl">0.7565</td><td class="hl">0.5062</td><td class="dim">0.7568 / 0.5062</td></tr>
+    </tbody></table></div>
+</section>
+
+<section id="stages">
+  <div class="sec-head"><span class="sec-n">02</span><h2>Signal across the forward pass</h2>
+    <span class="tag">step 1 · n=4,716</span></div>
+  <div class="prose">
+    <p>Four taps (plus a post-LayerNorm diagnostic) &times; five component counts &times; a probe
+    panel of OLS, Ridge, RidgeCV and PLS, best-of-panel reported, on the full <strong>n=4,716</strong>
+    labeled set. PLS matters specifically for raw input: it is a covariance-seeking reducer that
+    reaches signal RidgeCV's isotropic shrinkage structurally cannot (§03). The <code>input(z)</code>,
+    post-FE and post-projection columns below use the OLS/Ridge/RidgeCV panel only — a PLS check at
+    1 and 3 components (§03) found comparably large gains there too, not yet extended to every
+    component count.</p>
+  </div>
+
+  <figure>
+    <div class="fig-t">R² by pipeline stage, per component count</div>
+    <div class="fig-s">Best-of-panel out-of-fold R², n=4,716. Every line declines from raw input
+      through the pipeline — the backbone never adds signal beyond what a correctly-probed raw
+      input already contains.</div>
+    <svg class="chart" id="cA" viewBox="0 0 780 330" role="img"
+      aria-label="Line chart of R-squared across six pipeline stages for five component counts. All five lines decline from a raw-input maximum through to post-transformer, most sharply at 1 component (0.825 down to 0.645)."></svg>
+    <div class="legend" id="lA"></div>
+  </figure>
+
+  <div class="tw"><table>
+    <caption>Step 1 — best-of-panel R² <span class="n">· n=4,716</span></caption>
+    <thead><tr><th>comp</th><th>raw input</th><th>input (z)</th><th>post-FE</th><th>post-FE&nbsp;LN</th><th>post-proj</th><th>post-transformer</th><th>recovery</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="hl">0.825</td><td>0.468</td><td>0.538</td><td>0.567</td><td>0.539</td><td>0.645</td><td>78%</td></tr>
+      <tr><td>2</td><td class="hl">0.939</td><td>0.757</td><td>0.753</td><td>0.762</td><td>0.754</td><td>0.763</td><td>81%</td></tr>
+      <tr><td>3</td><td class="hl">0.969</td><td>0.814</td><td>0.791</td><td>0.789</td><td>0.789</td><td>0.793</td><td>82%</td></tr>
+      <tr><td>7</td><td class="hl">0.993</td><td>0.924</td><td>0.896</td><td>0.896</td><td>0.893</td><td>0.866</td><td>87%</td></tr>
+      <tr><td>12</td><td class="hl">0.999</td><td>0.980</td><td>0.954</td><td>0.952</td><td>0.949</td><td>0.945</td><td>95%</td></tr>
+    </tbody></table></div>
+
+  <div class="call neg">
+    <div class="ct">what to quote</div>
+    <p>There is no component count at which the backbone beats correctly-probed raw input.
+    <strong>Recovery rises monotonically with component count, from 78% at 1-comp to 95% at
+    12-comp</strong> — the backbone keeps the smallest fraction of the signal precisely where the
+    client's deployment constraint (1–3 labeled components) puts the most weight.</p>
+  </div>
+</section>
+
+<section id="why-pls">
+  <div class="sec-head"><span class="sec-n">03</span><h2>Why raw input needs PLS, not RidgeCV</h2>
+    <span class="tag">n=4,716 · 5-fold CV, PLS fitted inside each fold</span></div>
+  <div class="prose">
+    <p>Raw-input feature matrices are severely ill-conditioned — condition number ≈10⁹–10¹⁰ at
+    every component count — because adjacent spectral samples are highly collinear. RidgeCV's
+    isotropic shrinkage (<code>XᵀX + αI</code>) penalizes low-singular-value directions the
+    hardest, and this raw-input signal lives exactly in the near-degenerate directions that
+    collinearity creates. PLS doesn't shrink by singular value — it selects directions by
+    covariance with the label — so it reaches the signal directly.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Raw input vs. transformer output, both properly cross-validated <span class="n">· n=4,716, 5-fold CV</span></caption>
+    <thead><tr><th>comp</th><th>raw input (PLS)</th><th>post-transformer (best of RidgeCV/PLS)</th><th>gap</th><th>recovery</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="hl">0.825</td><td>0.645</td><td class="lose">−0.180</td><td>78%</td></tr>
+      <tr><td>2</td><td class="hl">0.939</td><td>0.763</td><td class="lose">−0.176</td><td>81%</td></tr>
+      <tr><td>3</td><td class="hl">0.969</td><td>0.793</td><td class="lose">−0.176</td><td>82%</td></tr>
+      <tr><td>7</td><td class="hl">0.993</td><td>0.866</td><td class="lose">−0.127</td><td>87%</td></tr>
+      <tr><td>12</td><td class="hl">0.999</td><td>0.945</td><td class="lose">−0.054</td><td>95%</td></tr>
+    </tbody></table></div>
+  <div class="prose">
+    <p>This is not a numerically fragile result. Three checks, all on the full <strong>n=4,716</strong>
+    set:</p>
+    <ul>
+      <li><strong>dtype-invariant:</strong> identical to 4 decimal places under float32 and float64,
+      at every k tested (PLS's NIPALS fit, unlike a direct matrix solve, doesn't depend on
+      precision here).</li>
+      <li><strong>Stable across resampling:</strong> R²=0.8245±0.0008 (1-comp, k=64) and
+      R²=0.9690±0.0002 (3-comp, k=128) across 8 independent fold-seed draws, all on n=4,716.</li>
+      <li><strong>Shuffled-label canary:</strong> permuting the labels and re-running the identical
+      fold-internal fit collapses every cell tested to ≈0 or below (e.g. 3-comp k=128: −0.080 on
+      shuffled labels vs +0.969 on real ones) — the signal is real, not a supervised-projection leak.</li>
+    </ul>
+    <p>Scope: the <code>input(z)</code>, post-FE and post-projection columns in §02 are spot-checked
+    with PLS at 1 and 3 components only (both show comparably large gains — e.g. z-scored input at
+    1-comp moves from 0.468 to 0.771) and have not been re-swept at every component count. Whether
+    this also changes the few-shot numbers in §06 (n_train≤100) is untested.</p>
+  </div>
+</section>
+
+<section id="probes">
+  <div class="sec-head"><span class="sec-n">04</span><h2>No exploitable non-linearity</h2>
+    <span class="tag">step 2 · n=4,716</span></div>
+  <div class="prose">
+    <p>XGBoost loses to the best linear probe in <strong>all 30 stage &times; component cells</strong>,
+    by 0.165 to 0.410 R².</p>
+    <p>Compared against a fixed, untuned <code>Ridge(alpha=1.0)</code> instead, XGBoost appears to
+    <em>win</em> at raw input (+0.173 at 2-comp) — an artifact of a weak baseline. Against the
+    actual best linear probe it loses everywhere.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>ΔR² (XGBoost − baseline) · negative = XGBoost loses <span class="n">· n=4,716</span></caption>
+    <thead><tr><th>comp</th><th colspan="2">vs fixed Ridge(1.0)</th><th colspan="2">vs best linear probe</th></tr>
+      <tr><th></th><th>raw input</th><th>transformer</th><th>raw input</th><th>transformer</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="dim">+0.001</td><td class="lose">−0.042</td><td class="lose">−0.202</td><td class="lose">−0.359</td></tr>
+      <tr><td>2</td><td class="win">+0.173</td><td class="lose">−0.090</td><td class="lose">−0.165</td><td class="lose">−0.299</td></tr>
+      <tr><td>3</td><td class="win">+0.080</td><td class="lose">−0.127</td><td class="lose">−0.210</td><td class="lose">−0.329</td></tr>
+      <tr><td>7</td><td class="win">+0.122</td><td class="lose">−0.181</td><td class="lose">−0.168</td><td class="lose">−0.377</td></tr>
+      <tr><td>12</td><td class="lose">−0.049</td><td class="lose">−0.298</td><td class="lose">−0.196</td><td class="lose">−0.410</td></tr>
+    </tbody></table></div>
+  <div class="prose">
+    <p class="dim" style="font-size:13px">Caveat on how far this generalises: it shows
+    <em>axis-aligned tree splits</em> don't help — a weak inductive bias for smooth spectral
+    data. It is weaker evidence about models with different biases, and TabPFN does behave
+    differently in the few-shot regime (§06).</p>
+  </div>
+</section>
+
+<section id="prep">
+  <div class="sec-head"><span class="sec-n">05</span><h2>Preprocessing and feature vector</h2>
+    <span class="tag">steps 3 &amp; 4 · n=4,716</span></div>
+  <div class="prose">
+    <h3>Z-score at one component. Don't at two or three.</h3>
+    <p>The cost of per-sample z-scoring <strong>flips sign</strong>. The mechanism is clean:
+    z-scoring destroys <em>cross-component</em> scale relationships, which don't exist when
+    there is only one component — there it merely improves conditioning.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Cost of z-scoring (raw R² − z-scored R²) <span class="n">· n=4,716</span></caption>
+    <thead><tr><th>components</th><th>1</th><th>2</th><th>3</th><th>7</th><th>12</th></tr></thead>
+    <tbody><tr><td>cost</td><td class="win">−0.060</td><td class="lose">+0.074</td>
+      <td class="lose">+0.053</td><td>+0.011</td><td>+0.009</td></tr></tbody></table></div>
+  <div class="prose">
+    <h3>At the embedding stage, plain concatenation is fine</h3>
+    <p>PLS is a <em>supervised</em> projection: it must be fitted inside each cross-validation
+    fold, not on the full dataset before cross-validating — fitting on everything lets the
+    projection see test labels (measured leak: +0.083 to +0.090 R² at k=64, growing with k).
+    Fitted correctly, at the transformer stage PLS does not beat plain concatenation:</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Transformer stage — PLS fitted inside the fold <span class="n">· n=4,716</span></caption>
+    <thead><tr><th>k</th><th>1-comp</th><th>3-comp</th></tr></thead>
+    <tbody>
+      <tr><td>16</td><td>0.378</td><td>0.525</td></tr>
+      <tr><td>64</td><td>0.620</td><td>0.764</td></tr>
+      <tr><td><b>96</b></td><td class="hl">0.652</td><td class="hl">0.789</td></tr>
+      <tr><td>128</td><td>0.634</td><td class="hl">0.789</td></tr>
+      <tr><td>192</td><td>0.585</td><td>0.773</td></tr>
+      <tr><td>256</td><td>0.562</td><td class="dim">—</td></tr>
+      <tr><td><b>plain concat</b></td><td><b>0.630</b></td><td><b>0.793</b></td></tr>
+      <tr><td><b>PLS gain over concat</b></td><td>+0.022</td><td class="lose">−0.004</td></tr>
+    </tbody></table></div>
+  <div class="prose">
+    <p>The optimum is <strong>k≈96–128</strong>, and even there PLS gives only a marginal gain at
+    one component and <strong>none at three</strong>. Use plain concatenation for the embedding.
+    At raw input, by contrast, PLS is required to reach the input's true ceiling — §03.</p>
+    <p>Supervised reduction (PLS) does beat unsupervised reduction (PCA) at small k (1-comp,
+    k=16: 0.378 vs 0.204), but the two converge as k grows — by k=256 PCA has caught up
+    (0.562 vs 0.576) as PLS decays toward OLS-on-full-features.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Unsupervised reduction (PCA), for reference <span class="n">· n=4,716</span></caption>
+    <thead><tr><th>variant</th><th>1-comp</th><th>3-comp</th><th>12-comp</th></tr></thead>
+    <tbody>
+      <tr><td>PCA-256</td><td>0.576</td><td>0.566</td><td class="lose">0.716</td></tr>
+      <tr><td>PCA-64</td><td>0.368</td><td class="dim">—</td><td class="dim">—</td></tr>
+      <tr><td>PCA-20</td><td class="lose">0.241</td><td class="lose">0.311</td><td class="dim">—</td></tr>
+    </tbody></table></div>
+</section>
+
+<section id="fewshot">
+  <div class="sec-head"><span class="sec-n">06</span><h2>The 20-label question</h2>
+    <span class="tag">step 5 · client constraint</span></div>
+  <div class="prose">
+    <p>The client expects <strong>~20 labeled samples at most</strong> in the real setting. §01–§05
+    measure how much signal a probe recovers given all 4,716 labels — a question about the
+    representation, not about sample efficiency. This section changes the protocol: repeated
+    random subsampling with <strong>100 draws per cell</strong>, drawing <code>n_train</code>
+    labeled spectra from the 4,716-spectrum pool at a time, low-capacity probes, and distributions
+    rather than point estimates (k-fold degenerates at n_train=20).</p>
+    <p><strong>Conventional probes cannot do it.</strong> Ridge, PCA+ridge, PLS and k-NN all fail
+    to beat predicting the mean at small n_train; the mean predictor is frequently the <em>best</em>
+    of them. TabPFN changes that — it is the only probe that reliably clears the floor.</p>
+  </div>
+
+  <figure>
+    <div class="fig-t">Label-efficiency curve — 3 components</div>
+    <div class="fig-s">Median held-out R² over 100 random training draws per n_train, best probe
+      per cell. Everything below the dashed line is worse than predicting the mean. The middle
+      stages (post-FE, post-projection) sit between the z-scored input and transformer lines and
+      are omitted for legibility — see the table.</div>
+    <svg class="chart" id="cB" viewBox="0 0 780 320" role="img"
+      aria-label="Line chart of median held-out R-squared against number of labeled training samples, for raw input, z-scored input and post-transformer at three components. All three are at or below zero until 20 samples, then rise; z-scored input reaches 0.404 at 100 samples while post-transformer reaches 0.279."></svg>
+    <div class="legend" id="lB"></div>
+  </figure>
+
+  <div class="tw"><table>
+    <caption>Median held-out R² by labeled-sample budget · 3 components <span class="n">· n_train shown in header, 100 draws each</span></caption>
+    <thead><tr><th>stage</th><th>n=10</th><th>n=15</th><th>n=20</th><th>n=30</th><th>n=50</th><th>n=100</th></tr></thead>
+    <tbody>
+      <tr><td>raw input</td><td class="lose">+0.001</td><td class="lose">−0.023</td><td>+0.098</td><td>+0.082</td><td>+0.222</td><td>+0.244</td></tr>
+      <tr><td>input (z-scored)</td><td class="lose">−0.036</td><td class="lose">−0.023</td><td>+0.072</td><td>+0.151</td><td class="hl">+0.284</td><td class="hl">+0.404</td></tr>
+      <tr><td>post-FE</td><td class="lose">−0.050</td><td class="lose">−0.023</td><td>+0.036</td><td>+0.029</td><td>+0.188</td><td>+0.302</td></tr>
+      <tr><td>post-projection</td><td class="lose">−0.050</td><td class="lose">−0.023</td><td>+0.027</td><td>+0.020</td><td>+0.182</td><td>+0.304</td></tr>
+      <tr><td>post-transformer</td><td class="lose">−0.039</td><td class="lose">−0.023</td><td>+0.017</td><td class="lose">−0.005</td><td>+0.130</td><td>+0.279</td></tr>
+    </tbody></table></div>
+
+  <div class="tw"><table>
+    <caption>At n_train=20 exactly — reliability is the number that matters <span class="n">· 100 draws per row</span></caption>
+    <thead><tr><th>configuration</th><th>best probe</th><th>median R²</th><th>draws beating the mean</th></tr></thead>
+    <tbody>
+      <tr><td>2-comp, z-scored input</td><td>tabpfn_pca10</td><td class="hl">+0.133</td><td class="hl">90%</td></tr>
+      <tr><td>3-comp, raw input</td><td>tabpfn_pca10</td><td>+0.098</td><td>90%</td></tr>
+      <tr><td>1-comp, raw input</td><td>tabpfn_pca10</td><td>+0.080</td><td>75%</td></tr>
+      <tr><td>every non-TabPFN probe, any stage</td><td class="dim">ridge / pls / knn / dummy</td>
+        <td class="lose">−0.01 … −0.85</td><td class="lose">0–34%</td></tr>
+    </tbody></table></div>
+
+  <div class="call warn">
+    <div class="ct">recommendation for the client conversation</div>
+    <p>At n_train=20, results are <strong>marginally viable</strong> — TabPFN on raw 2–3 component
+    input, R²≈0.10–0.13, working ~90% of the time — and <strong>not viable with any conventional
+    probe</strong>. But R²≈0.1 is a weak model. The curves show n_train=50–100 is where this
+    becomes real (0.284 → 0.404 at 3-comp z-scored). The honest ask is to negotiate toward 50–100
+    labels, not to accept 20.</p>
+    <p>Not tested, and probably the biggest remaining win: <strong>which</strong> 20 spectra get
+    labeled. These draws are random; stratified or active selection would likely beat them.</p>
+  </div>
+
+  <div class="call">
+    <div class="ct">raw input wins in both regimes, by very different margins</div>
+    <p>At n=4,716 (all labels, §02–§03) raw input beats the embedding by 0.05–0.18 R², largest as a
+    recovery-ratio gap at 1-comp. At n_train≤50 the same ranking holds but the margin is far
+    larger — <strong>roughly 6&times;</strong> (3-comp, n_train=50, matched PCA-50: 0.458 raw vs
+    0.076 transformer). The embedding's disadvantage compounds at low sample sizes: it is both
+    less label-informative in aggregate (§02–§03) and less label-<em>efficient</em> few-shot,
+    which is exactly the distinction the client's constraint was probing.</p>
+  </div>
+</section>
+
+<section id="falsified">
+  <div class="sec-head"><span class="sec-n">07</span><h2>Hypotheses this study falsified</h2>
+    <span class="tag">including four of mine</span></div>
+  <div class="prose">
+    <p>These are kept rather than deleted: the failed hypotheses constrain the conclusions as
+    much as the confirmed ones.</p>
+  </div>
+  <div class="corr">
+    <div class="row"><div class="st">refuted</div><div>
+      <div class="cl">&ldquo;More data is free R²&rdquo;</div>
+      <div class="cb">False, and it depends on the probe. Over n_train = 500 → 4,716 at 2-comp,
+      <b>OLS degrades 0.735 → 0.665 while RidgeCV improves 0.706 → 0.756</b>. They cross. Any
+      single-n number is a point on a surface, not a constant.</div></div></div>
+    <div class="row"><div class="st">refuted</div><div>
+      <div class="cl">&ldquo;Cross-component ratios are the dominant carrier&rdquo;</div>
+      <div class="cb">Too strong. Hand-engineered features — per-component moments plus pairwise
+      differences and log-energy ratios — recover only <b>0.398 of raw input's 0.863</b>, and a
+      catastrophic <b>0.057 of the transformer's 0.793</b> (n=4,716). Scale information matters
+      (z-scoring costs 0.05–0.07) but the signal is distributed across the full spectral shape.</div></div></div>
+    <div class="row"><div class="st">refuted</div><div>
+      <div class="cl">&ldquo;Components are never exchangeable&rdquo; — over-generalised</div>
+      <div class="cb">The R²≈0.006 collapse is real for pooling <b>raw signal</b> per-component into
+      one shared model — which reproduced the historical <code>bf94422</code> bug from first
+      principles and explained its mechanism. But averaging <b>embeddings</b> across components
+      gives 0.661 at 3-comp (n=4,716): lossy, not collapse. The finding does not transfer.</div></div></div>
+    <div class="row"><div class="st">refuted</div><div>
+      <div class="cl">&ldquo;PCA-10 is why TabPFN failed on embeddings&rdquo;</div>
+      <div class="cb">A reasonable hypothesis — the ceiling diagnostic showed PCA-10 retains only
+      ~11% of the transformer's label signal versus 77% for raw input. Tested directly at k=50,
+      where the transformer ceiling rises to 0.333: <b>the gap did not close</b> (n_train=50, §06).
+      The embedding is genuinely less label-efficient, across two independent reductions.</div></div></div>
+    <div class="row"><div class="st">revised</div><div>
+      <div class="cl">&ldquo;T8's A/B was decided inside the noise&rdquo;</div>
+      <div class="cb">An early assumption, and wrong. Split noise is <b>0.0005</b> (n=4,716) —
+      resolvable ΔR² is ~0.001, so a 0.03 margin sits ~30&times; above it. Systematics
+      (probe 0.27, sample size 0.07, normalisation 0.06–0.17) dominate by three orders of
+      magnitude. The value of this work is a <b>pinned protocol</b>, not error bars.</div></div></div>
+  </div>
+</section>
+
+<section id="next">
+  <div class="sec-head"><span class="sec-n">08</span><h2>What to do next</h2>
+    <span class="tag">recommendations</span></div>
+  <div class="prose">
+    <ol>
+      <li><strong>Update T6 and ARCHITECTURE.md.</strong> Replace &ldquo;emb R²=0.44 beats input
+      0.38&rdquo; with the §02/§03 numbers: raw input, probed with PLS, beats the embedding at
+      every component count (n=4,716), worst as a recovery fraction at 1-comp (78%).</li>
+      <li><strong>Re-measure the reconstruction-trained backbones under this protocol.</strong>
+      Their &ldquo;≈0&rdquo; scores come from the same under-powered protocol that misjudged
+      <em>this</em> backbone's standing relative to raw input. They live on the RunAI PVC, not
+      Geoffrey, so this was out of scope — but until it is done, the T6 <em>ranking</em> that the
+      whole T8–T12 ladder was built on rests on measurements now known to be unreliable.
+      Highest-value follow-up.</li>
+      <li><strong>Pin one protocol before comparing checkpoints.</strong> Probe choice alone moves
+      R² by 0.27 (n=4,716, §02); comparing numbers measured under different unstated settings is
+      the real hazard, not noise.</li>
+      <li><strong>Use PLS to probe raw input; use plain concatenation for the embedding.</strong>
+      Add component-count-dependent z-scoring (z-score at 1-comp only). In the few-shot regime
+      (n_train≤100), use raw input over the embedding regardless of probe.</li>
+      <li><strong>Re-sweep the input(z)/post-FE/post-projection columns with PLS</strong> at every
+      component count, and check whether PLS changes the few-shot numbers in §06 — both flagged
+      as open in §03.</li>
+      <li><strong>Fold the orphaned 2026-08-21 numbers into TASKS.md</strong> — they currently
+      exist only in a YAML comment and a commit message.</li>
+    </ol>
+    <h3>Scope — what this does not cover</h3>
+    <ul>
+      <li>Only the Feb-25 SSL backbone. No reconstruction-trained checkpoints (PVC-only).</li>
+      <li>Pooling schemes (H4) and the trained attention-pooling head were not run — both need
+      re-extraction at other poolings.</li>
+      <li>TabPFN excluded at 12-comp by compute budget: the full grid measured at ~29 GPU-hours.</li>
+      <li>Few-shot draws are random. Stratified or active selection is untested.</li>
+      <li>Distribution shift and calibration untested.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="files">
+  <div class="sec-head"><span class="sec-n">09</span><h2>Where everything lives</h2>
+    <span class="tag">artifacts</span></div>
+  <div class="files">
+<b>code/eval_outputs/label_probe/2026-09-03_full_run/</b>
+  SUMMARY.md                          <span class="c">← entry point</span>
+  step1..step5_REPORT.md              <span class="c">per-step detail</span>
+  step2_addendum_vs_best_linear.md    <span class="c">read with step2 — it is misleading alone</span>
+  step4_deployment_axes.md            <span class="c">1/3-comp axes (the deployment regime)</span>
+  step5_tabpfn_pca50.md               <span class="c">the refuted PCA-confound test</span>
+  step6_pls_correction.md             <span class="c">§03/§05's full PLS methodology writeup</span>
+  label_reg_stages.png                <span class="c">headline figure</span>
+  label_reg_true_vs_pred_grid.png     <span class="c">30-panel true-vs-pred grid</span>
+  label_efficiency_{1,2,3,12}comp.png
+<b>code/eval/label_probe/</b>              <span class="c">8 modules · CLI: python -m eval.label_probe --step 1..5</span>
+<b>plan.md</b>                             <span class="c">design + all pre-implementation evidence</span>
+<b>TASKS.md</b> → T13                      <span class="c">ledger entry</span>
+  </div>
+</section>
+
+<footer>
+  Reproduce: <code>cd code &amp;&amp; python -m eval.label_probe --step 1 --checkpoint &lt;ckpt&gt;
+  --labeled_data_dir &lt;dir&gt; --output_dir &lt;out&gt;</code> — steps 2–5 reuse step 1's cached
+  representations and are CPU-only.<br>
+  Every fit is pinned to one BLAS/OpenMP thread via threadpoolctl; on a shared host at load ~68/40
+  cores, unpinned fits stalled for seconds.
+</footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+/* Charts are hand-built SVG: five ordered series (component count) on a validated
+   sequential ramp, three identity series (stage) on a validated categorical triple.
+   Both get a crosshair + shared tooltip, a legend, and direct end-labels. */
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const tip = document.getElementById('tip');
+
+const STAGES = ['Raw input','Input (z)','Post-FE','Post-FE LN','Post-proj','Post-transf.'];
+const A = [
+  {k:'1-comp',  v:[0.825,0.468,0.538,0.567,0.539,0.645], c:'--seq1'},
+  {k:'2-comp',  v:[0.939,0.757,0.753,0.762,0.754,0.763], c:'--seq2'},
+  {k:'3-comp',  v:[0.969,0.814,0.791,0.789,0.789,0.793], c:'--seq3'},
+  {k:'7-comp',  v:[0.993,0.924,0.896,0.896,0.893,0.866], c:'--seq4'},
+  {k:'12-comp', v:[0.999,0.980,0.954,0.952,0.949,0.945], c:'--seq5'},
+];
+const NT = [10,15,20,30,50,100];
+const B = [
+  {k:'Raw input',        s:'Raw input',   v:[0.001,-0.023,0.098,0.082,0.222,0.244], c:'--cat1'},
+  {k:'Input (z-scored)', s:'Input (z)',   v:[-0.036,-0.023,0.072,0.151,0.284,0.404], c:'--cat2'},
+  {k:'Post-transformer', s:'Transformer', v:[-0.039,-0.023,0.017,-0.005,0.130,0.279], c:'--cat3'},
+];
+
+function draw(svgId, legId, series, xlabels, opts){
+  const svg = document.getElementById(svgId), leg = document.getElementById(legId);
+  const W=780, H=opts.h, m={t:14,r:opts.r||96,b:44,l:46};
+  const iw=W-m.l-m.r, ih=H-m.t-m.b;
+  const [y0,y1]=opts.y, n=xlabels.length;
+  const X = i => opts.log ? m.l + iw*(Math.log(xlabels[i])-Math.log(xlabels[0]))/(Math.log(xlabels[n-1])-Math.log(xlabels[0]))
+                          : m.l + iw*i/(n-1);
+  const Y = v => m.t + ih*(1-(v-y0)/(y1-y0));
+  let s='';
+  opts.ticks.forEach(t=>{
+    s+=`<line class="${t===0&&y0<0?'zero':'grid'}" x1="${m.l}" y1="${Y(t)}" x2="${m.l+iw}" y2="${Y(t)}"/>`;
+    s+=`<text x="${m.l-9}" y="${Y(t)+3.5}" text-anchor="end">${t.toFixed(opts.dp)}</text>`;
+  });
+  s+=`<line class="ax" x1="${m.l}" y1="${m.t+ih}" x2="${m.l+iw}" y2="${m.t+ih}"/>`;
+  xlabels.forEach((l,i)=>{
+    s+=`<text class="albl" x="${X(i)}" y="${m.t+ih+18}" text-anchor="${opts.log?'middle':(i===0?'start':i===n-1?'end':'middle')}">${l}</text>`;
+  });
+  s+=`<text class="albl" x="${m.l+iw/2}" y="${H-6}" text-anchor="middle">${opts.xt}</text>`;
+  series.forEach((sr,si)=>{
+    const col=css(sr.c);
+    s+=`<path class="ln" d="${sr.v.map((v,i)=>`${i?'L':'M'}${X(i)} ${Y(v)}`).join(' ')}" stroke="${col}"/>`;
+    sr.v.forEach((v,i)=>{ s+=`<circle class="pt" cx="${X(i)}" cy="${Y(v)}" r="3.4" fill="${col}"/>`; });
+    s+=`<text class="dlbl" x="${m.l+iw+9}" y="${Y(sr.v[n-1])+3.5}" fill="${col}">${sr.s||sr.k}</text>`;
+  });
+  s+=`<line class="xh" id="${svgId}xh" x1="0" y1="${m.t}" x2="0" y2="${m.t+ih}"/>`;
+  s+=`<rect class="hit" x="${m.l-14}" y="${m.t}" width="${iw+28}" height="${ih}"/>`;
+  svg.innerHTML=s;
+  leg.innerHTML=series.map(sr=>`<span><i class="sw" style="background:${css(sr.c)}"></i>${sr.k}</span>`).join('');
+
+  const xh=document.getElementById(svgId+'xh');
+  const hit=svg.querySelector('.hit');
+  const near = px => { let b=0,bd=1e9; for(let i=0;i<n;i++){const d=Math.abs(X(i)-px); if(d<bd){bd=d;b=i;}} return b; };
+  hit.addEventListener('mousemove', e=>{
+    const r=svg.getBoundingClientRect(), px=(e.clientX-r.left)*(W/r.width);
+    const i=near(px);
+    xh.setAttribute('x1',X(i)); xh.setAttribute('x2',X(i)); xh.style.opacity='1';
+    tip.innerHTML=`<div class="th">${opts.tipT}: ${xlabels[i]}</div>`+
+      series.map(sr=>`<div class="r"><span><i class="sw" style="background:${css(sr.c)}"></i>${sr.k}</span><b>${sr.v[i]>=0?'+':''}${sr.v[i].toFixed(3)}</b></div>`).join('');
+    tip.style.opacity='1';
+    const tw=tip.offsetWidth, th=tip.offsetHeight;
+    tip.style.left=Math.min(window.innerWidth-tw-10, e.clientX+16)+'px';
+    tip.style.top=Math.max(8, Math.min(window.innerHeight-th-10, e.clientY-th/2))+'px';
+  });
+  hit.addEventListener('mouseleave', ()=>{ tip.style.opacity='0'; xh.style.opacity='0'; });
+}
+
+function render(){
+  draw('cA','lA',A,STAGES,{h:330,y:[0.35,1.02],ticks:[0.4,0.5,0.6,0.7,0.8,0.9,1.0],dp:1,
+    xt:'pipeline stage →',tipT:'stage',log:false});
+  draw('cB','lB',B,NT,{h:320,r:112,y:[-0.09,0.45],ticks:[-0.05,0,0.1,0.2,0.3,0.4],dp:2,
+    xt:'labeled training samples (log scale)',tipT:'labels',log:true});
+}
+render();
+matchMedia('(prefers-color-scheme:dark)').addEventListener('change',render);
+new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+</script>

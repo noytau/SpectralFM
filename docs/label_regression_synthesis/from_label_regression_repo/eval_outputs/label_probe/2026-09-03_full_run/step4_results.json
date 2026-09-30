@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "checkpoint": "/mnt5/noy/SpectralFM/checkpoints/runai/runai_long_train_2026-02-25_13-46-46.pt",
+    "max_samples": 5000,
+    "comps": [
+      0,
+      1,
+      2,
+      3,
+      8,
+      9,
+      14,
+      15,
+      27,
+      28,
+      30,
+      31
+    ],
+    "pooling": "mean",
+    "seed": 42,
+    "n": 4716
+  },
+  "axis1_component_count": {
+    "1": 0.6300961156974808,
+    "2": 0.7528047139145958,
+    "3": 0.7934194290512148,
+    "7": 0.8640027245128489,
+    "12": 0.9378457162425526
+  },
+  "axis2_combination": {
+    "concat": 0.9378457162425526,
+    "mean_over_comps (negative control)": 0.7377670133905997,
+    "concat(mean,std)": 0.9376346952951023,
+    "pairwise_features_only": 0.2742658273741838
+  },
+  "axis3_dimensionality": {
+    "full": 0.9378457162425526,
+    "pca_256": 0.7161134746945312,
+    "pls_64": 0.952297971334945
+  },
+  "historical_default_r2": 0.7528047139145958,
+  "winner_r2": 0.952297971334945,
+  "winner_delta_vs_historical": 0.19949325742034918
+}

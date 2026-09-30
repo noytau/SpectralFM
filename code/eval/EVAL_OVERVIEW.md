@@ -322,6 +322,139 @@ Raw channels are concatenated; embeddings are extracted per component then conca
 - **Figures:** `label_reg_true_vs_pred[_<ckpt>].png` — true-vs-predicted scatter per probe;
   `label_regression_comparison.png` — R² + ΔR² bars across checkpoints.
 
+#### Going deeper — the `label_probe/` study
+
+The eval above answers "embedding or raw?" with one fixed recipe at the full label
+pool. `code/eval/label_probe/` answers it properly: every pipeline block, a search
+over pooling/normalizer/probe, and a label-efficiency ladder down to n_train=10.
+Findings: [`docs/LABEL_REGRESSION_FINDINGS.md`](../../docs/LABEL_REGRESSION_FINDINGS.md).
+
+It is backbone-general — it reads `hidden_states` from any HF-style Transformer, so
+the number and naming of blocks come from the model itself, never a hardcoded layer
+count — and is available two ways:
+
+**Through the runner** (`--evals label_probe`), one command alongside any other eval,
+no `--data_source` needed:
+
+```bash
+python -m eval.runner \
+  --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <labeled_data_dir> \
+  --device cuda --output_dir eval_outputs
+```
+
+**Swapping the backbone** is just a different `--checkpoint_path` / `--checkpoint_mode`
+(including `hf`) — nothing else changes.
+
+**Multiple label sets in one run:** point `--labeled_data_dir` at a parent
+directory instead of one label set -- every directory found under it with its
+own `labels.tsv` is treated as a label set, **at any nesting depth**
+(`campaign1/site_A/labels.tsv` works, not just one level down), and the whole
+study runs once per set with a cross-set comparison table added on top. This
+is for several label sets on the *same* backbone; to line up several
+*backbones*, run once per checkpoint and use `compare.py` below.
+
+Results land under `<output_dir>/label_probe/<label_set_name>/` and are folded into
+`eval_report.html`/`eval_report.md` alongside the run's other evals.
+
+**Standalone** (no runner, one label set, one backbone — same underlying
+`study.run_study`):
+
+```bash
+python -m eval.label_probe \
+  --checkpoint <ckpt> --data <labeled_data_dir> --out_dir <dir> \
+  [--device cuda] [--comps 1 2 3]
+```
+
+Either way, each run records its own `meta.backbone` and `meta.checkpoint`, so runs
+stay self-identifying and can be lined up afterwards:
+
+```bash
+python -m eval.label_probe.compare <out_dir_1> <out_dir_2> ... [-o compare.html]
+```
+
+Outputs per run: `label_probe_results.json` (search + full-pool diagnostics),
+`recipe_panel.json` (label-efficiency ladder), five figures, and a cached
+`bank.npz` (~6 GB, gitignored, reused on rerun). A tables-only HTML view of one run:
+`python -m eval.label_probe.tables_report <out_dir> -o data.html`.
+
+**A directory of separate datasets, run both ways** (e.g. several
+`datasetNNNN/` folders, each with its own `labels.tsv`). Component count
+(`--label_probe_comps`) should be picked to match what every dataset in the
+tree actually has: `load_labeled_data` keeps only spectra with ALL requested
+raw components present, so requesting more than a thin dataset supports
+silently shrinks it (or empties it to zero) -- `--label_probe_comps 1` is
+the safe default whenever coverage is uneven across the tree, since comp0 is
+normally the one component every spectrum has:
+
+```bash
+# each dataset alone -- one run per subfolder + a cross-set comparison table
+python -m eval.runner --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <parent_dir> \
+  --label_probe_comps 1 --device cuda
+
+# all of them pooled into one study instead -- merge first (symlinks the
+# wavs, concatenates labels.tsv; datasets never collide by filename since
+# each embeds its own numeric id), then point at the merge like any single
+# label set
+python -m eval.label_probe.merge_label_sets <parent_dir> <merged_dir>
+python -m eval.runner --checkpoint_mode file --checkpoint_path <ckpt> \
+  --evals label_probe --labeled_data_dir <merged_dir> \
+  --label_probe_comps 1 --device cuda
+```
+
+`resolve_label_sets` (`eval/label_probe/label_sets.py`) silently skips any
+directory with no `labels.tsv`, or an empty one -- both mean "nothing to
+probe here yet" rather than an error.
+
+**Headline scores: nested CV** (`eval/label_probe/nested.py`). Raw input and
+the embedding each pick their block and recipe (6 normalizers × {RidgeCV,
+OLS}) inside every outer training fold. The outer loop is 2× repeated 5-fold,
+the inner loop is 5-fold, and normalizers are fit on training rows only. So no
+score is chosen on the rows that grade it. Every arm shares the same outer
+folds, so differences between arms, or between backbones, get a paired
+bootstrap SD. `run_study` runs it automatically; pass `--nested_jobs N` to run
+the outer folds in parallel. Label sets under 20 spectra are skipped. On runs
+that already exist it works from the cached `bank.npz`, with no GPU:
+
+```bash
+OMP_NUM_THREADS=1 python -m eval.label_probe.nested <run_dir> [<run_dir> ...] --n_jobs 10 --skip_done
+```
+
+This writes `nested_results.json` and `nested_oof.npz` (out-of-fold predictions)
+into each run dir. The 4,716-row `labeled_data` pool takes about
+15 minutes per backbone with 10 jobs; a 700-row pool takes about 1 minute.
+Besides the full block search, the results include each block on its own
+(the depth profile, and the "fixed block" readout: one block chosen in
+advance) and `embedding_top3`: inside each outer fold, the 3 best blocks by
+inner CV, each at its own best recipe, refit and averaged.
+
+**Label efficiency under nested CV** (`eval/label_probe/nested_ladder.py`).
+At each label budget, random subsets of the outer training fold are drawn.
+The recipe is chosen by inner CV on that subset only, then scored on the
+held-out fold. Raw input and one fixed block are compared on the same
+subsets:
+
+```bash
+OMP_NUM_THREADS=1 python -m eval.label_probe.nested_ladder <run_dir> [...] \
+  (--block layer0 | --block_from <labeled_data_run_dir>) --n_jobs 8
+```
+
+This writes `nested_ladder.json`. `--block_from` picks that run's best single block.
+
+**Backbone-comparison report.** A single HTML page comparing every backbone
+with raw input and with each other: per set, pooled, depth profile and label
+efficiency. The backbone list and the run-dir naming live at the top of
+`eval/label_probe/backbone_metrics.py`:
+
+```bash
+python -m eval.label_probe.backbone_report eval_outputs -o report.html \
+  [--findings findings.json] [--metrics_out metrics.json]
+```
+
+`--findings` adds written observations per section (keys listed in the
+module docstring); without it the page shows the numbers only.
+
 ### 6. `structured_similarity` — canonical 100-sample panel
 
 **Question:** How does similarity structure evolve through the pipeline stages?
